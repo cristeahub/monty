@@ -36,8 +36,9 @@ Install the `monty` CLI without opam:
 ```
 
 The installer builds with Dune, copies the Monty control room to `~/.local/share/monty`, installs the real binary under that directory, and writes a wrapper at `~/.local/bin/monty`.
-It also writes `MONTY_HOME=~/.local/share/monty` to your shell startup file, such as `~/.zshrc`.
-The wrapper pins `MONTY_HOME` on every invocation, so running `monty` from any directory starts pi in the installed Monty control room and loads its `AGENTS.md`.
+It also writes `MONTY_HOME=~/.local/share/monty` and `MONTY_BRANCH_PREFIX=monty` to your shell startup file, such as `~/.zshrc`.
+If that file already has a non-Monty-managed `MONTY_HOME` setting, the installer asks before overriding it.
+The wrapper pins `MONTY_HOME` and `MONTY_BRANCH_PREFIX` on every invocation, so running `monty` from any directory starts pi in the installed Monty control room and uses the configured worker branch prefix.
 Use another prefix with:
 
 ```sh
@@ -50,10 +51,16 @@ Use another Monty home with:
 ./install.sh --monty-home /path/to/monty-home
 ```
 
+Set your worker branch prefix with:
+
+```sh
+./install.sh --branch-prefix cto
+```
+
 For development, keep the control room in the current checkout and only install the CLI wrapper and binary:
 
 ```sh
-./install.sh --dev-install
+./install.sh --dev-install --branch-prefix cto
 ```
 
 Preview the commands without changing anything:
@@ -116,7 +123,9 @@ Example manifest:
 ```
 
 The manifest can also omit `branch`.
-Monty then derives a safe branch name from the title.
+Monty then derives a safe branch name from the title using the branch prefix.
+The default is `monty`, so `Fix issue 123` becomes `monty/fix-issue-123` for one launch or `monty/01-fix-issue-123` in `launch-many`.
+With `--branch-prefix cto` or `MONTY_BRANCH_PREFIX=cto`, the same task becomes `cto/fix-issue-123` or `cto/01-fix-issue-123`.
 
 ## Dry run
 
@@ -136,6 +145,7 @@ The most important options are available as CLI flags.
 --terminal ghostty|dry-run
 --target tab|window|split
 --worktree always|never
+--branch-prefix PREFIX
 --pi-command COMMAND
 --wt-command COMMAND
 --fork SESSION
@@ -148,6 +158,7 @@ Environment defaults are also supported.
 MONTY_TERMINAL=ghostty
 MONTY_TARGET=tab
 MONTY_WORKTREE=always
+MONTY_BRANCH_PREFIX=cto
 MONTY_PI_COMMAND=pi
 MONTY_WT_COMMAND=wt
 MONTY_HOME=/path/to/monty

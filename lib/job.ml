@@ -9,8 +9,10 @@ type t = {
 let make ?branch ?prompt ~title ~repo ~context () =
   { title; repo; branch; context; prompt }
 
-let branch_or_default ?index job =
-  match job.branch with Some branch -> branch | None -> Slug.branch ?index job.title
+let branch_or_default ?(prefix = "monty") ?index job =
+  match job.branch with
+  | Some branch -> branch
+  | None -> Slug.branch ~prefix ?index job.title
 
 let default_prompt = "Start this task. Read the context first."
 

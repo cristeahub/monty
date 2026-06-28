@@ -27,8 +27,21 @@ let of_title title =
     title;
   Buffer.contents b |> trim_dashes
 
-let branch ?index title =
+let trim_slashes s =
+  let len = String.length s in
+  let left = ref 0 in
+  while !left < len && s.[!left] = '/' do
+    incr left
+  done;
+  let right = ref (len - 1) in
+  while !right >= !left && s.[!right] = '/' do
+    decr right
+  done;
+  if !right < !left then "" else String.sub s !left (!right - !left + 1)
+
+let normalize_prefix prefix = prefix |> String.trim |> trim_slashes
+
+let branch ?(prefix = "monty") ?index title =
   let slug = of_title title in
-  match index with
-  | None -> "monty/" ^ slug
-  | Some index -> Printf.sprintf "monty/%02d-%s" index slug
+  let leaf = match index with None -> slug | Some index -> Printf.sprintf "%02d-%s" index slug in
+  match normalize_prefix prefix with "" -> leaf | prefix -> prefix ^ "/" ^ leaf

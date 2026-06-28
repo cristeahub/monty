@@ -6,6 +6,7 @@ type options = {
   pi_command : string;
   wt_command : string;
   worktree_mode : worktree_mode;
+  branch_prefix : string;
   fork : string option;
   script_dir : string;
 }
@@ -43,7 +44,12 @@ let dry_run ~options ~job ~branch ~repo ~context =
     (Terminal.backend_to_string options.backend)
     (Terminal.target_to_string options.target);
   let pi_options =
-    Pi_command.{ pi_command = options.pi_command; fork = options.fork; script_dir = options.script_dir }
+    Pi_command.{
+      pi_command = options.pi_command;
+      fork = options.fork;
+      script_dir = options.script_dir;
+      branch_prefix = options.branch_prefix;
+    }
   in
   Fmt.pr "[dry-run] pi: %s\n" (Pi_command.build_command ~options:pi_options ~job ~context);
   Ok ()
@@ -51,7 +57,7 @@ let dry_run ~options ~job ~branch ~repo ~context =
 let launch_one ?index options job =
   let repo = Shell.normalize (Shell.abs_path job.Job.repo) in
   let context = Shell.normalize (Shell.abs_path job.Job.context) in
-  let branch = Job.branch_or_default ?index job in
+  let branch = Job.branch_or_default ~prefix:options.branch_prefix ?index job in
   match options.backend with
   | Terminal.Dry_run -> dry_run ~options ~job ~branch ~repo ~context
   | Terminal.Ghostty ->
@@ -64,7 +70,12 @@ let launch_one ?index options job =
         | Always -> Wt.create_or_reuse ~wt_command:options.wt_command ~repo ~branch
       in
       let pi_options =
-        Pi_command.{ pi_command = options.pi_command; fork = options.fork; script_dir = options.script_dir }
+        Pi_command.{
+          pi_command = options.pi_command;
+          fork = options.fork;
+          script_dir = options.script_dir;
+          branch_prefix = options.branch_prefix;
+        }
       in
       let script_path =
         Pi_command.write_launch_script ~options:pi_options ~job ~branch

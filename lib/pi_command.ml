@@ -2,6 +2,7 @@ type options = {
   pi_command : string;
   fork : string option;
   script_dir : string;
+  branch_prefix : string;
 }
 
 let script_filename ~script_dir ~title =
@@ -32,6 +33,7 @@ let write_launch_script ~options ~job ~branch ~source_repo ~workdir ~context =
         "cd " ^ Shell.quote workdir;
         "printf '\\033]0;%s\\007' " ^ Shell.quote job.Job.title;
         "export MONTY_JOB_TITLE=" ^ Shell.quote job.Job.title;
+        "export MONTY_BRANCH_PREFIX=" ^ Shell.quote options.branch_prefix;
         "export MONTY_JOB_BRANCH=" ^ Shell.quote branch;
         "export MONTY_JOB_REPO=" ^ Shell.quote source_repo;
         "export MONTY_JOB_WORKTREE=" ^ Shell.quote workdir;

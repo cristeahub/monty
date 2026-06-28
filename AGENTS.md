@@ -31,7 +31,9 @@ Create `.monty/runs/<run-id>/jobs.json` with this shape:
 
 The `branch` field is optional.
 Prefer setting it when the issue number or task name gives a clear branch name.
-Use `monty/<short-task-name>` branch names.
+Use the configured branch prefix for branch names.
+The default prefix is `monty`, but users may set `MONTY_BRANCH_PREFIX`, for example `cto`.
+When omitting `branch`, Monty derives `<branch-prefix>/<title-slug>` automatically.
 
 After writing the manifest and context files, launch workers with:
 

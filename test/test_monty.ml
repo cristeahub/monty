@@ -6,7 +6,11 @@ let assert_equal label expected actual =
 
 let test_slug () =
   assert_equal "slug" "fix-issue-123" (Slug.of_title "Fix issue #123");
-  assert_equal "branch" "monty/02-fix-issue-123" (Slug.branch ~index:2 "Fix issue #123")
+  assert_equal "branch" "monty/02-fix-issue-123" (Slug.branch ~index:2 "Fix issue #123");
+  assert_equal "custom branch prefix" "cto/02-fix-issue-123"
+    (Slug.branch ~prefix:"cto" ~index:2 "Fix issue #123");
+  assert_equal "trim branch prefix" "cto/02-fix-issue-123"
+    (Slug.branch ~prefix:"/cto/" ~index:2 "Fix issue #123")
 
 let test_shell_quote () =
   assert_equal "quote simple" "'hello'" (Shell.quote "hello");

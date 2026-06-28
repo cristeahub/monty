@@ -9,6 +9,7 @@ refresh_lock=0
 dry_run=0
 write_shell_rc=${MONTY_WRITE_SHELL_RC:-1}
 shell_rc=${MONTY_SHELL_RC:-}
+branch_prefix=${MONTY_BRANCH_PREFIX:-monty}
 
 usage() {
   cat <<'EOF'
@@ -21,6 +22,7 @@ Options:
   --prefix DIR       Install prefix. Default: $HOME/.local
   --monty-home DIR   Monty home. Default: PREFIX/share/monty
   --dev-install      Use the current checkout as MONTY_HOME instead of copying it
+  --branch-prefix P  Branch prefix for generated worker branches. Default: monty
   --refresh-lock     Run dune pkg lock before building
   --shell-rc FILE    Shell startup file to update. Defaults from $SHELL
   --no-shell-rc      Do not write MONTY_HOME to a shell startup file
@@ -32,6 +34,7 @@ Environment:
   MONTY_INSTALL_HOME     Default Monty home
   MONTY_SHELL_RC         Default shell startup file to update
   MONTY_WRITE_SHELL_RC   Set to 0 to skip shell startup file updates
+  MONTY_BRANCH_PREFIX    Default branch prefix for generated worker branches
 
 Examples:
   ./install.sh
@@ -69,6 +72,18 @@ while [ "$#" -gt 0 ]; do
       ;;
     --dev-install)
       dev_install=1
+      shift
+      ;;
+    --branch-prefix)
+      if [ "$#" -lt 2 ]; then
+        echo "install.sh: --branch-prefix requires a prefix" >&2
+        exit 2
+      fi
+      branch_prefix=$2
+      shift 2
+      ;;
+    --branch-prefix=*)
+      branch_prefix=${1#--branch-prefix=}
       shift
       ;;
     --refresh-lock)
@@ -274,6 +289,56 @@ shell_rc_kind() {
   esac
 }
 
+existing_monty_home_assignments() {
+  if [ ! -f "$1" ]; then
+    return 0
+  fi
+
+  awk '
+    function is_monty_home_assignment(line) {
+      return \
+        line ~ /^[[:space:]]*(export[[:space:]]+)?MONTY_HOME[[:space:]]*=/ || \
+        line ~ /^[[:space:]]*(typeset|declare)[[:space:]][^#]*MONTY_HOME[[:space:]]*=/ || \
+        line ~ /^[[:space:]]*set[[:space:]][^#]*[[:space:]]MONTY_HOME([[:space:]]|$)/
+    }
+    $0 == "# >>> monty >>>" { skip = 1; next }
+    $0 == "# <<< monty <<<" { skip = 0; next }
+    skip != 1 && is_monty_home_assignment($0) { print }
+  ' "$1"
+}
+
+confirm_shell_rc_override() {
+  rc_file=$1
+  existing=$2
+
+  if [ -z "$existing" ]; then
+    return 0
+  fi
+
+  printf '\nFound an existing MONTY_HOME setting in %s:\n' "$rc_file"
+  printf '%s\n' "$existing"
+
+  if [ ! -t 0 ]; then
+    printf 'Skipping shell config update because stdin is not interactive.\n'
+    printf 'Set Monty environment manually if needed:\n'
+    printf '  export MONTY_HOME=%s\n' "$(shell_quote "$monty_home")"
+    printf '  export MONTY_BRANCH_PREFIX=%s\n' "$(shell_quote "$branch_prefix")"
+    return 1
+  fi
+
+  printf 'Override it with MONTY_HOME=%s? [y/N] ' "$(shell_quote "$monty_home")"
+  IFS= read -r answer
+  case "$answer" in
+    y|Y|yes|YES|Yes)
+      return 0
+      ;;
+    *)
+      printf 'Skipping shell config update.\n'
+      return 1
+      ;;
+  esac
+}
+
 write_monty_shell_rc() {
   if [ "$write_shell_rc" = 0 ]; then
     return 0
@@ -286,18 +351,39 @@ write_monty_shell_rc() {
 
   rc_dir=$(dirname -- "$rc_file")
   tmp_file=$rc_file.monty.$$
+  existing=$(existing_monty_home_assignments "$rc_file")
 
   if [ "$dry_run" -eq 1 ]; then
-    printf '+ update %s with MONTY_HOME=%s\n' "$(shell_quote "$rc_file")" "$(shell_quote "$monty_home")"
+    if [ -n "$existing" ]; then
+      printf '+ would ask before overriding existing MONTY_HOME in %s\n' "$(shell_quote "$rc_file")"
+    fi
+    printf '+ update %s with MONTY_HOME=%s and MONTY_BRANCH_PREFIX=%s\n' "$(shell_quote "$rc_file")" "$(shell_quote "$monty_home")" "$(shell_quote "$branch_prefix")"
     return 0
+  fi
+
+  remove_existing=0
+  if [ -n "$existing" ]; then
+    if confirm_shell_rc_override "$rc_file" "$existing"; then
+      remove_existing=1
+    else
+      return 0
+    fi
   fi
 
   mkdir -p "$rc_dir"
   if [ -f "$rc_file" ]; then
-    awk '
+    awk -v remove_existing="$remove_existing" '
+      function is_monty_home_assignment(line) {
+        return \
+          line ~ /^[[:space:]]*(export[[:space:]]+)?MONTY_HOME[[:space:]]*=/ || \
+          line ~ /^[[:space:]]*(typeset|declare)[[:space:]][^#]*MONTY_HOME[[:space:]]*=/ || \
+          line ~ /^[[:space:]]*set[[:space:]][^#]*[[:space:]]MONTY_HOME([[:space:]]|$)/
+      }
       $0 == "# >>> monty >>>" { skip = 1; next }
       $0 == "# <<< monty <<<" { skip = 0; next }
-      skip != 1 { print }
+      skip == 1 { next }
+      remove_existing == "1" && is_monty_home_assignment($0) { next }
+      { print }
     ' "$rc_file" > "$tmp_file"
   else
     : > "$tmp_file"
@@ -308,9 +394,11 @@ write_monty_shell_rc() {
     case "$(shell_rc_kind "$rc_file")" in
       fish)
         printf 'set -gx MONTY_HOME %s\n' "$(shell_quote "$monty_home")"
+        printf 'set -gx MONTY_BRANCH_PREFIX %s\n' "$(shell_quote "$branch_prefix")"
         ;;
       *)
         printf 'export MONTY_HOME=%s\n' "$(shell_quote "$monty_home")"
+        printf 'export MONTY_BRANCH_PREFIX=%s\n' "$(shell_quote "$branch_prefix")"
         ;;
     esac
     printf '# <<< monty <<<\n'
@@ -323,6 +411,7 @@ write_monty_shell_rc() {
 printf 'Installing monty to %s\n' "$prefix"
 printf 'Using repo root %s\n' "$repo_root"
 printf 'Using Monty home %s\n' "$monty_home"
+printf 'Using branch prefix %s\n' "$branch_prefix"
 printf 'Using dune %s\n' "$dune_version"
 
 if [ "$refresh_lock" -eq 1 ]; then
@@ -335,7 +424,7 @@ if [ "$dry_run" -eq 1 ]; then
   copy_monty_home
   printf '+ mkdir -p %s %s\n' "$(shell_quote "$runtime_bin_dir")" "$(shell_quote "$bin_dir")"
   printf '+ cp %s %s\n' "$(shell_quote "$built_monty_bin")" "$(shell_quote "$monty_real_bin")"
-  printf '+ write wrapper %s with MONTY_HOME=%s\n' "$(shell_quote "$monty_bin")" "$(shell_quote "$monty_home")"
+  printf '+ write wrapper %s with MONTY_HOME=%s and MONTY_BRANCH_PREFIX=%s\n' "$(shell_quote "$monty_bin")" "$(shell_quote "$monty_home")" "$(shell_quote "$branch_prefix")"
   write_monty_shell_rc
   printf 'Dry run complete.\n'
   exit 0
@@ -353,7 +442,8 @@ chmod +x "$monty_real_bin"
 cat > "$monty_bin" <<EOF
 #!/bin/sh
 MONTY_HOME=$(shell_quote "$monty_home")
-export MONTY_HOME
+MONTY_BRANCH_PREFIX=$(shell_quote "$branch_prefix")
+export MONTY_HOME MONTY_BRANCH_PREFIX
 exec $(shell_quote "$monty_real_bin") "\$@"
 EOF
 chmod +x "$monty_bin"
@@ -362,6 +452,7 @@ write_monty_shell_rc
 printf '\nInstalled: %s\n' "$monty_bin"
 printf 'Real binary: %s\n' "$monty_real_bin"
 printf 'Default MONTY_HOME: %s\n' "$monty_home"
+printf 'Default MONTY_BRANCH_PREFIX: %s\n' "$branch_prefix"
 
 case ":$PATH:" in
   *":$bin_dir:"*)

@@ -63,6 +63,10 @@ let worktree_arg =
   let doc = "Worktree mode: always or never." in
   Cmdliner.Arg.(value & opt worktree_conv (worktree_default ()) & info [ "worktree" ] ~docv:"MODE" ~doc)
 
+let branch_prefix_arg =
+  let doc = "Prefix for automatically generated worktree branches. Defaults to MONTY_BRANCH_PREFIX or monty." in
+  Cmdliner.Arg.(value & opt string (env_default "MONTY_BRANCH_PREFIX" "monty") & info [ "branch-prefix" ] ~docv:"PREFIX" ~doc)
+
 let fork_arg =
   let doc = "Optional pi session id or path to fork for worker sessions." in
   Cmdliner.Arg.(value & opt (some string) None & info [ "fork" ] ~docv:"SESSION" ~doc)
@@ -71,18 +75,18 @@ let script_dir_arg =
   let doc = "Directory where generated worker launch scripts are written." in
   Cmdliner.Arg.(value & opt (some string) None & info [ "script-dir" ] ~docv:"DIR" ~doc)
 
-let options backend target pi_command wt_command worktree_mode fork home script_dir =
+let options backend target pi_command wt_command worktree_mode branch_prefix fork home script_dir =
   let script_dir =
     match script_dir with
     | Some dir -> Shell.normalize (Shell.abs_path dir)
     | None -> Home.runtime_script_dir ~home () |> Shell.normalize
   in
-  Launcher.{ backend; target; pi_command; wt_command; worktree_mode; fork; script_dir }
+  Launcher.{ backend; target; pi_command; wt_command; worktree_mode; branch_prefix; fork; script_dir }
 
 let options_term =
   Cmdliner.Term.(
     const options $ backend_arg $ target_arg $ pi_command_arg $ wt_command_arg $ worktree_arg
-    $ fork_arg $ home_arg $ script_dir_arg)
+    $ branch_prefix_arg $ fork_arg $ home_arg $ script_dir_arg)
 
 let start name home pi_command = Head_butler.start ~home ~pi_command ~name |> exit_code
 
@@ -114,7 +118,7 @@ let launch_term =
     Cmdliner.Arg.(required & opt (some string) None & info [ "context" ] ~docv:"FILE" ~doc)
   in
   let branch =
-    let doc = "Worktree branch name. Defaults to a monty slug based on the title." in
+    let doc = "Worktree branch name. Defaults to <branch-prefix>/<title-slug>." in
     Cmdliner.Arg.(value & opt (some string) None & info [ "branch" ] ~docv:"BRANCH" ~doc)
   in
   Cmdliner.Term.(const launch $ repo $ title $ context $ branch $ options_term)
