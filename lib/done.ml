@@ -44,7 +44,10 @@ let locate_worktree ~wt_command ~repo ~branch record =
   | "never" -> Ok None
   | _ -> (
       match existing_dir record.Job_store.last_known_worktree with
-      | Some path -> Ok (Some (Shell.normalize path))
+      | Some path -> (
+          match Wt.validate_worktree ~repo path with
+          | Ok path -> Ok (Some (Shell.normalize path))
+          | Error _ -> Wt.create_or_reuse ~wt_command ~repo ~branch |> Result.map Option.some)
       | None ->
           Wt.create_or_reuse ~wt_command ~repo ~branch |> Result.map Option.some)
 

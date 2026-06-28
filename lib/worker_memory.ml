@@ -90,11 +90,10 @@ let write_instructions ~worker_dir ~id ~job ~branch ~repo ~context ~worktree_mod
         "branch: " ^ branch;
         "```";
         "";
-        "If the worktree disappears, recreate it with:";
+        "If the worktree disappears, recreate the correct repo-scoped worktree with:";
         "";
         "```sh";
-        "cd " ^ Shell.quote repo;
-        "wt b " ^ Shell.quote branch;
+        "cd \"$(monty ensure-worktree --repo " ^ Shell.quote repo ^ " --branch " ^ Shell.quote branch ^ ")\"";
         "```";
         "";
         "## Environment";
@@ -119,7 +118,7 @@ let write_instructions ~worker_dir ~id ~job ~branch ~repo ~context ~worktree_mod
         "## Finishing this job";
         "";
         "When the user says the feature is done, archive the Monty job.";
-        "Before completing, update durable notes in `memory.md` and make sure the git worktree is clean.";
+        "Before completing, update durable notes in `memory.md` and make sure the code worktree is clean.";
         "If the user explicitly wants to discard local changes while archiving, use `monty done --force`.";
         "Then run:";
         "";

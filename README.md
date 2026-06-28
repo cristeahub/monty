@@ -98,8 +98,9 @@ dune exec -- monty launch \
   --context .monty/runs/run-1/issue-123.md
 ```
 
-By default Monty creates or reuses a worktree with `wt b <branch>`.
-The generated worker launch script also reruns `wt b <branch>` when the terminal starts, so the worktree can be recreated if it was deleted after launch.
+By default Monty creates or reuses a repo-scoped worktree for the requested branch.
+Monty asks `wt`, validates that the returned worktree belongs to the requested repo, and automatically answers `wt`'s repo-selection prompt when multiple repos have the same branch name.
+The generated worker launch script reruns `monty ensure-worktree --repo <repo> --branch <branch>` when the terminal starts, so the correct worktree can be recreated if it was deleted after launch.
 Durable worker memory lives under Monty home, not in the wt worktree.
 The worker receives both Monty instructions and the context file as pi `@file` arguments.
 
@@ -158,7 +159,7 @@ Resume a worker by id, branch leaf, branch, or title slug:
 dune exec -- monty resume issue-123
 ```
 
-`resume` reads `job.json`, recreates or reuses the worktree with `wt b <branch>`, and opens a new pi session with the same durable worker memory.
+`resume` reads `job.json`, recreates or reuses the repo-scoped worktree, and opens a new pi session with the same durable worker memory.
 Active jobs are found from worker `job.json` files.
 The original `jobs.json` manifest is only launch input.
 
@@ -203,7 +204,7 @@ Use `--force` to discard local worktree changes while archiving:
 dune exec -- monty done issue-123 --force
 ```
 
-Completing a job runs `wt db <branch>`, deletes the worktree and branch, writes `status: done` to `job.json`, and moves durable memory to:
+Completing a job deletes the selected repo's worktree and branch, writes `status: done` to `job.json`, and moves durable memory to:
 
 ```text
 .monty/runs/<run-id>/archive/<worker-id>/

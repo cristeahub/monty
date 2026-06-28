@@ -104,47 +104,77 @@ let init_git_repo path =
   must (Process.run_quiet ~cwd:path "git add tracked.txt");
   must (Process.run_quiet ~cwd:path "git commit -q -m initial")
 
-let fake_wt ~dir ~worktree =
+let fake_prompting_wt ~dir ~branch ~repo_one ~repo_two =
   let path = Filename.concat dir "fake-wt" in
-  let log = Filename.concat dir "fake-wt.log" in
   Shell.write_file path
     (String.concat "\n"
        [ "#!/bin/sh";
-         "printf '%s %s\\n' \"$1\" \"${2-}\" >> " ^ Shell.quote log;
+         "selection=$(cat || true)";
          "case \"$1\" in";
-         "  b) printf '%s\\n' " ^ Shell.quote worktree ^ ";;";
-         "  db) exit 0 ;;";
+         "  b)";
+         "    if [ \"$selection\" = 2 ]; then";
+         "      printf '%s\\n' " ^ Shell.quote repo_two;
+         "      exit 0";
+         "    fi";
+         "    printf '%s\\n' " ^ Shell.quote ("Branch '" ^ branch ^ "' exists in multiple repos:") ^ " >&2";
+         "    printf '%s\\n' " ^ Shell.quote ("  1) repo-one -> " ^ repo_one) ^ " >&2";
+         "    printf '%s\\n' " ^ Shell.quote ("  2) repo-two -> " ^ repo_two) ^ " >&2";
+         "    printf '%s' 'Select [1-2]: ' >&2";
+         "    exit 2";
+         "    ;;";
          "  *) exit 2 ;;";
          "esac";
          "" ]);
   Shell.chmod_executable path;
-  (path, log)
+  path
+
+let test_wt_disambiguates_repo_when_branch_name_collides () =
+  let root = temp_root "wt-disambiguate" in
+  let repo_one = Filename.concat root "repo-one" in
+  let repo_two = Filename.concat root "repo-two" in
+  let branch = "same-name" in
+  init_git_repo repo_one;
+  init_git_repo repo_two;
+  let wt_command = fake_prompting_wt ~dir:root ~branch ~repo_one ~repo_two in
+  let selected = must (Wt.create_or_reuse ~wt_command ~repo:repo_two ~branch) in
+  assert_equal "selected repo" (Unix.realpath repo_two) selected;
+  ignore (must (Wt.validate_worktree ~repo:repo_two selected))
+
+let setup_git_worker root =
+  let home = Filename.concat root "home" in
+  let repo = Filename.concat root "repo" in
+  let context = Filename.concat root "context.md" in
+  let branch = "cto/" ^ Filename.basename root in
+  Shell.ensure_dir home;
+  init_git_repo repo;
+  let worktree = must (Wt.create_or_reuse ~wt_command:"wt" ~repo ~branch) in
+  Shell.write_file context "# Task\n";
+  let job =
+    Job.make ~id:"issue-123" ~branch ~title:"Fix issue 123" ~repo ~context ()
+  in
+  let _id, worker_dir, instructions =
+    Worker_memory.ensure ~home ~job ~branch ~repo ~context ~worktree_mode:"always"
+      ~last_known_worktree:(Some worktree)
+  in
+  (home, repo, branch, worktree, worker_dir, instructions)
 
 let test_done_refuses_dirty_worktree () =
   let root = temp_root "done-dirty" in
-  let worktree = Filename.concat root "worktree" in
-  init_git_repo worktree;
+  let home, repo, branch, worktree, worker_dir, _instructions = setup_git_worker root in
   Shell.write_file (Filename.concat worktree "dirty.txt") "dirty\n";
-  let wt_command, _log = fake_wt ~dir:root ~worktree in
-  let home, _repo, _context, worker_dir, _instructions =
-    setup_worker ~last_known_worktree:(Some worktree) root
-  in
-  match Done.complete ~worker:"issue-123" ~home ~wt_command ~force:false () with
+  (match Done.complete ~worker:"issue-123" ~home ~wt_command:"wt" ~force:false () with
   | Ok () -> failwith "expected dirty worktree to block done"
   | Error msg ->
       assert_contains "dirty error" msg "uncommitted or untracked";
-      assert_bool "worker dir remains active" (Sys.file_exists worker_dir)
+      assert_bool "worker dir remains active" (Sys.file_exists worker_dir));
+  must (Wt.force_clean ~worktree);
+  must (Wt.delete_worktree_and_branch ~worktree ~wt_command:"wt" ~repo ~branch ~force:true ())
 
 let test_done_force_archives () =
   let root = temp_root "done-force" in
-  let worktree = Filename.concat root "worktree" in
-  init_git_repo worktree;
+  let home, repo, branch, worktree, worker_dir, _instructions = setup_git_worker root in
   Shell.write_file (Filename.concat worktree "dirty.txt") "dirty\n";
-  let wt_command, log = fake_wt ~dir:root ~worktree in
-  let home, _repo, _context, worker_dir, _instructions =
-    setup_worker ~last_known_worktree:(Some worktree) root
-  in
-  must (Done.complete ~worker:"issue-123" ~home ~wt_command ~force:true ());
+  must (Done.complete ~worker:"issue-123" ~home ~wt_command:"wt" ~force:true ());
   let archive_dir =
     Filename.concat
       (Filename.concat (Filename.dirname (Filename.dirname worker_dir)) "archive")
@@ -152,20 +182,16 @@ let test_done_force_archives () =
   in
   assert_bool "worker dir moved" (not (Sys.file_exists worker_dir));
   assert_bool "archive dir exists" (Sys.file_exists archive_dir);
+  assert_bool "worktree removed" (not (Sys.file_exists worktree));
+  assert_bool "branch deleted" (not (Wt.branch_exists ~repo ~branch));
   let record = must (Job_store.parse_job_file (Filename.concat archive_dir "job.json")) in
   assert_equal "archived status" "done" record.Job_store.status;
-  assert_equal "archived worker dir" archive_dir record.Job_store.worker_dir;
-  assert_contains "wt db called" (Shell.read_file log) "db cto/issue-123"
+  assert_equal "archived worker dir" archive_dir record.Job_store.worker_dir
 
 let test_resume_archived_reactivates () =
   let root = temp_root "resume-archived" in
-  let worktree = Filename.concat root "worktree" in
-  init_git_repo worktree;
-  let wt_command, _log = fake_wt ~dir:root ~worktree in
-  let home, _repo, _context, worker_dir, _instructions =
-    setup_worker ~last_known_worktree:(Some worktree) root
-  in
-  must (Done.complete ~worker:"issue-123" ~home ~wt_command ~force:true ());
+  let home, _repo, _branch, _worktree, worker_dir, _instructions = setup_git_worker root in
+  must (Done.complete ~worker:"issue-123" ~home ~wt_command:"wt" ~force:true ());
   (match Resume.find ~home "issue-123" with
   | Ok _ -> failwith "archived job should not be found by default resume"
   | Error _ -> ());
@@ -189,6 +215,7 @@ let () =
   test_shell_quote ();
   test_manifest ();
   test_worker_memory_and_resume ();
+  test_wt_disambiguates_repo_when_branch_name_collides ();
   test_done_refuses_dirty_worktree ();
   test_done_force_archives ();
   test_resume_archived_reactivates ();

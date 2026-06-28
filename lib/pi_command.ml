@@ -3,6 +3,7 @@ type options = {
   fork : string option;
   script_dir : string;
   branch_prefix : string;
+  monty_command : string;
 }
 
 let script_filename ~script_dir ~title =
@@ -27,12 +28,14 @@ let build_command ~options ~instructions ~job ~context =
   Printf.sprintf "exec %s --name %s%s%s %s %s" options.pi_command name fork
     instruction_arg context_arg prompt
 
-let rehydrate_lines ~wt_command ~branch ~source_repo =
-  [ "cd " ^ Shell.quote source_repo;
-    "MONTY_JOB_WORKTREE=$(" ^ wt_command ^ " b " ^ Shell.quote branch
-    ^ " | awk 'NF { line=$0 } END { print line }')";
+let rehydrate_lines ~monty_command ~wt_command ~branch ~source_repo =
+  [ "MONTY_JOB_WORKTREE=$("
+    ^ Shell.quote monty_command
+    ^ " ensure-worktree --repo "
+    ^ Shell.quote source_repo ^ " --branch " ^ Shell.quote branch
+    ^ " --wt-command " ^ Shell.quote wt_command ^ ")";
     "if [ -z \"$MONTY_JOB_WORKTREE\" ] || [ ! -d \"$MONTY_JOB_WORKTREE\" ]; then";
-    "  printf '%s\\n' 'wt did not return an existing worktree path' >&2";
+    "  printf '%s\\n' 'monty did not return an existing worktree path' >&2";
     "  exit 1";
     "fi";
     "cd \"$MONTY_JOB_WORKTREE\"" ]
@@ -44,7 +47,7 @@ let write_launch_script ~options ~job ~id ~branch ~source_repo ~initial_workdir
   let command = build_command ~options ~instructions:(Some instructions) ~job ~context in
   let setup_lines =
     match worktree_mode with
-    | "always" -> rehydrate_lines ~wt_command ~branch ~source_repo
+    | "always" -> rehydrate_lines ~monty_command:options.monty_command ~wt_command ~branch ~source_repo
     | _ -> [ "cd " ^ Shell.quote initial_workdir; "MONTY_JOB_WORKTREE=" ^ Shell.quote initial_workdir ]
   in
   let contents =

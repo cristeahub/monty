@@ -67,7 +67,8 @@ Use `monty list --archived` or `monty list --all` when reviewing archived work.
 
 ## Worker expectations
 
-Worker sessions are launched in worktrees created by `wt b <branch>`.
+Worker sessions are launched in repo-scoped worktrees created by Monty's `ensure-worktree` flow.
+Monty validates that any `wt` result belongs to the requested repo, because different repos may use the same branch name.
 Treat wt worktrees as ephemeral.
 Durable session memory belongs in the worker directory under `.monty/runs/<run-id>/workers/<worker-id>/`.
 Each worker receives Monty instructions and its context file as pi `@file` arguments.
@@ -93,4 +94,6 @@ The implementation is OCaml built with Dune.
 Use Dune package management and dependencies in `dune-project`.
 Do not add opam files.
 Use Ghostty as the default terminal backend.
-Use the existing `wt` CLI for worktree creation and reuse.
+Use Monty's repo-scoped `ensure-worktree` flow for worktree creation and reuse.
+It must use the existing `wt` CLI, validate the selected repo, and automatically answer `wt` repo-selection prompts when branch names collide across repos.
+Never bypass `wt` with direct `git worktree` commands.

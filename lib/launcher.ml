@@ -10,6 +10,7 @@ type options = {
   fork : string option;
   home : string;
   script_dir : string;
+  monty_command : string;
 }
 
 let worktree_mode_of_string = function
@@ -35,9 +36,10 @@ let dry_run ~options ~job ~id ~branch ~repo ~context ~worker_dir ~instructions =
     | Never -> (None, repo)
     | Always ->
         ( Some
-            (Printf.sprintf "cd %s && %s b %s" (Shell.quote repo)
-               options.wt_command (Shell.quote branch)),
-          "<worktree printed by wt>" )
+            (Printf.sprintf "%s ensure-worktree --repo %s --branch %s --wt-command %s"
+               (Shell.quote options.monty_command) (Shell.quote repo)
+               (Shell.quote branch) (Shell.quote options.wt_command)),
+          "<worktree selected for repo by monty>" )
   in
   Fmt.pr "[dry-run] job: %s\n" job.Job.title;
   Fmt.pr "[dry-run] id: %s\n" id;
@@ -55,6 +57,7 @@ let dry_run ~options ~job ~id ~branch ~repo ~context ~worker_dir ~instructions =
       fork = options.fork;
       script_dir = options.script_dir;
       branch_prefix = options.branch_prefix;
+      monty_command = options.monty_command;
     }
   in
   Fmt.pr "[dry-run] pi: %s\n"
@@ -92,6 +95,7 @@ let launch_one ?index options job =
           fork = options.fork;
           script_dir = options.script_dir;
           branch_prefix = options.branch_prefix;
+          monty_command = options.monty_command;
         }
       in
       let initial_workdir = match options.worktree_mode with Always -> repo | Never -> workdir in

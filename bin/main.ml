@@ -75,13 +75,32 @@ let script_dir_arg =
   let doc = "Directory where generated worker launch scripts are written." in
   Cmdliner.Arg.(value & opt (some string) None & info [ "script-dir" ] ~docv:"DIR" ~doc)
 
+let monty_command () =
+  let executable = Sys.executable_name in
+  if Filename.is_relative executable && not (Sys.file_exists executable) then
+    match Process.command_exists executable with
+    | Some path -> Shell.normalize path
+    | None -> Shell.normalize (Shell.abs_path executable)
+  else Shell.normalize (Shell.abs_path executable)
+
 let options backend target pi_command wt_command worktree_mode branch_prefix fork home script_dir =
   let script_dir =
     match script_dir with
     | Some dir -> Shell.normalize (Shell.abs_path dir)
     | None -> Home.runtime_script_dir ~home () |> Shell.normalize
   in
-  Launcher.{ backend; target; pi_command; wt_command; worktree_mode; branch_prefix; fork; home; script_dir }
+  Launcher.{
+    backend;
+    target;
+    pi_command;
+    wt_command;
+    worktree_mode;
+    branch_prefix;
+    fork;
+    home;
+    script_dir;
+    monty_command = monty_command ();
+  }
 
 let options_term =
   Cmdliner.Term.(
@@ -195,6 +214,25 @@ let list_jobs_term =
   in
   Cmdliner.Term.(const list_jobs $ archived $ all $ run $ home_arg)
 
+let ensure_worktree repo branch wt_command =
+  let repo = Shell.normalize (Shell.abs_path repo) in
+  match Wt.create_or_reuse ~wt_command ~repo ~branch with
+  | Error msg -> exit_code (Error msg)
+  | Ok path ->
+      Fmt.pr "%s\n" path;
+      0
+
+let ensure_worktree_term =
+  let repo =
+    let doc = "Repository whose branch should be checked out." in
+    Cmdliner.Arg.(required & opt (some string) None & info [ "repo" ] ~docv:"DIR" ~doc)
+  in
+  let branch =
+    let doc = "Branch to check out in the selected repository." in
+    Cmdliner.Arg.(required & opt (some string) None & info [ "branch" ] ~docv:"BRANCH" ~doc)
+  in
+  Cmdliner.Term.(const ensure_worktree $ repo $ branch $ wt_command_arg)
+
 let doctor pi_command wt_command = Doctor.run ~pi_command ~wt_command |> exit_code
 
 let doctor_term = Cmdliner.Term.(const doctor $ pi_command_arg $ wt_command_arg)
@@ -223,6 +261,10 @@ let list_cmd =
   let doc = "List active or archived Monty jobs." in
   Cmdliner.Cmd.v (Cmdliner.Cmd.info "list" ~doc) list_jobs_term
 
+let ensure_worktree_cmd =
+  let doc = "Create or reuse a worktree for a repo and branch, disambiguating by repo." in
+  Cmdliner.Cmd.v (Cmdliner.Cmd.info "ensure-worktree" ~doc) ensure_worktree_term
+
 let doctor_cmd =
   let doc = "Check Monty launch dependencies." in
   Cmdliner.Cmd.v (Cmdliner.Cmd.info "doctor" ~doc) doctor_term
@@ -236,6 +278,6 @@ let main_cmd =
   in
   Cmdliner.Cmd.group ~default:start_term
     (Cmdliner.Cmd.info "monty" ~version:"dev" ~doc ~man)
-    [ start_cmd; launch_cmd; launch_many_cmd; resume_cmd; done_cmd; list_cmd; doctor_cmd ]
+    [ start_cmd; launch_cmd; launch_many_cmd; resume_cmd; done_cmd; list_cmd; ensure_worktree_cmd; doctor_cmd ]
 
 let () = exit (Cmdliner.Cmd.eval' main_cmd)
