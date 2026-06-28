@@ -65,6 +65,18 @@ This deletes the worker worktree and branch, marks the job done, and moves durab
 Use `--force` only when the user explicitly accepts discarding local worktree changes.
 Use `monty list --archived` or `monty list --all` when reviewing archived work.
 
+## Project overview workflow
+
+When the user asks about current projects, project context, task overview, or what Monty knows about their work, get the information from Monty first.
+Use `monty overview` for a cross-project summary.
+Use `monty projects list` and `monty projects show <project>` for project memory.
+Use `monty tasks list` for task summaries.
+Use `monty projects add --repo <repo> --github <owner/repo>` when the user wants Monty to start tracking a project with GitHub issues as the task source of truth.
+Use `monty task add --project <project> --title <title>` only for work that has no external source of truth.
+Use `monty task priority <task> <priority>` for local priority without changing the external source of truth.
+Do not duplicate external tasks into Monty memory when a source of truth such as GitHub issues exists.
+Use Monty-owned local tasks only when no external source of truth exists.
+
 ## Worker expectations
 
 Worker sessions are launched in repo-scoped worktrees created by Monty's `ensure-worktree` flow.

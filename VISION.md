@@ -57,6 +57,17 @@ Lifecycle commands should read and write these files rather than maintaining com
 This avoids split-brain state.
 It also lets `monty list`, `monty resume`, `monty done`, and future lifecycle commands operate from one durable record.
 
+## Monty knows where task truth lives
+
+Monty should know what projects exist and where task truth lives for each project.
+If GitHub issues are the source of truth, Monty should fetch them live instead of copying them into local state.
+If no external source of truth exists, Monty may own a local task.
+Local priorities are allowed because they express the user's current attention, not the external task's canonical content.
+
+Project memory belongs in Markdown under `.monty/projects/`.
+Project memory should describe stable context such as purpose, conventions, architecture notes, and working commands.
+It should not become a duplicate issue tracker.
+
 ## Repo plus branch identifies code work
 
 A branch name alone is not enough.

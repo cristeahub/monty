@@ -17,6 +17,7 @@ let run ~pi_command ~wt_command =
   Fmt.pr "Executable: %s\n" Sys.executable_name;
   print_tool "pi" pi_command;
   print_tool "wt" wt_command;
+  print_tool "gh" "gh";
   print_tool "ghostty" "ghostty";
   print_tool "osascript" "osascript";
   print_tool "sdef" "sdef";

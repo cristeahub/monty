@@ -210,6 +210,38 @@ let test_list_jobs_render () =
   assert_contains "list id" output "issue-123";
   assert_contains "list status" output "ACTIVE"
 
+let test_project_overview_local_tasks () =
+  let root = temp_root "projects" in
+  let home = Filename.concat root "home" in
+  let repo = Filename.concat root "monty" in
+  Shell.ensure_dir repo;
+  let project = must (Project_overview.add_project ~home ~repo ()) in
+  assert_equal "project id" "monty" project.Project_overview.id;
+  assert_bool "project memory exists"
+    (Sys.file_exists (Project_overview.project_memory_file ~home "monty"));
+  let task =
+    must
+      (Project_overview.add_local_task ~home ~project:"monty"
+         ~title:"Design overview" ~priority:"high" ())
+  in
+  assert_equal "local task id" "local-001" task.Project_overview.id;
+  let tasks = must (Project_overview.load_tasks ~home ()) in
+  let rendered = Project_overview.render_tasks tasks in
+  assert_contains "local task rendered" rendered "local:local-001";
+  assert_contains "local priority rendered" rendered "high";
+  must (Project_overview.set_priority ~home ~task:"local-001" ~priority:"low");
+  let reprioritized = must (Project_overview.load_tasks ~home ()) in
+  assert_contains "local priority override rendered"
+    (Project_overview.render_tasks reprioritized) "low";
+  must (Project_overview.done_local_task ~home "local-001");
+  let open_tasks = must (Project_overview.load_tasks ~home ()) in
+  assert_bool "done local task hidden" (open_tasks = []);
+  let all_tasks = must (Project_overview.load_tasks ~home ~all:true ()) in
+  assert_contains "done task visible with all" (Project_overview.render_tasks all_tasks) "done";
+  let overview = must (Project_overview.overview ~home) in
+  assert_contains "overview projects" overview "## Projects";
+  assert_contains "overview active jobs" overview "## Active jobs"
+
 let () =
   test_slug ();
   test_shell_quote ();
@@ -219,4 +251,5 @@ let () =
   test_done_refuses_dirty_worktree ();
   test_done_force_archives ();
   test_resume_archived_reactivates ();
-  test_list_jobs_render ()
+  test_list_jobs_render ();
+  test_project_overview_local_tasks ()

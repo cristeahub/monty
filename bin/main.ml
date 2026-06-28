@@ -233,6 +233,128 @@ let ensure_worktree_term =
   in
   Cmdliner.Term.(const ensure_worktree $ repo $ branch $ wt_command_arg)
 
+let overview home =
+  match Project_overview.overview ~home with
+  | Error msg -> exit_code (Error msg)
+  | Ok text ->
+      Fmt.pr "%s\n" text;
+      0
+
+let overview_term = Cmdliner.Term.(const overview $ home_arg)
+
+let projects_list home =
+  match Project_overview.load_projects ~home with
+  | Error msg -> exit_code (Error msg)
+  | Ok projects ->
+      Fmt.pr "%s" (Project_overview.render_projects projects);
+      0
+
+let projects_list_term = Cmdliner.Term.(const projects_list $ home_arg)
+
+let projects_show project home =
+  match Project_overview.load_projects ~home with
+  | Error msg -> exit_code (Error msg)
+  | Ok projects -> (
+      match Project_overview.resolve_project projects project with
+      | Error msg -> exit_code (Error msg)
+      | Ok project ->
+          Fmt.pr "%s\n" (Project_overview.show_project ~home project);
+          0)
+
+let projects_show_term =
+  let project =
+    let doc = "Project id, repo path, or derived repo name." in
+    Cmdliner.Arg.(required & pos 0 (some string) None & info [] ~docv:"PROJECT" ~doc)
+  in
+  Cmdliner.Term.(const projects_show $ project $ home_arg)
+
+let projects_add repo github query home =
+  match Project_overview.add_project ~home ~repo ?github ?query () with
+  | Error msg -> exit_code (Error msg)
+  | Ok project ->
+      Fmt.pr "Added project %s\n" project.Project_overview.id;
+      Fmt.pr "Memory: %s\n" (Project_overview.project_memory_file ~home project.id);
+      0
+
+let projects_add_term =
+  let repo =
+    let doc = "Repository path for this project." in
+    Cmdliner.Arg.(required & opt (some string) None & info [ "repo" ] ~docv:"DIR" ~doc)
+  in
+  let github =
+    let doc = "GitHub OWNER/REPO whose issues are the task source of truth." in
+    Cmdliner.Arg.(value & opt (some string) None & info [ "github" ] ~docv:"OWNER/REPO" ~doc)
+  in
+  let query =
+    let doc = "GitHub issue search query. Defaults to gh issue list's open issues." in
+    Cmdliner.Arg.(value & opt (some string) None & info [ "query" ] ~docv:"QUERY" ~doc)
+  in
+  Cmdliner.Term.(const projects_add $ repo $ github $ query $ home_arg)
+
+let tasks_list project all home =
+  match Project_overview.load_tasks ~home ?project ~all () with
+  | Error msg -> exit_code (Error msg)
+  | Ok tasks ->
+      Fmt.pr "%s" (Project_overview.render_tasks tasks);
+      0
+
+let tasks_list_term =
+  let project =
+    let doc = "Only list tasks for this project." in
+    Cmdliner.Arg.(value & opt (some string) None & info [ "project" ] ~docv:"PROJECT" ~doc)
+  in
+  let all =
+    let doc = "Include completed local tasks." in
+    Cmdliner.Arg.(value & flag & info [ "all" ] ~doc)
+  in
+  Cmdliner.Term.(const tasks_list $ project $ all $ home_arg)
+
+let task_add project title priority home =
+  match Project_overview.add_local_task ~home ~project ~title ?priority () with
+  | Error msg -> exit_code (Error msg)
+  | Ok task ->
+      Fmt.pr "Added local task %s\n" task.Project_overview.id;
+      0
+
+let task_add_term =
+  let project =
+    let doc = "Project for this local task." in
+    Cmdliner.Arg.(required & opt (some string) None & info [ "project" ] ~docv:"PROJECT" ~doc)
+  in
+  let title =
+    let doc = "Task title." in
+    Cmdliner.Arg.(required & opt (some string) None & info [ "title" ] ~docv:"TITLE" ~doc)
+  in
+  let priority =
+    let doc = "Local priority such as high, medium, or low." in
+    Cmdliner.Arg.(value & opt (some string) None & info [ "priority" ] ~docv:"PRIORITY" ~doc)
+  in
+  Cmdliner.Term.(const task_add $ project $ title $ priority $ home_arg)
+
+let task_done id home =
+  Project_overview.done_local_task ~home id |> exit_code
+
+let task_done_term =
+  let id =
+    let doc = "Local task id, with or without the local: prefix." in
+    Cmdliner.Arg.(required & pos 0 (some string) None & info [] ~docv:"TASK" ~doc)
+  in
+  Cmdliner.Term.(const task_done $ id $ home_arg)
+
+let task_priority task priority home =
+  Project_overview.set_priority ~home ~task ~priority |> exit_code
+
+let task_priority_term =
+  let task =
+    let doc = "Task key, such as github:owner/repo#123 or local-001." in
+    Cmdliner.Arg.(required & pos 0 (some string) None & info [] ~docv:"TASK" ~doc)
+  in
+  let priority =
+    let doc = "Local priority such as high, medium, or low." in
+    Cmdliner.Arg.(required & pos 1 (some string) None & info [] ~docv:"PRIORITY" ~doc)
+  in
+  Cmdliner.Term.(const task_priority $ task $ priority $ home_arg)
+
 let doctor pi_command wt_command = Doctor.run ~pi_command ~wt_command |> exit_code
 
 let doctor_term = Cmdliner.Term.(const doctor $ pi_command_arg $ wt_command_arg)
@@ -265,6 +387,50 @@ let ensure_worktree_cmd =
   let doc = "Create or reuse a worktree for a repo and branch, disambiguating by repo." in
   Cmdliner.Cmd.v (Cmdliner.Cmd.info "ensure-worktree" ~doc) ensure_worktree_term
 
+let overview_cmd =
+  let doc = "Show a cross-project overview of projects, tasks, and active jobs." in
+  Cmdliner.Cmd.v (Cmdliner.Cmd.info "overview" ~doc) overview_term
+
+let projects_cmd =
+  let list_cmd =
+    let doc = "List known Monty projects." in
+    Cmdliner.Cmd.v (Cmdliner.Cmd.info "list" ~doc) projects_list_term
+  in
+  let show_cmd =
+    let doc = "Show project memory and task sources." in
+    Cmdliner.Cmd.v (Cmdliner.Cmd.info "show" ~doc) projects_show_term
+  in
+  let add_cmd =
+    let doc = "Add a project to Monty's overview." in
+    Cmdliner.Cmd.v (Cmdliner.Cmd.info "add" ~doc) projects_add_term
+  in
+  let doc = "Manage Monty project memory." in
+  Cmdliner.Cmd.group (Cmdliner.Cmd.info "projects" ~doc) [ list_cmd; show_cmd; add_cmd ]
+
+let tasks_cmd =
+  let list_cmd =
+    let doc = "List external and local tasks." in
+    Cmdliner.Cmd.v (Cmdliner.Cmd.info "list" ~doc) tasks_list_term
+  in
+  let doc = "Read task summaries from sources of truth." in
+  Cmdliner.Cmd.group (Cmdliner.Cmd.info "tasks" ~doc) [ list_cmd ]
+
+let task_cmd =
+  let add_cmd =
+    let doc = "Add a Monty-owned local task." in
+    Cmdliner.Cmd.v (Cmdliner.Cmd.info "add" ~doc) task_add_term
+  in
+  let done_cmd =
+    let doc = "Mark a Monty-owned local task done." in
+    Cmdliner.Cmd.v (Cmdliner.Cmd.info "done" ~doc) task_done_term
+  in
+  let priority_cmd =
+    let doc = "Set a local priority for any task." in
+    Cmdliner.Cmd.v (Cmdliner.Cmd.info "priority" ~doc) task_priority_term
+  in
+  let doc = "Manage Monty-owned local task data." in
+  Cmdliner.Cmd.group (Cmdliner.Cmd.info "task" ~doc) [ add_cmd; done_cmd; priority_cmd ]
+
 let doctor_cmd =
   let doc = "Check Monty launch dependencies." in
   Cmdliner.Cmd.v (Cmdliner.Cmd.info "doctor" ~doc) doctor_term
@@ -278,6 +444,19 @@ let main_cmd =
   in
   Cmdliner.Cmd.group ~default:start_term
     (Cmdliner.Cmd.info "monty" ~version:"dev" ~doc ~man)
-    [ start_cmd; launch_cmd; launch_many_cmd; resume_cmd; done_cmd; list_cmd; ensure_worktree_cmd; doctor_cmd ]
+    [
+      start_cmd;
+      launch_cmd;
+      launch_many_cmd;
+      resume_cmd;
+      done_cmd;
+      list_cmd;
+      overview_cmd;
+      projects_cmd;
+      tasks_cmd;
+      task_cmd;
+      ensure_worktree_cmd;
+      doctor_cmd;
+    ]
 
 let () = exit (Cmdliner.Cmd.eval' main_cmd)

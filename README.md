@@ -12,6 +12,7 @@ Monty handles the glue around Ghostty, `wt`, worktrees, manifests, and `pi` star
 - `pi` on `PATH`.
 - `wt` on `PATH`.
 - Ghostty on macOS for normal launching.
+- `gh` on `PATH` when using GitHub issues as a project task source.
 
 ## Build
 
@@ -210,6 +211,64 @@ Completing a job deletes the selected repo's worktree and branch, writes `status
 .monty/runs/<run-id>/archive/<worker-id>/
 ```
 
+## Project overview and local tasks
+
+Monty can keep a small overview of projects and task sources.
+Project IDs are derived from repo names, with disambiguation when needed.
+External task sources, such as GitHub issues, are fetched every time instead of copied into Monty state.
+Monty-owned local tasks are only for work that has no external source of truth.
+
+Add a project with optional GitHub issues as its task source:
+
+```sh
+dune exec -- monty projects add \
+  --repo /path/to/repo \
+  --github owner/repo \
+  --query "is:open"
+```
+
+List or show project memory:
+
+```sh
+dune exec -- monty projects list
+dune exec -- monty projects show monty
+```
+
+Show a cross-project overview:
+
+```sh
+dune exec -- monty overview
+```
+
+List tasks from external sources and Monty-owned local tasks:
+
+```sh
+dune exec -- monty tasks list
+dune exec -- monty tasks list --project monty
+```
+
+Add or complete a local task:
+
+```sh
+dune exec -- monty task add --project monty --title "Design overview" --priority high
+dune exec -- monty task done local-001
+```
+
+Set local priority for any task without changing its external source of truth:
+
+```sh
+dune exec -- monty task priority github:owner/repo#42 high
+```
+
+Monty stores project overview state under:
+
+```text
+.monty/projects.json
+.monty/projects/<project-id>.md
+.monty/tasks.local.json
+.monty/priorities.json
+```
+
 ## Dry run
 
 Use dry-run mode to inspect what Monty would do without creating worktrees or opening Ghostty.
@@ -253,4 +312,4 @@ MONTY_HOME=/path/to/monty
 dune exec -- monty doctor
 ```
 
-This checks for `pi`, `wt`, Ghostty, `osascript`, `sdef`, and Dune.
+This checks for `pi`, `wt`, `gh`, Ghostty, `osascript`, `sdef`, and Dune.
