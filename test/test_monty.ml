@@ -34,10 +34,40 @@ let test_manifest () =
       | Error msg -> failwith msg
       | Ok [ (1, job) ] ->
           assert_equal "manifest title" "Task" job.Job.title;
-          assert_equal "manifest context" context job.Job.context
+          assert_equal "manifest context" context job.Job.context;
+          assert_equal "manifest worker dir"
+            (Filename.concat run_dir "workers/task")
+            (Option.value ~default:"" job.Job.worker_dir)
       | Ok _ -> failwith "expected exactly one job")
+
+let test_worker_memory_and_resume () =
+  let root = Filename.concat (Filename.get_temp_dir_name ()) ("monty-memory-test-" ^ string_of_int (Unix.getpid ())) in
+  let home = Filename.concat root "home" in
+  let repo = Filename.concat root "repo" in
+  Shell.ensure_dir home;
+  Shell.ensure_dir repo;
+  let context = Filename.concat root "context.md" in
+  Shell.write_file context "# Task\n";
+  let job =
+    Job.make ~id:"issue-123" ~branch:"cto/issue-123" ~title:"Fix issue 123"
+      ~repo ~context ()
+  in
+  let _id, worker_dir, instructions =
+    Worker_memory.ensure ~home ~job ~branch:"cto/issue-123" ~repo ~context
+      ~worktree_mode:"always" ~last_known_worktree:(Some (Filename.concat root "wt"))
+  in
+  if not (Sys.file_exists (Worker_memory.job_file worker_dir)) then
+    failwith "expected job.json";
+  if not (Sys.file_exists instructions) then failwith "expected MONTY.md";
+  match Resume.find ~home "issue-123" with
+  | Error msg -> failwith msg
+  | Ok found ->
+      assert_equal "resume title" "Fix issue 123" found.Job.title;
+      assert_equal "resume branch" "cto/issue-123"
+        (Option.value ~default:"" found.Job.branch)
 
 let () =
   test_slug ();
   test_shell_quote ();
-  test_manifest ()
+  test_manifest ();
+  test_worker_memory_and_resume ()

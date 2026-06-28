@@ -20,10 +20,12 @@ Create `.monty/runs/<run-id>/jobs.json` with this shape:
 {
   "jobs": [
     {
+      "id": "issue-123",
       "title": "Fix issue 123",
       "repo": "/absolute/path/to/repo",
       "branch": "monty/issue-123",
-      "context": ".monty/runs/<run-id>/issue-123.md"
+      "context": ".monty/runs/<run-id>/issue-123.md",
+      "worker_dir": ".monty/runs/<run-id>/workers/issue-123"
     }
   ]
 }
@@ -50,9 +52,18 @@ dune exec -- monty launch-many --terminal dry-run --manifest .monty/runs/<run-id
 ## Worker expectations
 
 Worker sessions are launched in worktrees created by `wt b <branch>`.
-Each worker receives its context file as a pi `@file` argument.
+Treat wt worktrees as ephemeral.
+Durable session memory belongs in the worker directory under `.monty/runs/<run-id>/workers/<worker-id>/`.
+Each worker receives Monty instructions and its context file as pi `@file` arguments.
 Do not assume the worker can see the full head-butler planning conversation.
 Put all essential information in the worker context file.
+Workers are instructed to write important discoveries, blockers, and handoff notes back to their worker directory.
+
+Resume an existing worker with:
+
+```sh
+dune exec -- monty resume <worker-id>
+```
 
 ## Project conventions
 

@@ -99,7 +99,9 @@ dune exec -- monty launch \
 ```
 
 By default Monty creates or reuses a worktree with `wt b <branch>`.
-Then it opens Ghostty and runs pi in the worker worktree with the context file passed as an `@file`.
+The generated worker launch script also reruns `wt b <branch>` when the terminal starts, so the worktree can be recreated if it was deleted after launch.
+Durable worker memory lives under Monty home, not in the wt worktree.
+The worker receives both Monty instructions and the context file as pi `@file` arguments.
 
 ## Launch many workers
 
@@ -113,10 +115,12 @@ Example manifest:
 {
   "jobs": [
     {
+      "id": "issue-123",
       "title": "Fix issue 123",
       "repo": "/Users/cristea/code/example",
       "branch": "monty/issue-123",
-      "context": ".monty/runs/run-1/issue-123.md"
+      "context": ".monty/runs/run-1/issue-123.md",
+      "worker_dir": ".monty/runs/run-1/workers/issue-123"
     }
   ]
 }
@@ -126,6 +130,35 @@ The manifest can also omit `branch`.
 Monty then derives a safe branch name from the title using the branch prefix.
 The default is `monty`, so `Fix issue 123` becomes `monty/fix-issue-123` for one launch or `monty/01-fix-issue-123` in `launch-many`.
 With `--branch-prefix cto` or `MONTY_BRANCH_PREFIX=cto`, the same task becomes `cto/fix-issue-123` or `cto/01-fix-issue-123`.
+
+## Worker memory and resume
+
+Each launched worker gets a durable memory directory.
+For `launch-many`, the default is:
+
+```text
+.monty/runs/<run-id>/workers/<worker-id>/
+```
+
+Monty writes:
+
+```text
+job.json
+MONTY.md
+memory.md
+artifacts/
+```
+
+Workers are instructed to write important discoveries, blockers, and handoff notes back to this folder.
+The wt worktree is treated as ephemeral and can be recreated from the durable repo and branch in `job.json`.
+
+Resume a worker by id, branch leaf, branch, or title slug:
+
+```sh
+dune exec -- monty resume issue-123
+```
+
+`resume` reads `job.json`, recreates or reuses the worktree with `wt b <branch>`, and opens a new pi session with the same durable worker memory.
 
 ## Dry run
 

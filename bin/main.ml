@@ -81,7 +81,7 @@ let options backend target pi_command wt_command worktree_mode branch_prefix for
     | Some dir -> Shell.normalize (Shell.abs_path dir)
     | None -> Home.runtime_script_dir ~home () |> Shell.normalize
   in
-  Launcher.{ backend; target; pi_command; wt_command; worktree_mode; branch_prefix; fork; script_dir }
+  Launcher.{ backend; target; pi_command; wt_command; worktree_mode; branch_prefix; fork; home; script_dir }
 
 let options_term =
   Cmdliner.Term.(
@@ -135,6 +135,18 @@ let launch_many_term =
   in
   Cmdliner.Term.(const launch_many $ manifest $ options_term)
 
+let resume worker options =
+  match Resume.find ~home:options.Launcher.home worker with
+  | Error msg -> exit_code (Error msg)
+  | Ok job -> Launcher.launch_one options job |> exit_code
+
+let resume_term =
+  let worker =
+    let doc = "Worker id, branch leaf, branch, or title slug to resume." in
+    Cmdliner.Arg.(required & pos 0 (some string) None & info [] ~docv:"WORKER" ~doc)
+  in
+  Cmdliner.Term.(const resume $ worker $ options_term)
+
 let doctor pi_command wt_command = Doctor.run ~pi_command ~wt_command |> exit_code
 
 let doctor_term = Cmdliner.Term.(const doctor $ pi_command_arg $ wt_command_arg)
@@ -151,6 +163,10 @@ let launch_many_cmd =
   let doc = "Launch multiple worker pi sessions from a JSON manifest." in
   Cmdliner.Cmd.v (Cmdliner.Cmd.info "launch-many" ~doc) launch_many_term
 
+let resume_cmd =
+  let doc = "Resume a worker pi session from durable Monty memory." in
+  Cmdliner.Cmd.v (Cmdliner.Cmd.info "resume" ~doc) resume_term
+
 let doctor_cmd =
   let doc = "Check Monty launch dependencies." in
   Cmdliner.Cmd.v (Cmdliner.Cmd.info "doctor" ~doc) doctor_term
@@ -164,6 +180,6 @@ let main_cmd =
   in
   Cmdliner.Cmd.group ~default:start_term
     (Cmdliner.Cmd.info "monty" ~version:"dev" ~doc ~man)
-    [ start_cmd; launch_cmd; launch_many_cmd; doctor_cmd ]
+    [ start_cmd; launch_cmd; launch_many_cmd; resume_cmd; doctor_cmd ]
 
 let () = exit (Cmdliner.Cmd.eval' main_cmd)

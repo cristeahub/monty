@@ -15,13 +15,21 @@ let optional_string_field obj name =
 
 let ( let* ) = Result.bind
 
+let optional_worker_dir_field obj =
+  match Util.member "worker_dir" obj with
+  | `String _ as value -> optional_string_field (`Assoc [ ("worker_dir", value) ]) "worker_dir"
+  | `Null -> optional_string_field obj "memory_dir"
+  | _ -> optional_string_field obj "worker_dir"
+
 let parse_job index json =
   let* title = string_field json "title" in
   let* repo = string_field json "repo" in
   let* context = string_field json "context" in
+  let* id = optional_string_field json "id" in
   let* branch = optional_string_field json "branch" in
+  let* worker_dir = optional_worker_dir_field json in
   let* prompt = optional_string_field json "prompt" in
-  Ok (index, Job.make ?branch ?prompt ~title ~repo ~context ())
+  Ok (index, Job.make ?id ?branch ?worker_dir ?prompt ~title ~repo ~context ())
 
 let jobs_json json =
   match json with
@@ -44,15 +52,34 @@ let resolve_repo ~cwd path =
   if Filename.is_relative path |> not then Shell.normalize path
   else Shell.normalize (Filename.concat cwd path)
 
+let resolve_worker_dir ~cwd ~manifest_dir path =
+  if Filename.is_relative path |> not then Shell.normalize path
+  else
+    let from_cwd = Filename.concat cwd path in
+    if Sys.file_exists from_cwd then Shell.normalize from_cwd
+    else Shell.normalize (Filename.concat manifest_dir path)
+
+let default_worker_dir ~manifest_dir job =
+  let branch = match job.Job.branch with Some branch -> branch | None -> job.Job.title in
+  let id = Job.id_or_default ~branch job in
+  Filename.concat (Filename.concat manifest_dir "workers") id |> Shell.normalize
+
 let resolve_job_paths ~cwd ~manifest_dir (index, job) =
   let repo = resolve_repo ~cwd job.Job.repo in
   let context = resolve_context ~cwd ~manifest_dir job.Job.context in
+  let worker_dir =
+    match job.Job.worker_dir with
+    | Some worker_dir -> Some (resolve_worker_dir ~cwd ~manifest_dir worker_dir)
+    | None -> Some (default_worker_dir ~manifest_dir job)
+  in
   ( index,
     {
-      Job.title = job.Job.title;
+      Job.id = job.Job.id;
+      title = job.Job.title;
       repo;
       branch = job.Job.branch;
       context;
+      worker_dir;
       prompt = job.Job.prompt;
     } )
 
