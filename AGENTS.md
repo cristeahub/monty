@@ -49,6 +49,22 @@ Use dry-run first when checking the generated manifest or when the user asks for
 dune exec -- monty launch-many --terminal dry-run --manifest .monty/runs/<run-id>/jobs.json
 ```
 
+At the start of a day or planning session, review active jobs with:
+
+```sh
+dune exec -- monty list
+```
+
+When a feature is complete, archive it with:
+
+```sh
+dune exec -- monty done <worker-id>
+```
+
+This deletes the worker worktree and branch, marks the job done, and moves durable worker memory to `.monty/runs/<run-id>/archive/<worker-id>/`.
+Use `--force` only when the user explicitly accepts discarding local worktree changes.
+Use `monty list --archived` or `monty list --all` when reviewing archived work.
+
 ## Worker expectations
 
 Worker sessions are launched in worktrees created by `wt b <branch>`.
@@ -63,6 +79,12 @@ Resume an existing worker with:
 
 ```sh
 dune exec -- monty resume <worker-id>
+```
+
+Resume an archived worker and move it back to active memory with:
+
+```sh
+dune exec -- monty resume --archived <worker-id>
 ```
 
 ## Project conventions

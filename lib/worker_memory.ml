@@ -38,7 +38,9 @@ let write_job_json ~worker_dir ~id ~job ~branch ~repo ~context ~worktree_mode
          ("worker_dir", `String worker_dir);
          ("run_dir", `String (run_dir_of_worker_dir worker_dir));
          ("worktree_mode", `String worktree_mode);
+         ("status", `String "active");
          ("updated_at", `String (now_utc ())) ]
+      @ maybe_assoc "prompt" job.Job.prompt
       @ maybe_assoc "last_known_worktree" last_known_worktree)
   in
   Yojson.Safe.to_file (job_file worker_dir) json
@@ -113,6 +115,20 @@ let write_instructions ~worker_dir ~id ~job ~branch ~repo ~context ~worktree_mod
         "";
         "Read the task context file passed after this instructions file.";
         "Write back important session memory to the durable worker folder above.";
+        "";
+        "## Finishing this job";
+        "";
+        "When the user says the feature is done, archive the Monty job.";
+        "Before completing, update durable notes in `memory.md` and make sure the git worktree is clean.";
+        "If the user explicitly wants to discard local changes while archiving, use `monty done --force`.";
+        "Then run:";
+        "";
+        "```sh";
+        "monty done";
+        "```";
+        "";
+        "This deletes the worktree and branch, moves this worker folder to the run archive, and marks the job done.";
+        "After it succeeds, stop working in this session because the worktree was deleted.";
         "" ]
   in
   Shell.write_file (instructions_file worker_dir) text

@@ -135,17 +135,65 @@ let launch_many_term =
   in
   Cmdliner.Term.(const launch_many $ manifest $ options_term)
 
-let resume worker options =
-  match Resume.find ~home:options.Launcher.home worker with
+let resume archived worker options =
+  let scope = if archived then Job_store.Archived else Job_store.Active in
+  match Resume.find_record ~home:options.Launcher.home ~scope worker with
   | Error msg -> exit_code (Error msg)
-  | Ok job -> Launcher.launch_one options job |> exit_code
+  | Ok record -> (
+      let job =
+        if archived then
+          match options.Launcher.backend with
+          | Terminal.Dry_run -> Ok (Job_store.active_job record)
+          | Terminal.Ghostty -> Job_store.reactivate record
+        else Ok record.Job_store.job
+      in
+      match job with
+      | Error msg -> exit_code (Error msg)
+      | Ok job -> Launcher.launch_one options job |> exit_code)
 
 let resume_term =
   let worker =
     let doc = "Worker id, branch leaf, branch, or title slug to resume." in
     Cmdliner.Arg.(required & pos 0 (some string) None & info [] ~docv:"WORKER" ~doc)
   in
-  Cmdliner.Term.(const resume $ worker $ options_term)
+  let archived =
+    let doc = "Resume an archived job and move it back to active workers." in
+    Cmdliner.Arg.(value & flag & info [ "archived" ] ~doc)
+  in
+  Cmdliner.Term.(const resume $ archived $ worker $ options_term)
+
+let complete worker force home wt_command =
+  Done.complete ?worker ~home ~wt_command ~force () |> exit_code
+
+let complete_term =
+  let worker =
+    let doc = "Worker id, branch leaf, branch, or title slug to mark done. Defaults to MONTY_WORKER_DIR." in
+    Cmdliner.Arg.(value & pos 0 (some string) None & info [] ~docv:"WORKER" ~doc)
+  in
+  let force =
+    let doc = "Discard local worktree changes while deleting the worktree and branch." in
+    Cmdliner.Arg.(value & flag & info [ "force"; "f" ] ~doc)
+  in
+  Cmdliner.Term.(const complete $ worker $ force $ home_arg $ wt_command_arg)
+
+let list_jobs archived all run home =
+  let scope = if all then Job_store.All else if archived then Job_store.Archived else Job_store.Active in
+  List_jobs.run ~home ~scope ?run () |> exit_code
+
+let list_jobs_term =
+  let archived =
+    let doc = "List archived jobs instead of active jobs." in
+    Cmdliner.Arg.(value & flag & info [ "archived" ] ~doc)
+  in
+  let all =
+    let doc = "List active and archived jobs." in
+    Cmdliner.Arg.(value & flag & info [ "all" ] ~doc)
+  in
+  let run =
+    let doc = "Only list jobs for a run directory name or path." in
+    Cmdliner.Arg.(value & opt (some string) None & info [ "run" ] ~docv:"RUN" ~doc)
+  in
+  Cmdliner.Term.(const list_jobs $ archived $ all $ run $ home_arg)
 
 let doctor pi_command wt_command = Doctor.run ~pi_command ~wt_command |> exit_code
 
@@ -167,6 +215,14 @@ let resume_cmd =
   let doc = "Resume a worker pi session from durable Monty memory." in
   Cmdliner.Cmd.v (Cmdliner.Cmd.info "resume" ~doc) resume_term
 
+let done_cmd =
+  let doc = "Mark a worker job done, delete its worktree and branch, and archive its memory." in
+  Cmdliner.Cmd.v (Cmdliner.Cmd.info "done" ~doc) complete_term
+
+let list_cmd =
+  let doc = "List active or archived Monty jobs." in
+  Cmdliner.Cmd.v (Cmdliner.Cmd.info "list" ~doc) list_jobs_term
+
 let doctor_cmd =
   let doc = "Check Monty launch dependencies." in
   Cmdliner.Cmd.v (Cmdliner.Cmd.info "doctor" ~doc) doctor_term
@@ -180,6 +236,6 @@ let main_cmd =
   in
   Cmdliner.Cmd.group ~default:start_term
     (Cmdliner.Cmd.info "monty" ~version:"dev" ~doc ~man)
-    [ start_cmd; launch_cmd; launch_many_cmd; resume_cmd; doctor_cmd ]
+    [ start_cmd; launch_cmd; launch_many_cmd; resume_cmd; done_cmd; list_cmd; doctor_cmd ]
 
 let () = exit (Cmdliner.Cmd.eval' main_cmd)

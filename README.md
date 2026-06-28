@@ -159,6 +159,55 @@ dune exec -- monty resume issue-123
 ```
 
 `resume` reads `job.json`, recreates or reuses the worktree with `wt b <branch>`, and opens a new pi session with the same durable worker memory.
+Active jobs are found from worker `job.json` files.
+The original `jobs.json` manifest is only launch input.
+
+Resume an archived worker and move it back to active memory with:
+
+```sh
+dune exec -- monty resume --archived issue-123
+```
+
+## List and archive jobs
+
+List active jobs from durable `job.json` files:
+
+```sh
+dune exec -- monty list
+```
+
+List archived or all jobs with:
+
+```sh
+dune exec -- monty list --archived
+dune exec -- monty list --all
+```
+
+Filter a run by directory name or path with:
+
+```sh
+dune exec -- monty list --run run-1
+```
+
+Mark a job done with:
+
+```sh
+dune exec -- monty done issue-123
+```
+
+Inside a worker session, `monty done` uses `MONTY_WORKER_DIR` and does not need an argument.
+`done` refuses to archive dirty worktrees by default.
+Use `--force` to discard local worktree changes while archiving:
+
+```sh
+dune exec -- monty done issue-123 --force
+```
+
+Completing a job runs `wt db <branch>`, deletes the worktree and branch, writes `status: done` to `job.json`, and moves durable memory to:
+
+```text
+.monty/runs/<run-id>/archive/<worker-id>/
+```
 
 ## Dry run
 
