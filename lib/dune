@@ -1,0 +1,3 @@
+(library
+ (name monty)
+ (libraries bos cmdliner fmt fpath rresult unix yojson))
