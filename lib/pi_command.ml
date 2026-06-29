@@ -54,6 +54,11 @@ let write_launch_script ~options ~job ~id ~branch ~source_repo ~initial_workdir
     String.concat "\n"
       ([ "#!/bin/sh";
          "set -eu";
+         "export PATH="
+         ^ Shell.quote
+             (Option.value
+                ~default:"/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+                (Sys.getenv_opt "PATH"));
          "printf '\\033]0;%s\\007' " ^ Shell.quote job.Job.title;
          "export MONTY_BRANCH_PREFIX=" ^ Shell.quote options.branch_prefix;
          "export MONTY_RUN_DIR=" ^ Shell.quote (Worker_memory.run_dir_of_worker_dir worker_dir);

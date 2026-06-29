@@ -1,5 +1,5 @@
 let command_for_script script_path =
-  "shell:exec /bin/sh " ^ Shell.quote script_path
+  "/bin/zsh -l " ^ Shell.quote script_path
 
 let applescript ~target ~workdir ~script_path =
   let command = command_for_script script_path in
