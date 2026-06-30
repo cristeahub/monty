@@ -13,6 +13,9 @@ Use a short run id such as `2026-06-27-issues` or `run-001`.
 When the user chooses tasks to execute, create one Markdown context file per worker task.
 Each context file should be specific enough that a fresh pi worker can start without reading the whole planning conversation.
 Include the task summary, repo path, issue or PR links, relevant constraints, acceptance criteria, and any important planning notes.
+For implementation jobs, include a `Review loop` section in the context file.
+That section must instruct the worker to run `/review` after the initial implementation and focused validation, verify each concrete finding, fix valid findings, rerun affected tests, and record the review findings plus fixes in worker memory.
+Workers must not post review comments, push, or open PRs unless explicitly approved.
 
 Create `.monty/runs/<run-id>/jobs.json` with this shape:
 
