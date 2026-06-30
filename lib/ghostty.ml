@@ -13,15 +13,16 @@ let applescript ~target ~workdir ~script_path =
     match target with
     | Terminal.Window ->
         "set montyWindow to new window with configuration montyConfig\n\
-         activate window montyWindow"
+         focus focused terminal of selected tab of montyWindow"
     | Terminal.Tab ->
         "if (count of windows) = 0 then\n\
          set montyWindow to new window with configuration montyConfig\n\
-         activate window montyWindow\n\
+         set montyTab to selected tab of montyWindow\n\
          else\n\
          set montyTab to new tab in front window with configuration montyConfig\n\
          select tab montyTab\n\
-         end if"
+         end if\n\
+         focus focused terminal of montyTab"
     | Terminal.Split ->
         "if (count of windows) = 0 then\n\
          set montyWindow to new window with configuration montyConfig\n\

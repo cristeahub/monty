@@ -21,7 +21,28 @@ let assert_contains label text expected =
   if not (string_contains text expected) then
     failwith (Printf.sprintf "%s: expected %S to contain %S" label text expected)
 
+let assert_not_contains label text unexpected =
+  if string_contains text unexpected then
+    failwith (Printf.sprintf "%s: expected %S not to contain %S" label text unexpected)
+
 let must = function Ok value -> value | Error msg -> failwith msg
+
+let capture_stdout f =
+  let path = Filename.temp_file "monty-test-stdout" ".txt" in
+  let original_stdout = Unix.dup Unix.stdout in
+  let output_fd = Unix.openfile path [ Unix.O_WRONLY; Unix.O_CREAT; Unix.O_TRUNC ] 0o600 in
+  Fun.protect
+    ~finally:(fun () ->
+      flush stdout;
+      Unix.dup2 original_stdout Unix.stdout;
+      Unix.close original_stdout;
+      if Sys.file_exists path then Sys.remove path)
+    (fun () ->
+      Unix.dup2 output_fd Unix.stdout;
+      Unix.close output_fd;
+      f ();
+      flush stdout;
+      Shell.read_file path)
 
 let temp_root name =
   Filename.concat (Filename.get_temp_dir_name ())
@@ -202,6 +223,60 @@ let test_resume_archived_reactivates () =
   let active = must (Resume.find ~home "issue-123") in
   assert_equal "active after reactivate" "Fix issue 123" active.Job.title
 
+let test_launch_many_single_job_uses_single_job_defaults () =
+  let root = temp_root "launch-many-single" in
+  Shell.ensure_dir root;
+  let context = Filename.concat root "context.md" in
+  Shell.write_file context "# Task\n";
+  let job = Job.make ~title:"Translate parking instructions" ~repo:root ~context () in
+  let options =
+    Launcher.{
+      backend = Terminal.Dry_run;
+      target = Terminal.Tab;
+      pi_command = "pi";
+      wt_command = "wt";
+      worktree_mode = Always;
+      branch_prefix = "cto";
+      fork = None;
+      home = root;
+      script_dir = root;
+      monty_command = "monty";
+    }
+  in
+  let output = capture_stdout (fun () -> must (Launcher.launch_many options [ (1, job) ])) in
+  assert_contains "single launch-many branch" output "--branch 'cto/translate-parking-instructions'";
+  assert_not_contains "single launch-many should not number branch" output "cto/01-translate-parking-instructions"
+
+let test_launch_many_multiple_jobs_keeps_numbered_defaults () =
+  let root = temp_root "launch-many-multiple" in
+  Shell.ensure_dir root;
+  let context = Filename.concat root "context.md" in
+  Shell.write_file context "# Task\n";
+  let first = Job.make ~title:"First task" ~repo:root ~context () in
+  let second = Job.make ~title:"Second task" ~repo:root ~context () in
+  let options =
+    Launcher.{
+      backend = Terminal.Dry_run;
+      target = Terminal.Tab;
+      pi_command = "pi";
+      wt_command = "wt";
+      worktree_mode = Always;
+      branch_prefix = "cto";
+      fork = None;
+      home = root;
+      script_dir = root;
+      monty_command = "monty";
+    }
+  in
+  let output = capture_stdout (fun () -> must (Launcher.launch_many options [ (1, first); (2, second) ])) in
+  assert_contains "first numbered branch" output "--branch 'cto/01-first-task'";
+  assert_contains "second numbered branch" output "--branch 'cto/02-second-task'"
+
+let test_ghostty_tab_launch_focuses_new_terminal () =
+  let script = Ghostty.applescript ~target:Terminal.Tab ~workdir:"/tmp" ~script_path:"/tmp/monty.sh" in
+  assert_contains "tab launch selects tab" script "select tab montyTab";
+  assert_contains "tab launch focuses terminal" script "focus focused terminal of montyTab"
+
 let test_list_jobs_render () =
   let root = temp_root "list" in
   let home, _repo, _context, _worker_dir, _instructions = setup_worker root in
@@ -251,5 +326,8 @@ let () =
   test_done_refuses_dirty_worktree ();
   test_done_force_archives ();
   test_resume_archived_reactivates ();
+  test_launch_many_single_job_uses_single_job_defaults ();
+  test_launch_many_multiple_jobs_keeps_numbered_defaults ();
+  test_ghostty_tab_launch_focuses_new_terminal ();
   test_list_jobs_render ();
   test_project_overview_local_tasks ()

@@ -110,11 +110,14 @@ let launch_one ?index options job =
       Ok ()
 
 let launch_many options indexed_jobs =
-  let rec loop = function
-    | [] -> Ok ()
-    | (index, job) :: rest -> (
-        match launch_one ~index options job with
-        | Ok () -> loop rest
-        | Error msg -> Error msg)
-  in
-  loop indexed_jobs
+  match indexed_jobs with
+  | [ (_, job) ] -> launch_one options job
+  | _ ->
+      let rec loop = function
+        | [] -> Ok ()
+        | (index, job) :: rest -> (
+            match launch_one ~index options job with
+            | Ok () -> loop rest
+            | Error msg -> Error msg)
+      in
+      loop indexed_jobs
