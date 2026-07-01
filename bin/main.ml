@@ -375,6 +375,10 @@ let resume_cmd =
   let doc = "Resume a worker pi session from durable Monty memory." in
   Cmdliner.Cmd.v (Cmdliner.Cmd.info "resume" ~doc) resume_term
 
+let open_cmd =
+  let doc = "Open a worker pi session from durable Monty memory. Alias for resume." in
+  Cmdliner.Cmd.v (Cmdliner.Cmd.info "open" ~doc) resume_term
+
 let done_cmd =
   let doc = "Mark a worker job done, delete its worktree and branch, and archive its memory." in
   Cmdliner.Cmd.v (Cmdliner.Cmd.info "done" ~doc) complete_term
@@ -440,7 +444,8 @@ let main_cmd =
   let man =
     [ `S Cmdliner.Manpage.s_description;
       `P "Run monty with no subcommand to start the head-butler pi session in this repo.";
-      `P "Use launch or launch-many when the head-butler needs to spin out worker sessions." ]
+      `P "Use launch or launch-many when the head-butler needs to spin out worker sessions.";
+      `P "Use open or resume to reopen an existing worker from durable Monty memory." ]
   in
   Cmdliner.Cmd.group ~default:start_term
     (Cmdliner.Cmd.info "monty" ~version:"dev" ~doc ~man)
@@ -448,6 +453,7 @@ let main_cmd =
       start_cmd;
       launch_cmd;
       launch_many_cmd;
+      open_cmd;
       resume_cmd;
       done_cmd;
       list_cmd;
