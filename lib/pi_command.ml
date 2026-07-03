@@ -68,6 +68,7 @@ let write_launch_script ~options ~job ~id ~branch ~source_repo ~initial_workdir
          "export MONTY_JOB_BRANCH=" ^ Shell.quote branch;
          "export MONTY_JOB_REPO=" ^ Shell.quote source_repo;
          "export MONTY_JOB_CONTEXT=" ^ Shell.quote context;
+         "export MONTY_TASK_KEY=" ^ Shell.quote (Option.value ~default:"" job.Job.task_key);
          "export MONTY_WORKTREE_MODE=" ^ Shell.quote worktree_mode ]
       @ setup_lines
       @ [ "export MONTY_JOB_WORKTREE";

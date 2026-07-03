@@ -6,10 +6,11 @@ type t = {
   context : string;
   worker_dir : string option;
   prompt : string option;
+  task_key : string option;
 }
 
-let make ?id ?branch ?worker_dir ?prompt ~title ~repo ~context () =
-  { id; title; repo; branch; context; worker_dir; prompt }
+let make ?id ?branch ?worker_dir ?prompt ?task_key ~title ~repo ~context () =
+  { id; title; repo; branch; context; worker_dir; prompt; task_key }
 
 let branch_or_default ?(prefix = "monty") ?index job =
   match job.branch with

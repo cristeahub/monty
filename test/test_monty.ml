@@ -68,7 +68,7 @@ let test_manifest () =
   Shell.write_file context "# Task\n";
   let manifest = Filename.concat run_dir "jobs.json" in
   Shell.write_file manifest
-    "{\n  \"jobs\": [\n    {\n      \"title\": \"Task\",\n      \"repo\": \".\",\n      \"context\": \"task.md\"\n    }\n  ]\n}\n";
+    "{\n  \"jobs\": [\n    {\n      \"title\": \"Task\",\n      \"repo\": \".\",\n      \"context\": \"task.md\",\n      \"task_key\": \"local:local-001\"\n    }\n  ]\n}\n";
   let old_cwd = Sys.getcwd () in
   Fun.protect
     ~finally:(fun () -> Sys.chdir old_cwd)
@@ -81,7 +81,9 @@ let test_manifest () =
           assert_equal "manifest context" context job.Job.context;
           assert_equal "manifest worker dir"
             (Filename.concat run_dir "workers/task")
-            (Option.value ~default:"" job.Job.worker_dir)
+            (Option.value ~default:"" job.Job.worker_dir);
+          assert_equal "manifest task key" "local:local-001"
+            (Option.value ~default:"" job.Job.task_key)
       | Ok _ -> failwith "expected exactly one job")
 
 let setup_worker ?(last_known_worktree = None) root =
@@ -209,6 +211,73 @@ let test_done_force_archives () =
   assert_equal "archived status" "done" record.Job_store.status;
   assert_equal "archived worker dir" archive_dir record.Job_store.worker_dir
 
+let test_done_closes_linked_local_task () =
+  let root = temp_root "done-local-task" in
+  let home = Filename.concat root "home" in
+  let repo = Filename.concat root "repo" in
+  let context = Filename.concat root "context.md" in
+  Shell.ensure_dir home;
+  Shell.ensure_dir repo;
+  Shell.write_file context "# Task\n";
+  let _project = must (Project_overview.add_project ~home ~repo ()) in
+  let task =
+    must
+      (Project_overview.add_local_task ~home ~project:"repo" ~title:"Fix local task" ())
+  in
+  let job =
+    Job.make ~id:(task.Project_overview.id ^ "-fix-local-task")
+      ~branch:"cto/fix-local-task" ~title:"Fix local task" ~repo ~context ()
+  in
+  let _id, worker_dir, _instructions =
+    Worker_memory.ensure ~home ~job ~branch:"cto/fix-local-task" ~repo ~context
+      ~worktree_mode:"never" ~last_known_worktree:None
+  in
+  must (Done.complete ~worker:(task.Project_overview.id ^ "-fix-local-task") ~home
+          ~wt_command:"wt" ~force:false ());
+  let archive_dir =
+    Filename.concat
+      (Filename.concat (Filename.dirname (Filename.dirname worker_dir)) "archive")
+      (task.Project_overview.id ^ "-fix-local-task")
+  in
+  assert_bool "worker dir moved" (not (Sys.file_exists worker_dir));
+  assert_bool "archive dir exists" (Sys.file_exists archive_dir);
+  let archived = must (Job_store.parse_job_file (Filename.concat archive_dir "job.json")) in
+  assert_equal "archived task key" ("local:" ^ task.Project_overview.id)
+    (Option.value ~default:"" archived.Job_store.job.Job.task_key);
+  let open_tasks = must (Project_overview.load_tasks ~home ()) in
+  assert_bool "linked local task hidden after archive" (open_tasks = []);
+  let all_tasks = must (Project_overview.load_tasks ~home ~all:true ()) in
+  assert_contains "linked local task done" (Project_overview.render_tasks all_tasks) "done"
+
+let test_done_closes_legacy_local_task_matched_by_title () =
+  let root = temp_root "done-local-task-title" in
+  let home = Filename.concat root "home" in
+  let repo = Filename.concat root "repo" in
+  let context = Filename.concat root "context.md" in
+  Shell.ensure_dir home;
+  Shell.ensure_dir repo;
+  Shell.write_file context "# Task\n";
+  let _project = must (Project_overview.add_project ~home ~repo ()) in
+  let task =
+    must
+      (Project_overview.add_local_task ~home ~project:"repo" ~title:"Continue cto/legacy" ())
+  in
+  let job =
+    Job.make ~id:"legacy-worker" ~branch:"cto/legacy" ~title:task.Project_overview.title
+      ~repo ~context ()
+  in
+  let _id, worker_dir, _instructions =
+    Worker_memory.ensure ~home ~job ~branch:"cto/legacy" ~repo ~context
+      ~worktree_mode:"never" ~last_known_worktree:None
+  in
+  must (Done.complete ~worker:"legacy-worker" ~home ~wt_command:"wt" ~force:false ());
+  assert_bool "worker dir moved" (not (Sys.file_exists worker_dir));
+  let open_tasks = must (Project_overview.load_tasks ~home ()) in
+  assert_bool "legacy linked local task hidden after archive" (open_tasks = []);
+  let all_tasks = must (Project_overview.load_tasks ~home ~all:true ()) in
+  assert_contains "legacy linked local task done" (Project_overview.render_tasks all_tasks)
+    ("local:" ^ task.Project_overview.id)
+
 let test_resume_archived_reactivates () =
   let root = temp_root "resume-archived" in
   let home, _repo, _branch, _worktree, worker_dir, _instructions = setup_git_worker root in
@@ -325,6 +394,8 @@ let () =
   test_wt_disambiguates_repo_when_branch_name_collides ();
   test_done_refuses_dirty_worktree ();
   test_done_force_archives ();
+  test_done_closes_linked_local_task ();
+  test_done_closes_legacy_local_task_matched_by_title ();
   test_resume_archived_reactivates ();
   test_launch_many_single_job_uses_single_job_defaults ();
   test_launch_many_multiple_jobs_keeps_numbered_defaults ();

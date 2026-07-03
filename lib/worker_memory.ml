@@ -41,6 +41,7 @@ let write_job_json ~worker_dir ~id ~job ~branch ~repo ~context ~worktree_mode
          ("status", `String "active");
          ("updated_at", `String (now_utc ())) ]
       @ maybe_assoc "prompt" job.Job.prompt
+      @ maybe_assoc "task_key" job.Job.task_key
       @ maybe_assoc "last_known_worktree" last_known_worktree)
   in
   Yojson.Safe.to_file (job_file worker_dir) json
@@ -107,6 +108,7 @@ let write_instructions ~worker_dir ~id ~job ~branch ~repo ~context ~worktree_mod
         "- MONTY_JOB_REPO=" ^ repo;
         "- MONTY_JOB_BRANCH=" ^ branch;
         "- MONTY_JOB_CONTEXT=" ^ context;
+        "- MONTY_TASK_KEY=" ^ Option.value ~default:"" job.Job.task_key;
         "- MONTY_JOB_WORKTREE, set dynamically after `wt b` runs";
         "- MONTY_WORKTREE_MODE=" ^ worktree_mode;
         "";
@@ -126,7 +128,7 @@ let write_instructions ~worker_dir ~id ~job ~branch ~repo ~context ~worktree_mod
         "monty done";
         "```";
         "";
-        "This deletes the worktree and branch, moves this worker folder to the run archive, and marks the job done.";
+        "This deletes the worktree and branch, moves this worker folder to the run archive, closes any linked Monty-owned local task, and marks the job done.";
         "After it succeeds, stop working in this session because the worktree was deleted.";
         "" ]
   in

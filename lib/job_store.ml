@@ -62,6 +62,7 @@ let parse_job_file path =
     let* context = member_string json "context" in
     let* worker_dir = member_string json "worker_dir" in
     let* prompt = optional_string json "prompt" in
+    let* task_key = optional_string json "task_key" in
     let* status = optional_string json "status" in
     let* run_dir = optional_string json "run_dir" in
     let* worktree_mode = optional_string json "worktree_mode" in
@@ -73,7 +74,7 @@ let parse_job_file path =
     let run_dir = run_dir |> Option.value ~default:(default_run_dir worker_dir) |> Shell.normalize in
     let status = status |> Option.value ~default:(default_status path) in
     let worktree_mode = worktree_mode |> Option.value ~default:"always" in
-    let job = Job.make ~id ~branch ~worker_dir ?prompt ~title ~repo ~context () in
+    let job = Job.make ~id ~branch ~worker_dir ?prompt ?task_key ~title ~repo ~context () in
     Ok
       {
         path = Shell.normalize path;
@@ -220,6 +221,7 @@ let reactivate record =
             string "worktree_mode" record.worktree_mode;
             string "updated_at" now;
             string "reopened_at" now ]
+          @ maybe_string "task_key" record.job.Job.task_key
           @ maybe_string "last_known_worktree" record.last_known_worktree
         in
         let remove =

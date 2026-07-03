@@ -21,6 +21,12 @@ let optional_worker_dir_field obj =
   | `Null -> optional_string_field obj "memory_dir"
   | _ -> optional_string_field obj "worker_dir"
 
+let optional_task_key_field obj =
+  match Util.member "task_key" obj with
+  | `String _ as value -> optional_string_field (`Assoc [ ("task_key", value) ]) "task_key"
+  | `Null -> optional_string_field obj "task"
+  | _ -> optional_string_field obj "task_key"
+
 let parse_job index json =
   let* title = string_field json "title" in
   let* repo = string_field json "repo" in
@@ -29,7 +35,8 @@ let parse_job index json =
   let* branch = optional_string_field json "branch" in
   let* worker_dir = optional_worker_dir_field json in
   let* prompt = optional_string_field json "prompt" in
-  Ok (index, Job.make ?id ?branch ?worker_dir ?prompt ~title ~repo ~context ())
+  let* task_key = optional_task_key_field json in
+  Ok (index, Job.make ?id ?branch ?worker_dir ?prompt ?task_key ~title ~repo ~context ())
 
 let jobs_json json =
   match json with
@@ -81,6 +88,7 @@ let resolve_job_paths ~cwd ~manifest_dir (index, job) =
       context;
       worker_dir;
       prompt = job.Job.prompt;
+      task_key = job.Job.task_key;
     } )
 
 let load path =

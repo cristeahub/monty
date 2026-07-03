@@ -30,7 +30,8 @@ Create `.monty/runs/<run-id>/jobs.json` with this shape:
       "repo": "/absolute/path/to/repo",
       "branch": "monty/issue-123",
       "context": ".monty/runs/<run-id>/issue-123.md",
-      "worker_dir": ".monty/runs/<run-id>/workers/issue-123"
+      "worker_dir": ".monty/runs/<run-id>/workers/issue-123",
+      "task_key": "local:local-001"
     }
   ]
 }
@@ -41,6 +42,9 @@ Prefer setting it when the issue number or task name gives a clear branch name.
 Use the configured branch prefix for branch names.
 The default prefix is `monty`, but users may set `MONTY_BRANCH_PREFIX`, for example `cto`.
 When omitting `branch`, Monty derives `<branch-prefix>/<title-slug>` automatically.
+Set `task_key` for workers launched from Monty-owned local tasks, for example `local:local-001`.
+When `task_key` is present, `monty done <worker-id>` closes the linked local task while archiving the worker.
+Monty also has legacy inference for worker ids that start with `local-NNN` and unambiguous same-title local tasks, but prefer explicit `task_key` for new workers.
 
 After writing the manifest and context files, launch workers with:
 
@@ -66,7 +70,8 @@ When a feature is complete, archive it with:
 dune exec -- monty done <worker-id>
 ```
 
-This deletes the worker worktree and branch, marks the job done, and moves durable worker memory to `.monty/runs/<run-id>/archive/<worker-id>/`.
+This deletes the worker worktree and branch, closes any linked Monty-owned local task, marks the job done, and moves durable worker memory to `.monty/runs/<run-id>/archive/<worker-id>/`.
+Do not run a separate `monty task done` for a linked local worker unless repairing old data from before this behavior existed.
 Use `--force` only when the user explicitly accepts discarding local worktree changes.
 Use `monty list --archived` or `monty list --all` when reviewing archived work.
 

@@ -13,6 +13,88 @@ let env_job_id () =
   | Some id when String.trim id <> "" -> Some id
   | _ -> None
 
+let prefix text value =
+  let text_len = String.length text in
+  let value_len = String.length value in
+  value_len >= text_len && String.sub value 0 text_len = text
+
+let strip_prefix text value =
+  if prefix text value then
+    Some (String.sub value (String.length text) (String.length value - String.length text))
+  else None
+
+let is_digit = function '0' .. '9' -> true | _ -> false
+
+let local_task_id_from_text value =
+  let value = match strip_prefix "local:" value with Some value -> value | None -> value in
+  let length = String.length value in
+  if
+    length >= 9
+    && prefix "local-" value
+    && is_digit value.[6] && is_digit value.[7] && is_digit value.[8]
+    && (length = 9 || value.[9] = '-' || value.[9] = '_' || value.[9] = '/')
+  then Some (String.sub value 0 9)
+  else None
+
+let task_key_for_archive record linked_local_task_id =
+  match record.Job_store.job.Job.task_key with
+  | Some _ as task_key -> task_key
+  | None -> Option.map (fun id -> "local:" ^ id) linked_local_task_id
+
+let ensure_local_task_exists ~home id =
+  let ( let* ) = Result.bind in
+  let* tasks = Project_overview.load_local_tasks ~home in
+  match List.find_opt (fun task -> String.equal task.Project_overview.id id) tasks with
+  | Some _ -> Ok (Some id)
+  | None -> Error (Printf.sprintf "linked local Monty task is missing: %s" id)
+
+let project_repo projects id =
+  projects
+  |> List.find_map (fun (project : Project_overview.project) ->
+         if String.equal project.id id then Some project.repo else None)
+
+let local_task_matches_record ~projects ~repo record (task : Project_overview.local_task) =
+  String.equal task.title record.Job_store.job.Job.title
+  && match project_repo projects task.project with
+     | Some project_repo -> String.equal (Shell.normalize project_repo) repo
+     | None -> false
+
+let infer_local_task_by_title ~home ~repo record =
+  let ( let* ) = Result.bind in
+  let* tasks = Project_overview.load_local_tasks ~home in
+  let* projects = Project_overview.load_projects ~home in
+  let matches =
+    tasks
+    |> List.filter (fun (task : Project_overview.local_task) ->
+           not (String.equal (String.lowercase_ascii task.status) "done")
+           && local_task_matches_record ~projects ~repo record task)
+  in
+  match matches with
+  | [] -> Ok None
+  | [ task ] -> Ok (Some task.Project_overview.id)
+  | many ->
+      let labels =
+        many
+        |> List.map (fun (task : Project_overview.local_task) -> "- " ^ task.id ^ " " ^ task.title)
+        |> String.concat "\n"
+      in
+      Error (Printf.sprintf "multiple local Monty tasks match worker %S:\n%s" record.id labels)
+
+let resolve_linked_local_task_id ~home ~repo record =
+  match record.Job_store.job.Job.task_key with
+  | Some task_key -> (
+      match local_task_id_from_text task_key with
+      | Some id -> ensure_local_task_exists ~home id
+      | None -> Ok None)
+  | None -> (
+      match local_task_id_from_text record.Job_store.id with
+      | Some id -> ensure_local_task_exists ~home id
+      | None -> infer_local_task_by_title ~home ~repo record)
+
+let close_linked_local_task ~home = function
+  | None -> Ok ()
+  | Some id -> Project_overview.done_local_task ~home id
+
 let resolve_current ~home =
   match env_worker_dir () with
   | Some worker_dir ->
@@ -59,7 +141,7 @@ let ensure_archive_target record archive_dir =
     Error (Printf.sprintf "archive directory already exists: %s" archive_dir)
   else Ok ()
 
-let archive_record record ~archive_dir ~branch ~worktree ~deleted_branch =
+let archive_record record ~archive_dir ~branch ~worktree ~deleted_branch ~task_key =
   let source_dir = record.Job_store.worker_dir in
   let now = Worker_memory.now_utc () in
   let target_job = Filename.concat archive_dir "job.json" in
@@ -76,6 +158,7 @@ let archive_record record ~archive_dir ~branch ~worktree ~deleted_branch =
       Job_store.string "completed_at" now;
       Job_store.string "archived_at" now;
       Job_store.string "updated_at" now ]
+    @ Job_store.maybe_string "task_key" task_key
     @ Job_store.maybe_string "deleted_branch" (if deleted_branch then Some branch else None)
     @ Job_store.maybe_string "deleted_worktree" worktree
     @ Job_store.maybe_string "last_known_worktree" worktree
@@ -97,6 +180,8 @@ let complete ?worker ~home ~wt_command ~force () =
   let* branch = required_branch record in
   let repo = Shell.normalize (Shell.abs_path record.Job_store.job.Job.repo) in
   let archive_dir = Job_store.archive_dir record in
+  let* linked_task_id = resolve_linked_local_task_id ~home ~repo record in
+  let archive_task_key = task_key_for_archive record linked_task_id in
   let* () = ensure_archive_target record archive_dir in
   let* worktree = locate_worktree ~wt_command ~repo ~branch record in
   let* () =
@@ -117,10 +202,14 @@ let complete ?worker ~home ~wt_command ~force () =
   in
   let* () =
     archive_record record ~archive_dir ~branch ~worktree
-      ~deleted_branch:deletes_worktree_and_branch
+      ~deleted_branch:deletes_worktree_and_branch ~task_key:archive_task_key
   in
+  let* () = close_linked_local_task ~home linked_task_id in
   Fmt.pr "Archived %S\n" record.Job_store.job.Job.title;
   Fmt.pr "Worker memory: %s\n" archive_dir;
+  (match linked_task_id with
+  | Some id -> Fmt.pr "Closed local task: local:%s\n" id
+  | None -> ());
   (match worktree with
   | Some path -> Fmt.pr "Deleted worktree: %s\n" path
   | None -> Fmt.pr "Deleted worktree: <none, worktree mode never>\n");

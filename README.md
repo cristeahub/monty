@@ -122,7 +122,8 @@ Example manifest:
       "repo": "/Users/cristea/code/example",
       "branch": "monty/issue-123",
       "context": ".monty/runs/run-1/issue-123.md",
-      "worker_dir": ".monty/runs/run-1/workers/issue-123"
+      "worker_dir": ".monty/runs/run-1/workers/issue-123",
+      "task_key": "local:local-001"
     }
   ]
 }
@@ -132,6 +133,9 @@ The manifest can also omit `branch`.
 Monty then derives a safe branch name from the title using the branch prefix.
 The default is `monty`, so `Fix issue 123` becomes `monty/fix-issue-123` for one launch or `monty/01-fix-issue-123` in `launch-many`.
 With `--branch-prefix cto` or `MONTY_BRANCH_PREFIX=cto`, the same task becomes `cto/fix-issue-123` or `cto/01-fix-issue-123`.
+A manifest entry can include `task_key` to link a worker to a Monty-owned local task.
+When `monty done` archives that worker, it also marks the linked local task done.
+For older manifests that omit `task_key`, Monty infers a local task link from worker ids that start with `local-NNN` or from an unambiguous local task with the same title in the same project.
 
 ## Worker memory and resume
 
@@ -163,6 +167,7 @@ dune exec -- monty resume issue-123
 `resume` reads `job.json`, recreates or reuses the repo-scoped worktree, and opens a new pi session with the same durable worker memory.
 Active jobs are found from worker `job.json` files.
 The original `jobs.json` manifest is only launch input.
+`done` archives the worker and closes the linked Monty-owned local task in the same command.
 
 Resume an archived worker and move it back to active memory with:
 

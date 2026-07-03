@@ -380,7 +380,7 @@ let open_cmd =
   Cmdliner.Cmd.v (Cmdliner.Cmd.info "open" ~doc) resume_term
 
 let done_cmd =
-  let doc = "Mark a worker job done, delete its worktree and branch, and archive its memory." in
+  let doc = "Mark a worker job done, close its linked local task, delete its worktree and branch, and archive its memory." in
   Cmdliner.Cmd.v (Cmdliner.Cmd.info "done" ~doc) complete_term
 
 let list_cmd =
