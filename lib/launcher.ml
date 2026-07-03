@@ -3,6 +3,7 @@ type worktree_mode = Always | Never
 type options = {
   backend : Terminal.backend;
   target : Terminal.target;
+  focus_policy : Terminal.focus_policy;
   pi_command : string;
   wt_command : string;
   worktree_mode : worktree_mode;
@@ -48,9 +49,10 @@ let dry_run ~options ~job ~id ~branch ~repo ~context ~worker_dir ~instructions =
   Fmt.pr "[dry-run] worker memory: %s\n" worker_dir;
   Fmt.pr "[dry-run] monty instructions: %s\n" instructions;
   Fmt.pr "[dry-run] context: %s\n" context;
-  Fmt.pr "[dry-run] terminal: %s %s\n"
+  Fmt.pr "[dry-run] terminal: %s %s focus=%s\n"
     (Terminal.backend_to_string options.backend)
-    (Terminal.target_to_string options.target);
+    (Terminal.target_to_string options.target)
+    (Terminal.focus_policy_to_string options.focus_policy);
   let pi_options =
     Pi_command.{
       pi_command = options.pi_command;
@@ -104,7 +106,10 @@ let launch_one ?index options job =
           ~source_repo:repo ~initial_workdir ~context ~instructions ~worker_dir
           ~worktree_mode ~wt_command:options.wt_command
       in
-      let* () = Ghostty.launch ~target:options.target ~workdir:initial_workdir ~script_path in
+      let* () =
+        Ghostty.launch ~target:options.target ~focus_policy:options.focus_policy
+          ~workdir:initial_workdir ~script_path
+      in
       Fmt.pr "Launched %S in %s\n" job.Job.title workdir;
       Fmt.pr "Worker memory: %s\n" worker_dir;
       Ok ()

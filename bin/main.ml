@@ -19,6 +19,11 @@ let target_conv =
     ( Terminal.target_of_string,
       fun ppf value -> Fmt.pf ppf "%s" (Terminal.target_to_string value) )
 
+let focus_conv =
+  Cmdliner.Arg.conv
+    ( Terminal.focus_policy_of_string,
+      fun ppf value -> Fmt.pf ppf "%s" (Terminal.focus_policy_to_string value) )
+
 let worktree_conv =
   Cmdliner.Arg.conv
     ( Launcher.worktree_mode_of_string,
@@ -33,6 +38,8 @@ let target_default () =
   match Terminal.target_of_string (Terminal.default_target ()) with
   | Ok target -> target
   | Error _ -> Terminal.Tab
+
+let focus_default () = Terminal.default_focus_policy ()
 
 let worktree_default () =
   match Launcher.worktree_mode_of_string (env_default "MONTY_WORKTREE" "always") with
@@ -59,6 +66,10 @@ let target_arg =
   let doc = "Where to launch the worker: tab, window, or split." in
   Cmdliner.Arg.(value & opt target_conv (target_default ()) & info [ "target" ] ~docv:"TARGET" ~doc)
 
+let focus_arg =
+  let doc = "Ghostty focus policy: background or foreground. Background avoids intentionally activating Ghostty; foreground jumps to the worker." in
+  Cmdliner.Arg.(value & opt focus_conv (focus_default ()) & info [ "focus" ] ~docv:"POLICY" ~doc)
+
 let worktree_arg =
   let doc = "Worktree mode: always or never." in
   Cmdliner.Arg.(value & opt worktree_conv (worktree_default ()) & info [ "worktree" ] ~docv:"MODE" ~doc)
@@ -83,7 +94,7 @@ let monty_command () =
     | None -> Shell.normalize (Shell.abs_path executable)
   else Shell.normalize (Shell.abs_path executable)
 
-let options backend target pi_command wt_command worktree_mode branch_prefix fork home script_dir =
+let options backend target focus_policy pi_command wt_command worktree_mode branch_prefix fork home script_dir =
   let script_dir =
     match script_dir with
     | Some dir -> Shell.normalize (Shell.abs_path dir)
@@ -92,6 +103,7 @@ let options backend target pi_command wt_command worktree_mode branch_prefix for
   Launcher.{
     backend;
     target;
+    focus_policy;
     pi_command;
     wt_command;
     worktree_mode;
@@ -104,8 +116,8 @@ let options backend target pi_command wt_command worktree_mode branch_prefix for
 
 let options_term =
   Cmdliner.Term.(
-    const options $ backend_arg $ target_arg $ pi_command_arg $ wt_command_arg $ worktree_arg
-    $ branch_prefix_arg $ fork_arg $ home_arg $ script_dir_arg)
+    const options $ backend_arg $ target_arg $ focus_arg $ pi_command_arg $ wt_command_arg
+    $ worktree_arg $ branch_prefix_arg $ fork_arg $ home_arg $ script_dir_arg)
 
 let start name home pi_command = Head_butler.start ~home ~pi_command ~name |> exit_code
 

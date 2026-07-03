@@ -233,6 +233,7 @@ let test_launch_many_single_job_uses_single_job_defaults () =
     Launcher.{
       backend = Terminal.Dry_run;
       target = Terminal.Tab;
+      focus_policy = Terminal.Background;
       pi_command = "pi";
       wt_command = "wt";
       worktree_mode = Always;
@@ -258,6 +259,7 @@ let test_launch_many_multiple_jobs_keeps_numbered_defaults () =
     Launcher.{
       backend = Terminal.Dry_run;
       target = Terminal.Tab;
+      focus_policy = Terminal.Background;
       pi_command = "pi";
       wt_command = "wt";
       worktree_mode = Always;
@@ -272,10 +274,85 @@ let test_launch_many_multiple_jobs_keeps_numbered_defaults () =
   assert_contains "first numbered branch" output "--branch 'cto/01-first-task'";
   assert_contains "second numbered branch" output "--branch 'cto/02-second-task'"
 
-let test_ghostty_tab_launch_focuses_new_terminal () =
-  let script = Ghostty.applescript ~target:Terminal.Tab ~workdir:"/tmp" ~script_path:"/tmp/monty.sh" in
-  assert_contains "tab launch selects tab" script "select tab montyTab";
-  assert_contains "tab launch focuses terminal" script "focus focused terminal of montyTab"
+let test_focus_policy_parsing_and_default () =
+  let parsed_focus value =
+    match Terminal.focus_policy_of_string value with
+    | Ok policy -> Terminal.focus_policy_to_string policy
+    | Error (`Msg msg) -> failwith msg
+  in
+  assert_equal "focus parse background" "background" (parsed_focus "background");
+  assert_equal "focus parse foreground" "foreground" (parsed_focus "foreground");
+  let original = Sys.getenv_opt "MONTY_FOCUS" in
+  Fun.protect
+    ~finally:(fun () ->
+      match original with
+      | Some value -> Unix.putenv "MONTY_FOCUS" value
+      | None -> Unix.putenv "MONTY_FOCUS" "")
+    (fun () ->
+      Unix.putenv "MONTY_FOCUS" "foreground";
+      assert_equal "focus env foreground" "foreground"
+        (Terminal.focus_policy_to_string (Terminal.default_focus_policy ()));
+      Unix.putenv "MONTY_FOCUS" "background";
+      assert_equal "focus env background" "background"
+        (Terminal.focus_policy_to_string (Terminal.default_focus_policy ()));
+      Unix.putenv "MONTY_FOCUS" "";
+      assert_equal "focus env empty default" "background"
+        (Terminal.focus_policy_to_string (Terminal.default_focus_policy ())))
+
+let test_dry_run_includes_focus_policy () =
+  let root = temp_root "dry-run-focus" in
+  Shell.ensure_dir root;
+  let context = Filename.concat root "context.md" in
+  Shell.write_file context "# Task\n";
+  let job = Job.make ~title:"Focus policy" ~repo:root ~context () in
+  let options =
+    Launcher.{
+      backend = Terminal.Dry_run;
+      target = Terminal.Tab;
+      focus_policy = Terminal.Background;
+      pi_command = "pi";
+      wt_command = "wt";
+      worktree_mode = Always;
+      branch_prefix = "cto";
+      fork = None;
+      home = root;
+      script_dir = root;
+      monty_command = "monty";
+    }
+  in
+  let output = capture_stdout (fun () -> must (Launcher.launch_one options job)) in
+  assert_contains "dry-run focus" output "focus=background"
+
+let test_ghostty_tab_launch_foreground_focuses_new_terminal () =
+  let script =
+    Ghostty.applescript ~target:Terminal.Tab ~focus_policy:Terminal.Foreground
+      ~workdir:"/tmp" ~script_path:"/tmp/monty.sh"
+  in
+  assert_contains "foreground activates Ghostty" script "activate";
+  assert_contains "foreground tab launch selects tab" script "select tab montyTab";
+  assert_contains "foreground tab launch focuses terminal" script "focus focused terminal of montyTab"
+
+let test_ghostty_tab_launch_background_does_not_focus () =
+  let script =
+    Ghostty.applescript ~target:Terminal.Tab ~focus_policy:Terminal.Background
+      ~workdir:"/tmp" ~script_path:"/tmp/monty.sh"
+  in
+  assert_contains "background launches Ghostty" script "launch";
+  assert_not_contains "background does not activate Ghostty" script "activate";
+  assert_not_contains "background does not activate a window" script "activate window";
+  assert_not_contains "background does not select tab" script "select tab montyTab";
+  assert_not_contains "background does not focus" script "focus"
+
+let test_ghostty_split_launch_background_splits_focused_terminal () =
+  let script =
+    Ghostty.applescript ~target:Terminal.Split ~focus_policy:Terminal.Background
+      ~workdir:"/tmp" ~script_path:"/tmp/monty.sh"
+  in
+  assert_contains "background split preserves selected pane"
+    script "set montyTerminal to focused terminal of selected tab of front window";
+  assert_not_contains "background split does not activate Ghostty" script "activate";
+  assert_not_contains "background split does not activate a window" script "activate window";
+  assert_not_contains "background split does not focus new terminal" script "focus montyNewTerminal"
 
 let test_list_jobs_render () =
   let root = temp_root "list" in
@@ -328,6 +405,10 @@ let () =
   test_resume_archived_reactivates ();
   test_launch_many_single_job_uses_single_job_defaults ();
   test_launch_many_multiple_jobs_keeps_numbered_defaults ();
-  test_ghostty_tab_launch_focuses_new_terminal ();
+  test_focus_policy_parsing_and_default ();
+  test_dry_run_includes_focus_policy ();
+  test_ghostty_tab_launch_foreground_focuses_new_terminal ();
+  test_ghostty_tab_launch_background_does_not_focus ();
+  test_ghostty_split_launch_background_splits_focused_terminal ();
   test_list_jobs_render ();
   test_project_overview_local_tasks ()

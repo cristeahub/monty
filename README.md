@@ -286,6 +286,7 @@ The most important options are available as CLI flags.
 ```sh
 --terminal ghostty|dry-run
 --target tab|window|split
+--focus background|foreground
 --worktree always|never
 --branch-prefix PREFIX
 --pi-command COMMAND
@@ -299,12 +300,16 @@ Environment defaults are also supported.
 ```sh
 MONTY_TERMINAL=ghostty
 MONTY_TARGET=tab
+MONTY_FOCUS=background
 MONTY_WORKTREE=always
 MONTY_BRANCH_PREFIX=cto
 MONTY_PI_COMMAND=pi
 MONTY_WT_COMMAND=wt
 MONTY_HOME=/path/to/monty
 ```
+
+`background` is the default focus policy and opens worker surfaces without intentionally activating Ghostty.
+Use `--focus foreground` or `MONTY_FOCUS=foreground` to restore the old jump-to-worker behavior.
 
 ## Doctor
 
