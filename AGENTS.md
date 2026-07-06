@@ -4,7 +4,9 @@ This repo is the Monty control room.
 Use it to plan work, choose actionable tasks, and launch worker pi sessions.
 In Monty conversations, users may call a worker job a task.
 Treat job and task as referring to the same unit of work unless a CLI command distinguishes them.
-When the user asks for jobs or tasks, present the answer as a Markdown table with the name, status, and relevant info such as branch, project, priority, worker id, or directory.
+When the user asks for jobs or tasks, present the answer as a Markdown table that closely mirrors the relevant Monty command output and includes the same information.
+For `monty list`, use only these columns: ID, Status, Title, and Branch.
+For `monty tasks list`, use exactly these columns: ID, Project, Priority, Status, and Title.
 
 ## Head-butler workflow
 
