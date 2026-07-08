@@ -245,12 +245,18 @@ Show a cross-project overview:
 dune exec -- monty overview
 ```
 
-List tasks from external sources and Monty-owned local tasks:
+List tasks:
 
 ```sh
+dune exec -- monty list
 dune exec -- monty tasks list
 dune exec -- monty tasks list --project monty
 ```
+
+`list` and `tasks list` are equivalent task-listing views and show `ID`, `PROJECT`, `PRIORITY`, `STATUS`, `TITLE`, and `BRANCH`.
+They automatically sync worker jobs into the local task source of truth before rendering.
+Worker jobs are linked back to local tasks with `task_key`.
+You can run `dune exec -- monty tasks sync` explicitly when repairing or inspecting sync behavior.
 
 Add or complete a local task:
 

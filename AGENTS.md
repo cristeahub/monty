@@ -2,11 +2,14 @@
 
 This repo is the Monty control room.
 Use it to plan work, choose actionable tasks, and launch worker pi sessions.
-In Monty conversations, users may call a worker job a task.
-Treat job and task as referring to the same unit of work unless a CLI command distinguishes them.
+In Monty conversations, a worker job and a task are the same unit of work.
+Do not treat active worker jobs and local tasks as separate concepts in user-facing replies.
+The local task registry is the source of truth for task status.
+Keep worker jobs linked to local tasks with `task_key` and run `monty tasks sync` after launching, archiving, importing, or noticing unlinked worker jobs.
+`monty list` and `monty tasks list` are equivalent task-listing views and must show the same task inventory.
 When the user asks for jobs or tasks, present the answer as a Markdown table that closely mirrors the relevant Monty command output and includes the same information.
-For `monty list`, use only these columns: ID, Status, Title, and Branch.
-For `monty tasks list`, use exactly these columns: ID, Project, Priority, Status, and Title.
+For task and job lists, use exactly these columns: ID, Project, Priority, Status, Title, and Branch.
+Use `monty list` or `monty tasks list` for the task inventory, not an ad-hoc merge of local tasks and worker jobs.
 
 ## Head-butler workflow
 
@@ -45,7 +48,8 @@ Prefer setting it when the issue number or task name gives a clear branch name.
 Use the configured branch prefix for branch names.
 The default prefix is `monty`, but users may set `MONTY_BRANCH_PREFIX`, for example `cto`.
 When omitting `branch`, Monty derives `<branch-prefix>/<title-slug>` automatically.
-Set `task_key` for workers launched from Monty-owned local tasks, for example `local:local-001`.
+Create or sync a local task for every worker before launch so the local task registry remains the source of truth.
+Set `task_key` for workers launched from local tasks, for example `local:local-001`.
 When `task_key` is present, `monty done <worker-id>` closes the linked local task while archiving the worker.
 Monty also has legacy inference for worker ids that start with `local-NNN` and unambiguous same-title local tasks, but prefer explicit `task_key` for new workers.
 
@@ -83,12 +87,11 @@ Use `monty list --archived` or `monty list --all` when reviewing archived work.
 When the user asks about current projects, project context, task overview, or what Monty knows about their work, get the information from Monty first.
 Use `monty overview` for a cross-project summary.
 Use `monty projects list` and `monty projects show <project>` for project memory.
+Use `monty tasks sync` to reconcile worker jobs into local tasks.
 Use `monty tasks list` for task summaries.
-Use `monty projects add --repo <repo> --github <owner/repo>` when the user wants Monty to start tracking a project with GitHub issues as the task source of truth.
-Use `monty task add --project <project> --title <title>` only for work that has no external source of truth.
+Use `monty projects add --repo <repo> --github <owner/repo>` when the user wants Monty to fetch GitHub issue metadata, but keep local tasks as the status source of truth.
+Use `monty task add --project <project> --title <title>` for local tracking records, including work that originates from GitHub issues or other external systems.
 Use `monty task priority <task> <priority>` for local priority without changing the external source of truth.
-Do not duplicate external tasks into Monty memory when a source of truth such as GitHub issues exists.
-Use Monty-owned local tasks only when no external source of truth exists.
 
 ## Worker expectations
 

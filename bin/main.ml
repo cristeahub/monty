@@ -201,15 +201,15 @@ let list_jobs archived all run home =
 
 let list_jobs_term =
   let archived =
-    let doc = "List archived jobs instead of active jobs." in
+    let doc = "List done tasks instead of open tasks." in
     Cmdliner.Arg.(value & flag & info [ "archived" ] ~doc)
   in
   let all =
-    let doc = "List active and archived jobs." in
+    let doc = "List open and done tasks." in
     Cmdliner.Arg.(value & flag & info [ "all" ] ~doc)
   in
   let run =
-    let doc = "Only list jobs for a run directory name or path." in
+    let doc = "Only list tasks linked to jobs for a run directory name or path." in
     Cmdliner.Arg.(value & opt (some string) None & info [ "run" ] ~docv:"RUN" ~doc)
   in
   Cmdliner.Term.(const list_jobs $ archived $ all $ run $ home_arg)
@@ -292,7 +292,12 @@ let projects_add_term =
   Cmdliner.Term.(const projects_add $ repo $ github $ query $ home_arg)
 
 let tasks_list project all home =
-  match Project_overview.load_tasks ~home ?project ~all () with
+  let result =
+    let ( let* ) = Result.bind in
+    let* _sync_result = Project_overview.sync_jobs_to_local_tasks ~home in
+    Project_overview.load_tasks ~home ?project ~all ()
+  in
+  match result with
   | Error msg -> exit_code (Error msg)
   | Ok tasks ->
       Fmt.pr "%s" (Project_overview.render_tasks tasks);
@@ -308,6 +313,16 @@ let tasks_list_term =
     Cmdliner.Arg.(value & flag & info [ "all" ] ~doc)
   in
   Cmdliner.Term.(const tasks_list $ project $ all $ home_arg)
+
+let tasks_sync home =
+  match Project_overview.sync_jobs_to_local_tasks ~home with
+  | Error msg -> exit_code (Error msg)
+  | Ok result ->
+      Fmt.pr "Synced jobs to local tasks: %d created, %d updated, %d linked jobs\n"
+        result.Project_overview.created result.updated result.linked_jobs;
+      0
+
+let tasks_sync_term = Cmdliner.Term.(const tasks_sync $ home_arg)
 
 let task_add project title priority home =
   match Project_overview.add_local_task ~home ~project ~title ?priority () with
@@ -384,7 +399,7 @@ let done_cmd =
   Cmdliner.Cmd.v (Cmdliner.Cmd.info "done" ~doc) complete_term
 
 let list_cmd =
-  let doc = "List active or archived Monty jobs." in
+  let doc = "List Monty tasks from the local task source of truth." in
   Cmdliner.Cmd.v (Cmdliner.Cmd.info "list" ~doc) list_jobs_term
 
 let ensure_worktree_cmd =
@@ -416,8 +431,12 @@ let tasks_cmd =
     let doc = "List external and local tasks." in
     Cmdliner.Cmd.v (Cmdliner.Cmd.info "list" ~doc) tasks_list_term
   in
+  let sync_cmd =
+    let doc = "Sync worker jobs into the local task source of truth." in
+    Cmdliner.Cmd.v (Cmdliner.Cmd.info "sync" ~doc) tasks_sync_term
+  in
   let doc = "Read task summaries from sources of truth." in
-  Cmdliner.Cmd.group (Cmdliner.Cmd.info "tasks" ~doc) [ list_cmd ]
+  Cmdliner.Cmd.group (Cmdliner.Cmd.info "tasks" ~doc) [ list_cmd; sync_cmd ]
 
 let task_cmd =
   let add_cmd =

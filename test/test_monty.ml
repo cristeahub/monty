@@ -348,11 +348,48 @@ let test_ghostty_tab_launch_focuses_new_terminal () =
 
 let test_list_jobs_render () =
   let root = temp_root "list" in
-  let home, _repo, _context, _worker_dir, _instructions = setup_worker root in
-  let records = must (Job_store.load ~home ~scope:Job_store.Active) in
-  let output = List_jobs.render records in
-  assert_contains "list id" output "issue-123";
-  assert_contains "list status" output "ACTIVE"
+  let home, repo, _context, _worker_dir, _instructions = setup_worker root in
+  let _project = must (Project_overview.add_project ~home ~repo ()) in
+  let output = capture_stdout (fun () -> must (List_jobs.run ~home ~scope:Job_store.Active ())) in
+  assert_contains "list task id" output "local:local-001";
+  assert_contains "list project" output "repo";
+  assert_contains "list status" output "open";
+  assert_contains "list branch" output "cto/issue-123";
+  assert_not_contains "list should not use job-only status" output "ACTIVE"
+
+let test_tasks_sync_jobs_to_local_source () =
+  let root = temp_root "tasks-sync" in
+  let home = Filename.concat root "home" in
+  let repo = Filename.concat root "repo" in
+  let context = Filename.concat root "context.md" in
+  Shell.ensure_dir home;
+  Shell.ensure_dir repo;
+  Shell.write_file context "# Task\n";
+  let _project = must (Project_overview.add_project ~home ~repo ()) in
+  let job =
+    Job.make ~id:"issue-5250-localize-invoice-english"
+      ~branch:"cto/5250-localize-invoice-english"
+      ~title:"Issue 5250 - Localize invoice to English" ~repo ~context ()
+  in
+  let _id, worker_dir, _instructions =
+    Worker_memory.ensure ~home ~job ~branch:"cto/5250-localize-invoice-english" ~repo
+      ~context ~worktree_mode:"never" ~last_known_worktree:None
+  in
+  assert_bool "worker memory created" (Sys.file_exists worker_dir);
+  let result = must (Project_overview.sync_jobs_to_local_tasks ~home) in
+  assert_equal "sync created" "1" (string_of_int result.Project_overview.created);
+  assert_equal "sync linked" "1" (string_of_int result.linked_jobs);
+  let tasks = must (Project_overview.load_tasks ~home ()) in
+  let rendered = Project_overview.render_tasks tasks in
+  assert_contains "synced task title" rendered "Issue 5250 - Localize invoice to English";
+  assert_contains "synced task branch" rendered "cto/5250-localize-invoice-english";
+  let record = must (Job_store.parse_job_file (Filename.concat worker_dir "job.json")) in
+  assert_equal "job task key" "local:local-001"
+    (Option.value ~default:"" record.Job_store.job.Job.task_key);
+  let second = must (Project_overview.sync_jobs_to_local_tasks ~home) in
+  assert_equal "second sync created" "0" (string_of_int second.Project_overview.created);
+  assert_equal "second sync updated" "0" (string_of_int second.updated);
+  assert_equal "second sync linked" "0" (string_of_int second.linked_jobs)
 
 let test_project_overview_local_tasks () =
   let root = temp_root "projects" in
@@ -401,4 +438,5 @@ let () =
   test_launch_many_multiple_jobs_keeps_numbered_defaults ();
   test_ghostty_tab_launch_focuses_new_terminal ();
   test_list_jobs_render ();
+  test_tasks_sync_jobs_to_local_source ();
   test_project_overview_local_tasks ()

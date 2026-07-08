@@ -26,10 +26,38 @@ let render records =
   let header = Printf.sprintf "%-16s %-7s %-32s %-24s %s" "ID" "STATUS" "TITLE" "BRANCH" "DIR" in
   String.concat "\n" (header :: List.map line records) ^ "\n"
 
+let task_done task = String.equal (String.lowercase_ascii task.Project_overview.status) "done"
+
+let task_in_scope scope task =
+  match scope with
+  | Job_store.Active -> not (task_done task)
+  | Job_store.Archived -> task_done task
+  | Job_store.All -> true
+
+let task_keys_for_run ~home run =
+  match run with
+  | None -> Ok None
+  | Some _ -> (
+      match Job_store.load ~home ~scope:Job_store.All with
+      | Error msg -> Error msg
+      | Ok records ->
+          let task_keys =
+            records
+            |> List.filter (run_matches run)
+            |> List.filter_map (fun record -> record.Job_store.job.Job.task_key)
+          in
+          Ok (Some task_keys))
+
+let task_matches_run task_keys task =
+  match task_keys with
+  | None -> true
+  | Some keys -> List.exists (String.equal task.Project_overview.key) keys
+
 let run ~home ~scope ?run () =
-  match Job_store.load ~home ~scope with
-  | Error msg -> Error msg
-  | Ok records ->
-      let records = records |> List.filter (run_matches run) in
-      Fmt.pr "%s" (render records);
-      Ok ()
+  let ( let* ) = Result.bind in
+  let* _sync_result = Project_overview.sync_jobs_to_local_tasks ~home in
+  let* task_keys = task_keys_for_run ~home run in
+  let* tasks = Project_overview.load_tasks ~home ~all:true () in
+  let tasks = tasks |> List.filter (task_in_scope scope) |> List.filter (task_matches_run task_keys) in
+  Fmt.pr "%s" (Project_overview.render_tasks tasks);
+  Ok ()

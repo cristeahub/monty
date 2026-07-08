@@ -24,6 +24,7 @@ type local_task = {
   title : string;
   status : string;
   priority : string option;
+  branch : string option;
   notes : string option;
   created_at : string option;
   updated_at : string option;
@@ -36,6 +37,7 @@ type task = {
   title : string;
   status : string;
   priority : string option;
+  branch : string option;
   url : string option;
 }
 
@@ -320,6 +322,7 @@ let parse_local_task json =
   let* title = member_string json "title" in
   let* status = optional_string json "status" in
   let* priority = optional_string json "priority" in
+  let* branch = optional_string json "branch" in
   let* notes = optional_string json "notes" in
   let* created_at = optional_string json "created_at" in
   let* updated_at = optional_string json "updated_at" in
@@ -330,6 +333,7 @@ let parse_local_task json =
       title;
       status = Option.value ~default:"open" status;
       priority;
+      branch;
       notes;
       created_at;
       updated_at;
@@ -342,6 +346,7 @@ let json_of_local_task task =
       ("title", `String task.title);
       ("status", `String task.status) ]
     @ (match task.priority with None -> [] | Some value -> [ ("priority", `String value) ])
+    @ (match task.branch with None -> [] | Some value -> [ ("branch", `String value) ])
     @ (match task.notes with None -> [] | Some value -> [ ("notes", `String value) ])
     @ (match task.created_at with None -> [] | Some value -> [ ("created_at", `String value) ])
     @ (match task.updated_at with None -> [] | Some value -> [ ("updated_at", `String value) ])
@@ -427,6 +432,7 @@ let task_of_local priorities (task : local_task) =
     title = task.title;
     status = task.status;
     priority = first_some (priority_for priorities key) task.priority;
+    branch = task.branch;
     url = None;
   }
 
@@ -443,6 +449,7 @@ let add_local_task ~home ~project ~title ?priority () =
       title;
       status = "open";
       priority;
+      branch = None;
       notes = None;
       created_at = Some now;
       updated_at = Some now;
@@ -468,6 +475,117 @@ let done_local_task ~home id =
     let* () = save_local_tasks ~home tasks in
     Ok ()
 
+type sync_result = {
+  created : int;
+  updated : int;
+  linked_jobs : int;
+}
+
+let empty_sync_result = { created = 0; updated = 0; linked_jobs = 0 }
+
+let sync_merge left right =
+  {
+    created = left.created + right.created;
+    updated = left.updated + right.updated;
+    linked_jobs = left.linked_jobs + right.linked_jobs;
+  }
+
+let local_task_key id = "local:" ^ id
+
+let local_task_id_from_key key =
+  match strip_prefix "local:" key with
+  | Some id when prefix "local-" id -> Some id
+  | _ when prefix "local-" key -> Some key
+  | _ -> None
+
+let project_for_repo projects repo =
+  let repo = Shell.normalize (Shell.abs_path repo) in
+  match List.find_opt (fun (project : project) -> String.equal project.repo repo) projects with
+  | Some project -> Ok project
+  | None -> Error (Printf.sprintf "no Monty project for worker repo: %s" repo)
+
+let find_local_task_by_id tasks id =
+  List.find_opt (fun (task : local_task) -> String.equal task.id id) tasks
+
+let find_local_task_for_job tasks project_id branch title =
+  match
+    tasks
+    |> List.find_opt (fun (task : local_task) ->
+           String.equal task.project project_id
+           && Option.equal String.equal task.branch (Some branch))
+  with
+  | Some task -> Some task
+  | None ->
+      tasks
+      |> List.find_opt (fun (task : local_task) ->
+             String.equal task.project project_id && String.equal task.title title)
+
+let replace_local_task tasks updated =
+  tasks
+  |> List.map (fun (task : local_task) -> if String.equal task.id updated.id then updated else task)
+
+let status_of_job record = if Job_store.is_archived record then "done" else "open"
+
+let task_id_for_job tasks project_id record =
+  match record.Job_store.job.Job.task_key with
+  | Some key -> local_task_id_from_key key
+  | None -> (
+      match local_task_id_from_key record.Job_store.id with
+      | Some id -> Some id
+      | None ->
+          let branch = Option.value ~default:"" record.Job_store.job.Job.branch in
+          find_local_task_for_job tasks project_id branch record.Job_store.job.Job.title
+          |> Option.map (fun task -> task.id))
+
+let sync_job_to_local_task projects (tasks, result) record =
+  let ( let* ) = Result.bind in
+  let* project = project_for_repo projects record.Job_store.job.Job.repo in
+  let branch = Option.value ~default:"" record.Job_store.job.Job.branch in
+  let status = status_of_job record in
+  let now = now_utc () in
+  let task_id = task_id_for_job tasks project.id record in
+  let tasks, result, task =
+    match Option.bind task_id (find_local_task_by_id tasks) with
+    | Some task ->
+        let candidate = { task with project = project.id; status; branch = Some branch } in
+        if candidate = task then (tasks, result, task)
+        else
+          let updated = { candidate with updated_at = Some now } in
+          (replace_local_task tasks updated, { result with updated = result.updated + 1 }, updated)
+    | None ->
+        let task =
+          {
+            id = next_local_id tasks;
+            project = project.id;
+            title = record.Job_store.job.Job.title;
+            status;
+            priority = None;
+            branch = Some branch;
+            notes = None;
+            created_at = Some now;
+            updated_at = Some now;
+          }
+        in
+        (tasks @ [ task ], { result with created = result.created + 1 }, task)
+  in
+  let desired_task_key = local_task_key task.id in
+  match record.Job_store.job.Job.task_key with
+  | Some task_key when String.equal task_key desired_task_key -> Ok (tasks, result)
+  | _ ->
+      let* () = Job_store.update_file record.Job_store.path [ Job_store.string "task_key" desired_task_key ] in
+      Ok (tasks, { result with linked_jobs = result.linked_jobs + 1 })
+
+let sync_jobs_to_local_tasks ~home =
+  let ( let* ) = Result.bind in
+  let* projects = load_projects ~home in
+  let* tasks = load_local_tasks ~home in
+  let* jobs = Job_store.load ~home ~scope:Job_store.All in
+  let* tasks, result =
+    fold_results jobs ~init:(tasks, empty_sync_result) ~f:(sync_job_to_local_task projects)
+  in
+  let* () = save_local_tasks ~home tasks in
+  Ok result
+
 let parse_github_issue ~(project : project) ~repo ~priorities json =
   match (Util.member "number" json, Util.member "title" json) with
   | `Int number, `String title ->
@@ -484,6 +602,7 @@ let parse_github_issue ~(project : project) ~repo ~priorities json =
           title;
           status;
           priority = priority_for priorities key;
+          branch = None;
           url;
         }
   | _ -> Error "GitHub issue JSON missing number or title"
@@ -550,12 +669,15 @@ let compare_tasks left right =
 
 let render_tasks tasks =
   let tasks = List.sort compare_tasks tasks in
-  let header = Printf.sprintf "%-32s %-16s %-8s %-8s %s" "ID" "PROJECT" "PRIORITY" "STATUS" "TITLE" in
+  let header =
+    Printf.sprintf "%-32s %-16s %-8s %-8s %-48s %s" "ID" "PROJECT" "PRIORITY" "STATUS" "TITLE" "BRANCH"
+  in
   let lines =
     tasks
     |> List.map (fun task ->
-           Printf.sprintf "%-32s %-16s %-8s %-8s %s" task.key task.project
-             (Option.value ~default:"" task.priority) task.status task.title)
+           Printf.sprintf "%-32s %-16s %-8s %-8s %-48s %s" task.key task.project
+             (Option.value ~default:"" task.priority) task.status task.title
+             (Option.value ~default:"" task.branch))
   in
   String.concat "\n" (header :: lines) ^ "\n"
 
@@ -573,6 +695,7 @@ let render_active_jobs jobs =
 
 let overview ~home =
   let ( let* ) = Result.bind in
+  let* _sync_result = sync_jobs_to_local_tasks ~home in
   let* projects = load_projects ~home in
   let* tasks = load_tasks ~home () in
   let* jobs = Job_store.load ~home ~scope:Job_store.Active in
