@@ -276,7 +276,7 @@ let test_done_closes_legacy_local_task_matched_by_title () =
   assert_bool "legacy linked local task hidden after archive" (open_tasks = []);
   let all_tasks = must (Project_overview.load_tasks ~home ~all:true ()) in
   assert_contains "legacy linked local task done" (Project_overview.render_tasks all_tasks)
-    ("local:" ^ task.Project_overview.id)
+    "legacy-worker"
 
 let test_resume_archived_reactivates () =
   let root = temp_root "resume-archived" in
@@ -351,7 +351,8 @@ let test_list_jobs_render () =
   let home, repo, _context, _worker_dir, _instructions = setup_worker root in
   let _project = must (Project_overview.add_project ~home ~repo ()) in
   let output = capture_stdout (fun () -> must (List_jobs.run ~home ~scope:Job_store.Active ())) in
-  assert_contains "list task id" output "local:local-001";
+  assert_contains "list worker id" output "issue-123";
+  assert_not_contains "list should not show linked local task id" output "local:local-001";
   assert_contains "list project" output "repo";
   assert_contains "list status" output "open";
   assert_contains "list branch" output "cto/issue-123";
@@ -383,6 +384,7 @@ let test_tasks_sync_jobs_to_local_source () =
   let rendered = Project_overview.render_tasks tasks in
   assert_contains "synced task title" rendered "Issue 5250 - Localize invoice to English";
   assert_contains "synced task branch" rendered "cto/5250-localize-invoice-english";
+  assert_not_contains "synced task list hides local task id" rendered "local:local-001";
   let record = must (Job_store.parse_job_file (Filename.concat worker_dir "job.json")) in
   assert_equal "job task key" "local:local-001"
     (Option.value ~default:"" record.Job_store.job.Job.task_key);

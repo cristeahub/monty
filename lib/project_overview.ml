@@ -32,6 +32,7 @@ type local_task = {
 
 type task = {
   key : string;
+  display_id : string;
   project : string;
   origin : string;
   title : string;
@@ -427,6 +428,7 @@ let task_of_local priorities (task : local_task) =
   let key = "local:" ^ task.id in
   {
     key;
+    display_id = key;
     project = task.project;
     origin = "local";
     title = task.title;
@@ -526,6 +528,41 @@ let replace_local_task tasks updated =
 
 let status_of_job record = if Job_store.is_archived record then "done" else "open"
 
+let preferred_job_record (left : Job_store.record) (right : Job_store.record) =
+  match (Job_store.is_archived left, Job_store.is_archived right) with
+  | false, true -> left
+  | true, false -> right
+  | _ ->
+      if String.compare left.Job_store.id right.Job_store.id <= 0 then left
+      else right
+
+let linked_job_display_ids records =
+  records
+  |> List.fold_left
+       (fun acc (record : Job_store.record) ->
+         match record.Job_store.job.Job.task_key with
+         | None -> acc
+         | Some task_key ->
+             let preferred =
+               match List.assoc_opt task_key acc with
+               | None -> record
+               | Some current -> preferred_job_record current record
+             in
+             (task_key, preferred) :: List.remove_assoc task_key acc)
+       []
+  |> List.map (fun (task_key, record) -> (task_key, record.Job_store.id))
+
+let apply_linked_job_display_ids ~home tasks =
+  let ( let* ) = Result.bind in
+  let* jobs = Job_store.load ~home ~scope:Job_store.All in
+  let display_ids = linked_job_display_ids jobs in
+  Ok
+    (tasks
+    |> List.map (fun task ->
+           match List.assoc_opt task.key display_ids with
+           | None -> task
+           | Some display_id -> { task with display_id }))
+
 let task_id_for_job tasks project_id record =
   match record.Job_store.job.Job.task_key with
   | Some key -> local_task_id_from_key key
@@ -597,6 +634,7 @@ let parse_github_issue ~(project : project) ~repo ~priorities json =
       Ok
         {
           key;
+          display_id = key;
           project = project.id;
           origin = "github";
           title;
@@ -660,24 +698,48 @@ let load_tasks ~home ?project ?(all = false) () =
            && (all || not (String.equal (String.lowercase_ascii task.status) "done")))
     |> List.map (task_of_local priorities)
   in
-  Ok (external_tasks @ local_task_items)
+  apply_linked_job_display_ids ~home (external_tasks @ local_task_items)
 
 let compare_tasks left right =
   match String.compare left.project right.project with
   | 0 -> String.compare left.key right.key
   | value -> value
 
+let width minimum values =
+  values |> List.fold_left (fun current value -> max current (String.length value)) minimum
+
+let pad_right width value =
+  value ^ String.make (max 0 (width - String.length value)) ' '
+
 let render_tasks tasks =
   let tasks = List.sort compare_tasks tasks in
-  let header =
-    Printf.sprintf "%-32s %-16s %-8s %-8s %-48s %s" "ID" "PROJECT" "PRIORITY" "STATUS" "TITLE" "BRANCH"
+  let ids = List.map (fun task -> task.display_id) tasks in
+  let projects = List.map (fun task -> task.project) tasks in
+  let priorities = List.map (fun task -> Option.value ~default:"" task.priority) tasks in
+  let statuses = List.map (fun task -> task.status) tasks in
+  let titles = List.map (fun task -> task.title) tasks in
+  let branches = List.map (fun task -> Option.value ~default:"" task.branch) tasks in
+  let id_width = width 2 ("ID" :: ids) in
+  let project_width = width 7 ("PROJECT" :: projects) in
+  let priority_width = width 8 ("PRIORITY" :: priorities) in
+  let status_width = width 6 ("STATUS" :: statuses) in
+  let title_width = width 5 ("TITLE" :: titles) in
+  let render_row id project priority status title branch =
+    String.concat " "
+      [ pad_right id_width id;
+        pad_right project_width project;
+        pad_right priority_width priority;
+        pad_right status_width status;
+        pad_right title_width title;
+        branch ]
   in
+  let header = render_row "ID" "PROJECT" "PRIORITY" "STATUS" "TITLE" "BRANCH" in
   let lines =
-    tasks
-    |> List.map (fun task ->
-           Printf.sprintf "%-32s %-16s %-8s %-8s %-48s %s" task.key task.project
-             (Option.value ~default:"" task.priority) task.status task.title
-             (Option.value ~default:"" task.branch))
+    List.map2
+      (fun task branch ->
+        render_row task.display_id task.project
+          (Option.value ~default:"" task.priority) task.status task.title branch)
+      tasks branches
   in
   String.concat "\n" (header :: lines) ^ "\n"
 
