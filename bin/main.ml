@@ -324,8 +324,8 @@ let tasks_sync home =
 
 let tasks_sync_term = Cmdliner.Term.(const tasks_sync $ home_arg)
 
-let task_add project title priority home =
-  match Project_overview.add_local_task ~home ~project ~title ?priority () with
+let task_add project title home =
+  match Project_overview.add_local_task ~home ~project ~title () with
   | Error msg -> exit_code (Error msg)
   | Ok task ->
       Fmt.pr "Added local task %s\n" task.Project_overview.id;
@@ -340,11 +340,7 @@ let task_add_term =
     let doc = "Task title." in
     Cmdliner.Arg.(required & opt (some string) None & info [ "title" ] ~docv:"TITLE" ~doc)
   in
-  let priority =
-    let doc = "Local priority such as high, medium, or low." in
-    Cmdliner.Arg.(value & opt (some string) None & info [ "priority" ] ~docv:"PRIORITY" ~doc)
-  in
-  Cmdliner.Term.(const task_add $ project $ title $ priority $ home_arg)
+  Cmdliner.Term.(const task_add $ project $ title $ home_arg)
 
 let task_done id home =
   Project_overview.done_local_task ~home id |> exit_code
@@ -355,20 +351,6 @@ let task_done_term =
     Cmdliner.Arg.(required & pos 0 (some string) None & info [] ~docv:"TASK" ~doc)
   in
   Cmdliner.Term.(const task_done $ id $ home_arg)
-
-let task_priority task priority home =
-  Project_overview.set_priority ~home ~task ~priority |> exit_code
-
-let task_priority_term =
-  let task =
-    let doc = "Task key, such as github:owner/repo#123 or local-001." in
-    Cmdliner.Arg.(required & pos 0 (some string) None & info [] ~docv:"TASK" ~doc)
-  in
-  let priority =
-    let doc = "Local priority such as high, medium, or low." in
-    Cmdliner.Arg.(required & pos 1 (some string) None & info [] ~docv:"PRIORITY" ~doc)
-  in
-  Cmdliner.Term.(const task_priority $ task $ priority $ home_arg)
 
 let doctor pi_command wt_command = Doctor.run ~pi_command ~wt_command |> exit_code
 
@@ -447,12 +429,8 @@ let task_cmd =
     let doc = "Mark a Monty-owned local task done." in
     Cmdliner.Cmd.v (Cmdliner.Cmd.info "done" ~doc) task_done_term
   in
-  let priority_cmd =
-    let doc = "Set a local priority for any task." in
-    Cmdliner.Cmd.v (Cmdliner.Cmd.info "priority" ~doc) task_priority_term
-  in
   let doc = "Manage Monty-owned local task data." in
-  Cmdliner.Cmd.group (Cmdliner.Cmd.info "task" ~doc) [ add_cmd; done_cmd; priority_cmd ]
+  Cmdliner.Cmd.group (Cmdliner.Cmd.info "task" ~doc) [ add_cmd; done_cmd ]
 
 let doctor_cmd =
   let doc = "Check Monty launch dependencies." in

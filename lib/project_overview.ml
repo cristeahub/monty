@@ -23,7 +23,6 @@ type local_task = {
   project : string;
   title : string;
   status : string;
-  priority : string option;
   branch : string option;
   notes : string option;
   created_at : string option;
@@ -37,7 +36,6 @@ type task = {
   origin : string;
   title : string;
   status : string;
-  priority : string option;
   branch : string option;
   url : string option;
 }
@@ -46,7 +44,6 @@ let monty_dir home = Filename.concat home ".monty"
 let projects_file home = Filename.concat (monty_dir home) "projects.json"
 let projects_dir home = Filename.concat (monty_dir home) "projects"
 let local_tasks_file home = Filename.concat (monty_dir home) "tasks.local.json"
-let priorities_file home = Filename.concat (monty_dir home) "priorities.json"
 let project_memory_file ~home id = Filename.concat (projects_dir home) (id ^ ".md")
 
 let now_utc = Worker_memory.now_utc
@@ -322,7 +319,6 @@ let parse_local_task json =
   let* project = member_string json "project" in
   let* title = member_string json "title" in
   let* status = optional_string json "status" in
-  let* priority = optional_string json "priority" in
   let* branch = optional_string json "branch" in
   let* notes = optional_string json "notes" in
   let* created_at = optional_string json "created_at" in
@@ -333,7 +329,6 @@ let parse_local_task json =
       project;
       title;
       status = Option.value ~default:"open" status;
-      priority;
       branch;
       notes;
       created_at;
@@ -346,7 +341,6 @@ let json_of_local_task task =
       ("project", `String task.project);
       ("title", `String task.title);
       ("status", `String task.status) ]
-    @ (match task.priority with None -> [] | Some value -> [ ("priority", `String value) ])
     @ (match task.branch with None -> [] | Some value -> [ ("branch", `String value) ])
     @ (match task.notes with None -> [] | Some value -> [ ("notes", `String value) ])
     @ (match task.created_at with None -> [] | Some value -> [ ("created_at", `String value) ])
@@ -383,48 +377,7 @@ let next_local_id tasks =
   in
   Printf.sprintf "local-%03d" (max_id + 1)
 
-let load_priorities ~home =
-  let path = priorities_file home in
-  if not (Sys.file_exists path) then Ok []
-  else
-    match read_json_file path with
-    | Error msg -> Error msg
-    | Ok (`Assoc fields) ->
-        fields
-        |> List.fold_left
-             (fun acc (key, value) ->
-               match (acc, value) with
-               | Error _ as err, _ -> err
-               | Ok priorities, `String priority -> Ok ((key, priority) :: priorities)
-               | Ok _, _ -> Error (Printf.sprintf "priority for %S must be a string" key))
-             (Ok [])
-        |> Result.map List.rev
-    | Ok _ -> Error (path ^ " must contain a JSON object")
-
-let priority_for priorities key = List.assoc_opt key priorities
-
-let normalize_task_key key =
-  if prefix "github:" key || prefix "local:" key then key
-  else if prefix "local-" key then "local:" ^ key
-  else key
-
-let save_priorities ~home priorities =
-  let path = priorities_file home in
-  Shell.ensure_dir (Filename.dirname path);
-  Yojson.Safe.to_file path
-    (`Assoc (List.map (fun (key, priority) -> (key, `String priority)) priorities));
-  Ok ()
-
-let set_priority ~home ~task ~priority =
-  let ( let* ) = Result.bind in
-  let* priorities = load_priorities ~home in
-  let key = normalize_task_key task in
-  let priorities = (key, priority) :: List.remove_assoc key priorities in
-  save_priorities ~home priorities
-
-let first_some left right = match left with Some _ -> left | None -> right
-
-let task_of_local priorities (task : local_task) =
+let task_of_local (task : local_task) =
   let key = "local:" ^ task.id in
   {
     key;
@@ -433,12 +386,11 @@ let task_of_local priorities (task : local_task) =
     origin = "local";
     title = task.title;
     status = task.status;
-    priority = first_some (priority_for priorities key) task.priority;
     branch = task.branch;
     url = None;
   }
 
-let add_local_task ~home ~project ~title ?priority () =
+let add_local_task ~home ~project ~title () =
   let ( let* ) = Result.bind in
   let* projects = load_projects ~home in
   let* project = resolve_project projects project in
@@ -450,7 +402,6 @@ let add_local_task ~home ~project ~title ?priority () =
       project = project.id;
       title;
       status = "open";
-      priority;
       branch = None;
       notes = None;
       created_at = Some now;
@@ -596,7 +547,6 @@ let sync_job_to_local_task projects (tasks, result) record =
             project = project.id;
             title = record.Job_store.job.Job.title;
             status;
-            priority = None;
             branch = Some branch;
             notes = None;
             created_at = Some now;
@@ -623,7 +573,7 @@ let sync_jobs_to_local_tasks ~home =
   let* () = save_local_tasks ~home tasks in
   Ok result
 
-let parse_github_issue ~(project : project) ~repo ~priorities json =
+let parse_github_issue ~(project : project) ~repo json =
   match (Util.member "number" json, Util.member "title" json) with
   | `Int number, `String title ->
       let key = Printf.sprintf "github:%s#%d" repo number in
@@ -639,13 +589,12 @@ let parse_github_issue ~(project : project) ~repo ~priorities json =
           origin = "github";
           title;
           status;
-          priority = priority_for priorities key;
           branch = None;
           url;
         }
   | _ -> Error "GitHub issue JSON missing number or title"
 
-let fetch_github_tasks ~project ~priorities { repo; query } =
+let fetch_github_tasks ~project { repo; query } =
   let query_arg =
     match query with
     | None -> ""
@@ -663,15 +612,15 @@ let fetch_github_tasks ~project ~priorities { repo; query } =
         match Yojson.Safe.from_string output with
         | `List issues ->
             fold_results issues ~init:[] ~f:(fun acc json ->
-                parse_github_issue ~project ~repo ~priorities json
+                parse_github_issue ~project ~repo json
                 |> Result.map (fun task -> task :: acc))
             |> Result.map List.rev
         | _ -> Error ("GitHub issue output for " ^ repo ^ " was not a JSON array")
       with Yojson.Json_error msg -> Error ("invalid GitHub issue JSON for " ^ repo ^ ": " ^ msg))
 
-let fetch_project_tasks ~priorities (project : project) =
+let fetch_project_tasks (project : project) =
   let fetch_source = function
-    | Github_issues source -> fetch_github_tasks ~project ~priorities source
+    | Github_issues source -> fetch_github_tasks ~project source
   in
   fold_results project.sources ~init:[] ~f:(fun acc source ->
       fetch_source source |> Result.map (fun tasks -> acc @ tasks))
@@ -684,10 +633,9 @@ let load_tasks ~home ?project ?(all = false) () =
     | None -> Ok projects
     | Some project -> resolve_project projects project |> Result.map (fun project -> [ project ])
   in
-  let* priorities = load_priorities ~home in
   let* external_tasks =
     fold_results selected_projects ~init:[] ~f:(fun acc project ->
-        fetch_project_tasks ~priorities project |> Result.map (fun tasks -> acc @ tasks))
+        fetch_project_tasks project |> Result.map (fun tasks -> acc @ tasks))
   in
   let* local_tasks = load_local_tasks ~home in
   let selected_ids = selected_projects |> List.map (fun (project : project) -> project.id) in
@@ -696,7 +644,7 @@ let load_tasks ~home ?project ?(all = false) () =
     |> List.filter (fun (task : local_task) ->
            (project = None || List.exists (String.equal task.project) selected_ids)
            && (all || not (String.equal (String.lowercase_ascii task.status) "done")))
-    |> List.map (task_of_local priorities)
+    |> List.map task_of_local
   in
   apply_linked_job_display_ids ~home (external_tasks @ local_task_items)
 
@@ -715,30 +663,25 @@ let render_tasks tasks =
   let tasks = List.sort compare_tasks tasks in
   let ids = List.map (fun task -> task.display_id) tasks in
   let projects = List.map (fun task -> task.project) tasks in
-  let priorities = List.map (fun task -> Option.value ~default:"" task.priority) tasks in
   let statuses = List.map (fun task -> task.status) tasks in
   let titles = List.map (fun task -> task.title) tasks in
   let branches = List.map (fun task -> Option.value ~default:"" task.branch) tasks in
   let id_width = width 2 ("ID" :: ids) in
   let project_width = width 7 ("PROJECT" :: projects) in
-  let priority_width = width 8 ("PRIORITY" :: priorities) in
   let status_width = width 6 ("STATUS" :: statuses) in
   let title_width = width 5 ("TITLE" :: titles) in
-  let render_row id project priority status title branch =
+  let render_row id project status title branch =
     String.concat " "
       [ pad_right id_width id;
         pad_right project_width project;
-        pad_right priority_width priority;
         pad_right status_width status;
         pad_right title_width title;
         branch ]
   in
-  let header = render_row "ID" "PROJECT" "PRIORITY" "STATUS" "TITLE" "BRANCH" in
+  let header = render_row "ID" "PROJECT" "STATUS" "TITLE" "BRANCH" in
   let lines =
     List.map2
-      (fun task branch ->
-        render_row task.display_id task.project
-          (Option.value ~default:"" task.priority) task.status task.title branch)
+      (fun task branch -> render_row task.display_id task.project task.status task.title branch)
       tasks branches
   in
   String.concat "\n" (header :: lines) ^ "\n"

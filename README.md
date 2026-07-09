@@ -253,7 +253,7 @@ dune exec -- monty tasks list
 dune exec -- monty tasks list --project monty
 ```
 
-`list` and `tasks list` are equivalent task-listing views and show `ID`, `PROJECT`, `PRIORITY`, `STATUS`, `TITLE`, and `BRANCH`.
+`list` and `tasks list` are equivalent task-listing views and show `ID`, `PROJECT`, `STATUS`, `TITLE`, and `BRANCH`.
 They automatically sync worker jobs into the local task source of truth before rendering.
 Worker jobs are linked back to local tasks with `task_key`.
 You can run `dune exec -- monty tasks sync` explicitly when repairing or inspecting sync behavior.
@@ -261,14 +261,8 @@ You can run `dune exec -- monty tasks sync` explicitly when repairing or inspect
 Add or complete a local task:
 
 ```sh
-dune exec -- monty task add --project monty --title "Design overview" --priority high
+dune exec -- monty task add --project monty --title "Design overview"
 dune exec -- monty task done local-001
-```
-
-Set local priority for any task without changing its external source of truth:
-
-```sh
-dune exec -- monty task priority github:owner/repo#42 high
 ```
 
 Monty stores project overview state under:
@@ -277,7 +271,6 @@ Monty stores project overview state under:
 .monty/projects.json
 .monty/projects/<project-id>.md
 .monty/tasks.local.json
-.monty/priorities.json
 ```
 
 ## Dry run

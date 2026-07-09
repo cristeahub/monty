@@ -405,17 +405,12 @@ let test_project_overview_local_tasks () =
   let task =
     must
       (Project_overview.add_local_task ~home ~project:"monty"
-         ~title:"Design overview" ~priority:"high" ())
+         ~title:"Design overview" ())
   in
   assert_equal "local task id" "local-001" task.Project_overview.id;
   let tasks = must (Project_overview.load_tasks ~home ()) in
   let rendered = Project_overview.render_tasks tasks in
   assert_contains "local task rendered" rendered "local:local-001";
-  assert_contains "local priority rendered" rendered "high";
-  must (Project_overview.set_priority ~home ~task:"local-001" ~priority:"low");
-  let reprioritized = must (Project_overview.load_tasks ~home ()) in
-  assert_contains "local priority override rendered"
-    (Project_overview.render_tasks reprioritized) "low";
   must (Project_overview.done_local_task ~home "local-001");
   let open_tasks = must (Project_overview.load_tasks ~home ()) in
   assert_bool "done local task hidden" (open_tasks = []);

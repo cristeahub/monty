@@ -91,7 +91,6 @@ Use `monty tasks sync` to reconcile worker jobs into local tasks.
 Use `monty tasks list` for task summaries.
 Use `monty projects add --repo <repo> --github <owner/repo>` when the user wants Monty to fetch GitHub issue metadata, but keep local tasks as the status source of truth.
 Use `monty task add --project <project> --title <title>` for local tracking records, including work that originates from GitHub issues or other external systems.
-Use `monty task priority <task> <priority>` for local priority without changing the external source of truth.
 
 ## Worker expectations
 
