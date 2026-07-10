@@ -18,15 +18,9 @@ let prefix text value =
   let value_len = String.length value in
   value_len >= text_len && String.sub value 0 text_len = text
 
-let strip_prefix text value =
-  if prefix text value then
-    Some (String.sub value (String.length text) (String.length value - String.length text))
-  else None
-
 let is_digit = function '0' .. '9' -> true | _ -> false
 
-let local_task_id_from_text value =
-  let value = match strip_prefix "local:" value with Some value -> value | None -> value in
+let legacy_local_task_id_from_worker_id value =
   let length = String.length value in
   if
     length >= 9
@@ -41,81 +35,49 @@ let task_key_for_archive record linked_local_task_id =
   | Some _ as task_key -> task_key
   | None -> Option.map (fun id -> "local:" ^ id) linked_local_task_id
 
-let ensure_local_task_exists ~home id =
-  let ( let* ) = Result.bind in
-  let* tasks = Project_overview.load_local_tasks ~home in
-  match List.find_opt (fun task -> String.equal task.Project_overview.id id) tasks with
-  | Some _ -> Ok (Some id)
-  | None -> Error (Printf.sprintf "linked local Monty task is missing: %s" id)
+let resolve_linked_local_task_id ~home ~repo:_ record =
+  Project_overview.validate_worker_task_link ~home record
 
-let project_repo projects id =
-  projects
-  |> List.find_map (fun (project : Project_overview.project) ->
-         if String.equal project.id id then Some project.repo else None)
-
-let local_task_matches_record ~projects ~repo record (task : Project_overview.local_task) =
-  String.equal task.title record.Job_store.job.Job.title
-  && match project_repo projects task.project with
-     | Some project_repo -> String.equal (Shell.normalize project_repo) repo
-     | None -> false
-
-let infer_local_task_by_title ~home ~repo record =
-  let ( let* ) = Result.bind in
-  let* tasks = Project_overview.load_local_tasks ~home in
-  let* projects = Project_overview.load_projects ~home in
-  let matches =
-    tasks
-    |> List.filter (fun (task : Project_overview.local_task) ->
-           not (String.equal (String.lowercase_ascii task.status) "done")
-           && local_task_matches_record ~projects ~repo record task)
-  in
-  match matches with
-  | [] -> Ok None
-  | [ task ] -> Ok (Some task.Project_overview.id)
-  | many ->
-      let labels =
-        many
-        |> List.map (fun (task : Project_overview.local_task) -> "- " ^ task.id ^ " " ^ task.title)
-        |> String.concat "\n"
-      in
-      Error (Printf.sprintf "multiple local Monty tasks match worker %S:\n%s" record.id labels)
-
-let resolve_linked_local_task_id ~home ~repo record =
-  match record.Job_store.job.Job.task_key with
-  | Some task_key -> (
-      match local_task_id_from_text task_key with
-      | Some id -> ensure_local_task_exists ~home id
-      | None -> Ok None)
-  | None -> (
-      match local_task_id_from_text record.Job_store.id with
-      | Some id -> ensure_local_task_exists ~home id
-      | None -> infer_local_task_by_title ~home ~repo record)
-
-let close_linked_local_task ~home = function
-  | None -> Ok ()
-  | Some id -> Project_overview.done_local_task ~home id
+let close_linked_local_task ~home record =
+  Project_overview.set_worker_task_status ~home record "done"
 
 let resolve_current ~home =
   match env_worker_dir () with
   | Some worker_dir ->
       let path = Filename.concat worker_dir "job.json" in
-      if Sys.file_exists path then Job_store.parse_job_file path
-      else Error (Printf.sprintf "MONTY_WORKER_DIR has no job.json: %s" worker_dir)
+      if Sys.file_exists path then Job_store.parse_job_file ~home path
+      else (
+        match env_job_id () with
+        | Some id -> Job_store.find ~home ~scope:Job_store.All id
+        | None -> Error (Printf.sprintf "MONTY_WORKER_DIR has no job.json: %s" worker_dir))
   | None -> (
       match env_job_id () with
-      | Some id -> Job_store.find ~home ~scope:Job_store.Active id
+      | Some id -> Job_store.find ~home ~scope:Job_store.All id
       | None ->
           Error
             "monty done needs a worker argument or MONTY_WORKER_DIR in the current session")
 
 let resolve ~home = function
-  | Some worker -> Job_store.find ~home ~scope:Job_store.Active worker
+  | Some worker -> Job_store.find ~home ~scope:Job_store.All worker
   | None -> resolve_current ~home
 
-let ensure_active record =
-  if Job_store.is_archived record then
-    Error (Printf.sprintf "Monty job is already archived: %s" record.Job_store.id)
-  else Ok ()
+let ensure_completable record =
+  match record.Job_store.transition with
+  | Some transition when transition.operation = Job_store.Complete -> Ok ()
+  | Some transition ->
+      Error
+        (Printf.sprintf "Monty job %s is already in a %s transition"
+           record.Job_store.id (Job_store.operation_name transition.operation))
+  | None when Job_store.is_archived record ->
+      Error (Printf.sprintf "Monty job is already archived: %s" record.Job_store.id)
+  | None
+    when List.mem record.Job_store.status
+           [ "active"; "prepared"; "launch-failed"; "launch-requested" ] ->
+      Ok ()
+  | None ->
+      Error
+        (Printf.sprintf "Monty job %s has status %S and cannot be completed"
+           record.Job_store.id record.Job_store.status)
 
 let existing_dir = function
   | Some path when Sys.file_exists path && Sys.is_directory path -> Some path
@@ -126,12 +88,16 @@ let locate_worktree ~wt_command ~repo ~branch record =
   | "never" -> Ok None
   | _ -> (
       match existing_dir record.Job_store.last_known_worktree with
-      | Some path -> (
-          match Wt.validate_worktree ~repo path with
-          | Ok path -> Ok (Some (Shell.normalize path))
-          | Error _ -> Wt.create_or_reuse ~wt_command ~repo ~branch |> Result.map Option.some)
-      | None ->
-          Wt.create_or_reuse ~wt_command ~repo ~branch |> Result.map Option.some)
+      | Some path -> Wt.validate_worktree ~repo path |> Result.map Option.some
+      | None -> Wt.locate_existing ~wt_command ~repo ~branch)
+
+let fault checkpoint =
+  match Sys.getenv_opt "MONTY_FAULT_INJECT" with
+  | Some value when String.equal value checkpoint ->
+      Error (Printf.sprintf "fault injected at %s" checkpoint)
+  | _ -> Ok ()
+
+let task_id_of_key = Job_store.local_task_id_of_key
 
 let ensure_archive_target record archive_dir =
   let source_dir = record.Job_store.worker_dir in
@@ -141,77 +107,94 @@ let ensure_archive_target record archive_dir =
     Error (Printf.sprintf "archive directory already exists: %s" archive_dir)
   else Ok ()
 
-let archive_record record ~archive_dir ~branch ~worktree ~deleted_branch ~task_key =
-  let source_dir = record.Job_store.worker_dir in
-  let now = Worker_memory.now_utc () in
-  let target_job = Filename.concat archive_dir "job.json" in
-  let updates =
-    [ Job_store.string "id" record.Job_store.id;
-      Job_store.string "title" record.Job_store.job.Job.title;
-      Job_store.string "repo" record.Job_store.job.Job.repo;
-      Job_store.string "branch" branch;
-      Job_store.string "context" record.Job_store.job.Job.context;
-      Job_store.string "worker_dir" archive_dir;
-      Job_store.string "run_dir" record.Job_store.run_dir;
-      Job_store.string "status" "done";
-      Job_store.string "worktree_mode" record.Job_store.worktree_mode;
-      Job_store.string "completed_at" now;
-      Job_store.string "archived_at" now;
-      Job_store.string "updated_at" now ]
-    @ Job_store.maybe_string "task_key" task_key
-    @ Job_store.maybe_string "deleted_branch" (if deleted_branch then Some branch else None)
-    @ Job_store.maybe_string "deleted_worktree" worktree
-    @ Job_store.maybe_string "last_known_worktree" worktree
-  in
-  try
-    Shell.ensure_dir (Filename.dirname archive_dir);
-    Unix.rename source_dir archive_dir;
-    Job_store.update_file target_job updates
-  with Unix.Unix_error (err, fn, arg) ->
-    Error
-      (Printf.sprintf "failed to archive %s via %s(%s): %s" record.Job_store.id fn
-         arg (Unix.error_message err))
-
-let complete ?worker ~home ~wt_command ~force () =
-  let home = Shell.normalize (Shell.abs_path home) in
+let prepare_fresh ~home ~wt_command ~force record =
   let ( let* ) = Result.bind in
-  let* record = resolve ~home worker in
-  let* () = ensure_active record in
   let* branch = required_branch record in
   let repo = Shell.normalize (Shell.abs_path record.Job_store.job.Job.repo) in
-  let archive_dir = Job_store.archive_dir record in
+  let* physical = State_path.of_job_file ~home record.Job_store.path in
+  let* archive_state =
+    State_path.archived ~home ~run_id:physical.State_path.run_id
+      ~id:physical.State_path.id
+  in
   let* linked_task_id = resolve_linked_local_task_id ~home ~repo record in
-  let archive_task_key = task_key_for_archive record linked_task_id in
-  let* () = ensure_archive_target record archive_dir in
+  let task_key = task_key_for_archive record linked_task_id in
+  let* () = ensure_archive_target record archive_state.worker_dir in
   let* worktree = locate_worktree ~wt_command ~repo ~branch record in
   let* () =
     match worktree with
     | None -> Ok ()
-    | Some path ->
-        if force then Wt.force_clean ~worktree:path else Wt.ensure_clean ~worktree:path
+    | Some _ when force -> Ok ()
+    | Some path -> Wt.ensure_clean ~worktree:path
   in
+  let* record = Job_store.prepare_completion record ~task_key ~force in
+  Ok (record, worktree)
+
+let complete ?worker ~home ~wt_command ~force () =
+  let home = Shell.normalize (Shell.abs_path home) in
+  let ( let* ) = Result.bind in
+  let* initial = resolve ~home worker in
+  let* () = ensure_completable initial in
+  let* _linked_task_id =
+    Project_overview.validate_worker_task_link ~home initial
+  in
+  let* record, preflight_worktree =
+    match initial.Job_store.transition with
+    | Some transition when transition.operation = Job_store.Complete -> Ok (initial, None)
+    | Some _ -> assert false
+    | None -> prepare_fresh ~home ~wt_command ~force initial
+  in
+  let* () = fault "complete-after-intent" in
+  let* transition =
+    match record.Job_store.transition with
+    | Some transition when transition.operation = Job_store.Complete -> Ok transition
+    | _ -> Error "completion intent was not persisted"
+  in
+  let* branch = required_branch record in
+  let repo = Shell.normalize (Shell.abs_path record.Job_store.job.Job.repo) in
   let deletes_worktree_and_branch =
-    match String.lowercase_ascii record.Job_store.worktree_mode with
-    | "never" -> false
-    | _ -> true
+    not (String.equal (String.lowercase_ascii record.Job_store.worktree_mode) "never")
+  in
+  let* worktree =
+    if deletes_worktree_and_branch then
+      match preflight_worktree with
+      | Some _ as worktree -> Ok worktree
+      | None -> locate_worktree ~wt_command ~repo ~branch record
+    else Ok None
+  in
+  let* () =
+    match worktree with
+    | None -> Ok ()
+    | Some path ->
+        if transition.force then Wt.force_clean ~worktree:path
+        else Wt.ensure_clean ~worktree:path
+  in
+  let removal_worktree =
+    match worktree with Some _ -> worktree | None -> record.Job_store.last_known_worktree
   in
   let* () =
     if deletes_worktree_and_branch then
-      Wt.delete_worktree_and_branch ?worktree ~wt_command ~repo ~branch ~force ()
+      Wt.remove_if_present ?worktree:removal_worktree ~wt_command ~repo ~branch ()
     else Ok ()
   in
-  let* () =
-    archive_record record ~archive_dir ~branch ~worktree
-      ~deleted_branch:deletes_worktree_and_branch ~task_key:archive_task_key
-  in
-  let* () = close_linked_local_task ~home linked_task_id in
+  let* () = fault "complete-after-cleanup" in
+  let* record = Job_store.relocate_transition record Job_store.Complete in
+  let* () = fault "complete-after-move" in
+  let* record = Job_store.normalize_transition record Job_store.Complete in
+  let* () = fault "complete-after-normalize" in
+  let* linked_task_id = task_id_of_key transition.task_key in
+  let* () = close_linked_local_task ~home record in
+  let* () = fault "complete-after-task" in
+  let* () = fault "complete-before-finalize" in
+  let* record = Job_store.finalize_transition record Job_store.Complete in
   Fmt.pr "Archived %S\n" record.Job_store.job.Job.title;
-  Fmt.pr "Worker memory: %s\n" archive_dir;
+  Fmt.pr "Worker memory: %s\n" transition.target;
   (match linked_task_id with
   | Some id -> Fmt.pr "Closed local task: local:%s\n" id
   | None -> ());
   (match worktree with
   | Some path -> Fmt.pr "Deleted worktree: %s\n" path
+  | None when deletes_worktree_and_branch ->
+      Fmt.pr "Deleted worktree: <already absent>\n"
   | None -> Fmt.pr "Deleted worktree: <none, worktree mode never>\n");
   if deletes_worktree_and_branch then Fmt.pr "Deleted branch: %s\n" branch
   else Fmt.pr "Deleted branch: <skipped, worktree mode never>\n";

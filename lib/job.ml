@@ -24,7 +24,7 @@ let branch_leaf branch =
 
 let id_or_default ~branch job =
   match job.id with
-  | Some id when String.trim id <> "" -> Slug.of_title id
+  | Some id -> id
   | _ -> (
       match job.branch with
       | Some branch when String.trim branch <> "" -> branch_leaf branch |> Slug.of_title

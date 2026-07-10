@@ -174,6 +174,34 @@ let find_existing_for_repo ~wt_command ~repo ~branch =
   | Error _ -> None
   | Ok entries -> entries_for_branch branch entries |> choose_repo_entry ~repo
 
+let branch_exists ~repo ~branch =
+  let ref = "refs/heads/" ^ branch in
+  match
+    Process.run_capture ~cwd:repo
+      (Printf.sprintf "git show-ref --verify --quiet %s" (Shell.quote ref))
+  with
+  | Ok { Process.status = `Exited 0; _ } -> true
+  | _ -> false
+
+let locate_existing ~wt_command ~repo ~branch =
+  let repo = Shell.normalize repo in
+  let ( let* ) = Result.bind in
+  let* entries = run_wt_list ~wt_command ~repo in
+  let branch_entries = entries_for_branch branch entries in
+  match branch_entries |> List.filter (belongs_to_repo ~repo) with
+  | [] when branch_entries = [] -> Ok None
+  | [] when branch_exists ~repo ~branch -> Ok None
+  | [] ->
+      Error
+        (Printf.sprintf
+           "wt has branch %S in another repo, but not in requested repo %s"
+           branch repo)
+  | [ entry ] -> Ok (Some entry.path)
+  | _ ->
+      Error
+        (Printf.sprintf "wt reports multiple worktrees for branch %S in repo %s"
+           branch repo)
+
 let validate_output_path ~repo output =
   match output_path output with
   | None -> Error "wt did not print a worktree path"
@@ -229,15 +257,6 @@ let force_clean ~worktree =
   let* () = Process.run_quiet ~cwd:worktree "git reset --hard" in
   Process.run_quiet ~cwd:worktree "git clean -fdx"
 
-let branch_exists ~repo ~branch =
-  let ref = "refs/heads/" ^ branch in
-  match
-    Process.run_capture ~cwd:repo
-      (Printf.sprintf "git show-ref --verify --quiet %s" (Shell.quote ref))
-  with
-  | Ok { Process.status = `Exited 0; _ } -> true
-  | _ -> false
-
 let delete_with_wt ?selection ~wt_command ~repo ~branch () =
   match run_wt_branch ?selection ~wt_command ~repo "db" branch with
   | Error msg -> Error msg
@@ -247,13 +266,20 @@ let delete_with_wt ?selection ~wt_command ~repo ~branch () =
         (Printf.sprintf "wt db failed with %s:\n%s"
            (Process.status_to_string status) stdout)
 
-let delete_worktree_and_branch ?worktree ~wt_command ~repo ~branch ~force:_ () =
+let remove_if_present ?worktree ~wt_command ~repo ~branch () =
   let repo = Shell.normalize repo in
   let worktree = Option.map (fun path -> Shell.normalize path |> realpath_if_exists) worktree in
   let ( let* ) = Result.bind in
   let* entries = run_wt_list ~wt_command ~repo in
   let branch_entries = entries_for_branch branch entries in
-  let matching_entries = List.filter (belongs_to_repo ~repo) branch_entries in
+  let requested_branch_exists = branch_exists ~repo ~branch in
+  let matching_entries =
+    branch_entries
+    |> List.filter (fun entry ->
+           belongs_to_repo ~repo entry
+           || (requested_branch_exists
+              && Option.equal String.equal worktree (Some entry.path)))
+  in
   let matching_entries =
     match worktree with
     | None -> matching_entries
@@ -264,6 +290,7 @@ let delete_worktree_and_branch ?worktree ~wt_command ~repo ~branch ~force:_ () =
         if exact = [] then matching_entries else exact
   in
   match (branch_entries, matching_entries) with
+  | [], _ when not requested_branch_exists -> Ok ()
   | [], _ -> delete_with_wt ~wt_command ~repo ~branch ()
   | _, [] ->
       Error
@@ -283,3 +310,6 @@ let delete_worktree_and_branch ?worktree ~wt_command ~repo ~branch ~force:_ () =
                 (Printf.sprintf
                    "wt reported multiple worktrees for %S, but Monty could not select repo %s:\n%s"
                    branch repo stdout)))
+
+let delete_worktree_and_branch ?worktree ~wt_command ~repo ~branch ~force:_ () =
+  remove_if_present ?worktree ~wt_command ~repo ~branch ()

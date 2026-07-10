@@ -34,30 +34,43 @@ let task_in_scope scope task =
   | Job_store.Archived -> task_done task
   | Job_store.All -> true
 
-let task_keys_for_run ~home run =
+let task_keys_for_run records run =
   match run with
-  | None -> Ok None
-  | Some _ -> (
-      match Job_store.load ~home ~scope:Job_store.All with
-      | Error msg -> Error msg
-      | Ok records ->
-          let task_keys =
-            records
-            |> List.filter (run_matches run)
-            |> List.filter_map (fun record -> record.Job_store.job.Job.task_key)
-          in
-          Ok (Some task_keys))
+  | None -> None
+  | Some _ ->
+      records
+      |> List.filter (run_matches run)
+      |> List.concat_map (fun record ->
+             Project_overview.diagnostic_task_key record
+             :: Option.to_list record.Job_store.job.Job.task_key)
+      |> Option.some
 
 let task_matches_run task_keys task =
   match task_keys with
   | None -> true
   | Some keys -> List.exists (String.equal task.Project_overview.key) keys
 
-let run ~home ~scope ?run () =
+let print_warnings warnings =
+  List.iter (fun warning -> Fmt.epr "monty: warning: %s\n" warning) warnings
+
+let run ~home ~scope ?run ?(sync = true) () =
   let ( let* ) = Result.bind in
-  let* _sync_result = Project_overview.sync_jobs_to_local_tasks ~home in
-  let* task_keys = task_keys_for_run ~home run in
-  let* tasks = Project_overview.load_tasks ~home ~all:true () in
-  let tasks = tasks |> List.filter (task_in_scope scope) |> List.filter (task_matches_run task_keys) in
+  let* sync_warnings =
+    if sync then
+      Project_overview.sync_jobs_to_local_tasks ~home
+      |> Result.map (fun result -> result.Project_overview.warnings)
+    else Ok []
+  in
+  let* scan = Job_store.scan ~home in
+  let task_keys = task_keys_for_run scan.records run in
+  let* tasks, inventory_warnings =
+    Project_overview.load_tasks_with_warnings ~home ~all:true ()
+  in
+  print_warnings
+    (List.sort_uniq String.compare (sync_warnings @ scan.warnings @ inventory_warnings));
+  let tasks =
+    tasks |> List.filter (task_in_scope scope)
+    |> List.filter (task_matches_run task_keys)
+  in
   Fmt.pr "%s" (Project_overview.render_tasks tasks);
   Ok ()

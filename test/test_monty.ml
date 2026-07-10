@@ -44,9 +44,25 @@ let capture_stdout f =
       flush stdout;
       Shell.read_file path)
 
+let rec remove_tree path =
+  try
+    match (Unix.lstat path).Unix.st_kind with
+    | Unix.S_DIR ->
+        Sys.readdir path
+        |> Array.iter (fun name -> remove_tree (Filename.concat path name));
+        Unix.rmdir path
+    | _ -> Unix.unlink path
+  with Unix.Unix_error ((Unix.ENOENT | Unix.ENOTDIR), _, _) -> ()
+
+let temp_roots = ref []
+let () = at_exit (fun () -> List.iter remove_tree !temp_roots)
+
 let temp_root name =
-  Filename.concat (Filename.get_temp_dir_name ())
-    (Printf.sprintf "monty-%s-%d" name (Unix.getpid ()))
+  let marker = Filename.temp_file ("monty-" ^ name ^ "-") ".tmp" in
+  Sys.remove marker;
+  Unix.mkdir marker 0o700;
+  temp_roots := marker :: !temp_roots;
+  marker
 
 let test_slug () =
   assert_equal "slug" "fix-issue-123" (Slug.of_title "Fix issue #123");
@@ -163,6 +179,38 @@ let test_wt_disambiguates_repo_when_branch_name_collides () =
   assert_equal "selected repo" (Unix.realpath repo_two) selected;
   ignore (must (Wt.validate_worktree ~repo:repo_two selected))
 
+let fake_git_wt root =
+  let path = Filename.concat root "fake-wt" in
+  let worktree = Filename.concat root "fake-worktree" in
+  Shell.write_file path
+    (String.concat "\n"
+       [ "#!/bin/sh";
+         "set -eu";
+         "cmd=$1";
+         "branch=${2:-}";
+         "worktree=" ^ Shell.quote worktree;
+         "case \"$cmd\" in";
+         "  b)";
+         "    if [ ! -d \"$worktree\" ]; then";
+         "      git show-ref --verify --quiet \"refs/heads/$branch\" || git branch \"$branch\"";
+         "      git worktree add -q \"$worktree\" \"$branch\"";
+         "    fi";
+         "    printf '%s\\n' \"$worktree\"";
+         "    ;;";
+         "  list)";
+         "    printf 'repo:\\n'";
+         "    if [ -d \"$worktree\" ]; then printf '  %s -> %s\\n' \"$branch\" \"$worktree\"; fi";
+         "    ;;";
+         "  db)";
+         "    if [ -d \"$worktree\" ]; then git worktree remove --force \"$worktree\"; fi";
+         "    git show-ref --verify --quiet \"refs/heads/$branch\" && git branch -D \"$branch\" >/dev/null || true";
+         "    ;;";
+         "  *) exit 2 ;;";
+         "esac";
+         "" ]);
+  Shell.chmod_executable path;
+  path
+
 let setup_git_worker root =
   let home = Filename.concat root "home" in
   let repo = Filename.concat root "repo" in
@@ -170,7 +218,8 @@ let setup_git_worker root =
   let branch = "cto/" ^ Filename.basename root in
   Shell.ensure_dir home;
   init_git_repo repo;
-  let worktree = must (Wt.create_or_reuse ~wt_command:"wt" ~repo ~branch) in
+  let wt_command = fake_git_wt root in
+  let worktree = must (Wt.create_or_reuse ~wt_command ~repo ~branch) in
   Shell.write_file context "# Task\n";
   let job =
     Job.make ~id:"issue-123" ~branch ~title:"Fix issue 123" ~repo ~context ()
@@ -179,25 +228,25 @@ let setup_git_worker root =
     Worker_memory.ensure ~home ~job ~branch ~repo ~context ~worktree_mode:"always"
       ~last_known_worktree:(Some worktree)
   in
-  (home, repo, branch, worktree, worker_dir, instructions)
+  (home, repo, branch, worktree, worker_dir, instructions, wt_command)
 
 let test_done_refuses_dirty_worktree () =
   let root = temp_root "done-dirty" in
-  let home, repo, branch, worktree, worker_dir, _instructions = setup_git_worker root in
+  let home, repo, branch, worktree, worker_dir, _instructions, wt_command = setup_git_worker root in
   Shell.write_file (Filename.concat worktree "dirty.txt") "dirty\n";
-  (match Done.complete ~worker:"issue-123" ~home ~wt_command:"wt" ~force:false () with
+  (match Done.complete ~worker:"issue-123" ~home ~wt_command ~force:false () with
   | Ok () -> failwith "expected dirty worktree to block done"
   | Error msg ->
       assert_contains "dirty error" msg "uncommitted or untracked";
       assert_bool "worker dir remains active" (Sys.file_exists worker_dir));
   must (Wt.force_clean ~worktree);
-  must (Wt.delete_worktree_and_branch ~worktree ~wt_command:"wt" ~repo ~branch ~force:true ())
+  must (Wt.delete_worktree_and_branch ~worktree ~wt_command ~repo ~branch ~force:true ())
 
 let test_done_force_archives () =
   let root = temp_root "done-force" in
-  let home, repo, branch, worktree, worker_dir, _instructions = setup_git_worker root in
+  let home, repo, branch, worktree, worker_dir, _instructions, wt_command = setup_git_worker root in
   Shell.write_file (Filename.concat worktree "dirty.txt") "dirty\n";
-  must (Done.complete ~worker:"issue-123" ~home ~wt_command:"wt" ~force:true ());
+  must (Done.complete ~worker:"issue-123" ~home ~wt_command ~force:true ());
   let archive_dir =
     Filename.concat
       (Filename.concat (Filename.dirname (Filename.dirname worker_dir)) "archive")
@@ -226,6 +275,7 @@ let test_done_closes_linked_local_task () =
   in
   let job =
     Job.make ~id:(task.Project_overview.id ^ "-fix-local-task")
+      ~task_key:("local:" ^ task.Project_overview.id)
       ~branch:"cto/fix-local-task" ~title:"Fix local task" ~repo ~context ()
   in
   let _id, worker_dir, _instructions =
@@ -249,7 +299,7 @@ let test_done_closes_linked_local_task () =
   let all_tasks = must (Project_overview.load_tasks ~home ~all:true ()) in
   assert_contains "linked local task done" (Project_overview.render_tasks all_tasks) "done"
 
-let test_done_closes_legacy_local_task_matched_by_title () =
+let test_done_does_not_infer_legacy_local_task_by_title () =
   let root = temp_root "done-local-task-title" in
   let home = Filename.concat root "home" in
   let repo = Filename.concat root "repo" in
@@ -273,20 +323,21 @@ let test_done_closes_legacy_local_task_matched_by_title () =
   must (Done.complete ~worker:"legacy-worker" ~home ~wt_command:"wt" ~force:false ());
   assert_bool "worker dir moved" (not (Sys.file_exists worker_dir));
   let open_tasks = must (Project_overview.load_tasks ~home ()) in
-  assert_bool "legacy linked local task hidden after archive" (open_tasks = []);
-  let all_tasks = must (Project_overview.load_tasks ~home ~all:true ()) in
-  assert_contains "legacy linked local task done" (Project_overview.render_tasks all_tasks)
-    "legacy-worker"
+  assert_equal "legacy task remains open without explicit repair" "open"
+    (List.hd open_tasks).Project_overview.status;
+  let archived = must (Job_store.find ~home ~scope:Job_store.Archived "legacy-worker") in
+  assert_bool "ordinary done leaves legacy worker unlinked"
+    (archived.Job_store.job.Job.task_key = None)
 
 let test_resume_archived_reactivates () =
   let root = temp_root "resume-archived" in
-  let home, _repo, _branch, _worktree, worker_dir, _instructions = setup_git_worker root in
-  must (Done.complete ~worker:"issue-123" ~home ~wt_command:"wt" ~force:true ());
+  let home, _repo, _branch, _worktree, worker_dir, _instructions, wt_command = setup_git_worker root in
+  must (Done.complete ~worker:"issue-123" ~home ~wt_command ~force:true ());
   (match Resume.find ~home "issue-123" with
   | Ok _ -> failwith "archived job should not be found by default resume"
   | Error _ -> ());
   let archived = must (Resume.find_record ~home ~scope:Job_store.Archived "issue-123") in
-  let job = must (Job_store.reactivate archived) in
+  let job = must (Resume.reactivate ~home archived) in
   assert_equal "reactivated worker dir" worker_dir
     (Option.value ~default:"" job.Job.worker_dir);
   let active = must (Resume.find ~home "issue-123") in
@@ -297,13 +348,14 @@ let test_launch_many_single_job_uses_single_job_defaults () =
   Shell.ensure_dir root;
   let context = Filename.concat root "context.md" in
   Shell.write_file context "# Task\n";
+  let _project = must (Project_overview.add_project ~home:root ~repo:root ()) in
   let job = Job.make ~title:"Translate parking instructions" ~repo:root ~context () in
   let options =
     Launcher.{
       backend = Terminal.Dry_run;
       target = Terminal.Tab;
-      pi_command = "pi";
-      wt_command = "wt";
+      pi_command = "/usr/bin/true --pi-test";
+      wt_command = "/usr/bin/true --wt-test";
       worktree_mode = Always;
       branch_prefix = "cto";
       fork = None;
@@ -321,14 +373,15 @@ let test_launch_many_multiple_jobs_keeps_numbered_defaults () =
   Shell.ensure_dir root;
   let context = Filename.concat root "context.md" in
   Shell.write_file context "# Task\n";
+  let _project = must (Project_overview.add_project ~home:root ~repo:root ()) in
   let first = Job.make ~title:"First task" ~repo:root ~context () in
   let second = Job.make ~title:"Second task" ~repo:root ~context () in
   let options =
     Launcher.{
       backend = Terminal.Dry_run;
       target = Terminal.Tab;
-      pi_command = "pi";
-      wt_command = "wt";
+      pi_command = "/usr/bin/true --pi-test";
+      wt_command = "/usr/bin/true --wt-test";
       worktree_mode = Always;
       branch_prefix = "cto";
       fork = None;
@@ -420,20 +473,288 @@ let test_project_overview_local_tasks () =
   assert_contains "overview projects" overview "## Projects";
   assert_contains "overview active jobs" overview "## Active jobs"
 
+let test_state_path_safe_components () =
+  List.iter
+    (fun value ->
+      match State_path.safe_component ~label:"test id" value with
+      | Ok _ -> failwith (Printf.sprintf "expected unsafe component %S to fail" value)
+      | Error _ -> ())
+    [ ""; "."; ".."; "../escape"; "a/b"; "a\000b"; " worker"; "worker " ];
+  assert_equal "safe component" "local-001.worker"
+    (must (State_path.safe_component ~label:"test id" "local-001.worker"))
+
+let test_atomic_failure_before_rename_preserves_previous_json () =
+  let root = temp_root "atomic-failure" in
+  let home = Filename.concat root "home" in
+  let path = Filename.concat home ".monty/tasks.local.json" in
+  let previous = "{\"tasks\":[{\"id\":\"local-001\"}]}\n" in
+  Shell.write_file path previous;
+  State_store.set_before_rename_hook (fun () -> Error "injected before rename");
+  Fun.protect
+    ~finally:State_store.reset_before_rename_hook
+    (fun () ->
+      match State_store.write_json ~home ~path (`Assoc [ ("tasks", `List []) ]) with
+      | Ok () -> failwith "expected injected atomic write failure"
+      | Error msg -> assert_contains "fault error" msg "injected before rename");
+  assert_equal "previous JSON bytes" previous (Shell.read_file path);
+  let temp_files =
+    Sys.readdir (Filename.dirname path) |> Array.to_list
+    |> List.filter (fun name -> string_contains name "monty-tmp")
+  in
+  assert_bool "temporary JSON file cleaned" (temp_files = [])
+
+let test_atomic_success_preserves_permissions_and_cleans_temp () =
+  let root = temp_root "atomic-success" in
+  let home = Filename.concat root "home" in
+  let path = Filename.concat home ".monty/tasks.local.json" in
+  Shell.write_file path "{\"tasks\":[]}\n";
+  Unix.chmod path 0o640;
+  must
+    (State_store.write_json ~home ~path
+       (`Assoc [ ("tasks", `List [ `Assoc [ ("id", `String "local-001") ] ]) ]));
+  let mode = (Unix.stat path).Unix.st_perm land 0o777 in
+  assert_equal "atomic permissions" "416" (string_of_int mode);
+  ignore (Yojson.Safe.from_file path);
+  let temp_files =
+    Sys.readdir (Filename.dirname path) |> Array.to_list
+    |> List.filter (fun name -> string_contains name "monty-tmp")
+  in
+  assert_bool "successful atomic write cleaned temp" (temp_files = [])
+
+let write_legacy_job path ~id ~repo ~context extra =
+  Shell.ensure_dir (Filename.dirname path);
+  let fields =
+    [ ("id", `String id);
+      ("title", `String "Legacy task");
+      ("repo", `String repo);
+      ("branch", `String "cto/legacy");
+      ("context", `String context) ]
+    @ extra
+  in
+  Yojson.Safe.to_file path (`Assoc fields)
+
+let test_job_store_uses_physical_canonical_paths () =
+  let root = temp_root "job-paths" in
+  let home = Filename.concat root "home" in
+  let repo = Filename.concat root "repo" in
+  let context = Filename.concat root "context.md" in
+  Shell.ensure_dir repo;
+  Shell.write_file context "# Context\n";
+  let state = must (State_path.active ~home ~run_id:"run-1" ~id:"worker-1") in
+  write_legacy_job state.State_path.job_file ~id:"worker-1" ~repo ~context [];
+  let record = must (Job_store.parse_job_file ~home state.job_file) in
+  assert_equal "derived worker dir" state.worker_dir record.Job_store.worker_dir;
+  assert_equal "derived run dir" state.run_dir record.Job_store.run_dir;
+  assert_equal "legacy default status" "active" record.Job_store.status;
+  write_legacy_job state.job_file ~id:"worker-1" ~repo ~context
+    [ ("worker_dir", `String (Filename.concat root "outside")) ];
+  (match Job_store.parse_job_file ~home state.job_file with
+  | Ok _ -> failwith "expected persisted worker path mismatch to fail"
+  | Error msg -> assert_contains "worker path mismatch" msg "unsafe persisted worker_dir");
+  write_legacy_job state.job_file ~id:"worker-1" ~repo ~context
+    [ ("run_dir", `String (Filename.concat root "outside-run")) ];
+  (match Job_store.parse_job_file ~home state.job_file with
+  | Ok _ -> failwith "expected persisted run path mismatch to fail"
+  | Error msg -> assert_contains "run path mismatch" msg "unsafe persisted run_dir");
+  write_legacy_job state.job_file ~id:"other-worker" ~repo ~context [];
+  (match Job_store.parse_job_file ~home state.job_file with
+  | Ok _ -> failwith "expected persisted id mismatch to fail"
+  | Error msg -> assert_contains "id mismatch" msg "does not match physical path id")
+
+let test_archived_legacy_job_uses_physical_classification () =
+  let root = temp_root "archived-physical" in
+  let home = Filename.concat root "home" in
+  let repo = Filename.concat root "repo" in
+  let context = Filename.concat root "context.md" in
+  Shell.ensure_dir repo;
+  Shell.write_file context "# Context\n";
+  let state = must (State_path.archived ~home ~run_id:"run-1" ~id:"worker-1") in
+  write_legacy_job state.State_path.job_file ~id:"worker-1" ~repo ~context [];
+  let record = must (Job_store.parse_job_file ~home state.job_file) in
+  assert_equal "archived legacy default status" "done" record.Job_store.status;
+  assert_bool "physical archive classification" (Job_store.is_archived record)
+
+let test_archive_destination_rejects_symlink_escape () =
+  let root = temp_root "archive-symlink" in
+  let home = Filename.concat root "home" in
+  let outside = Filename.concat root "outside" in
+  let archive = Filename.concat home ".monty/runs/run-1/archive" in
+  Shell.ensure_dir archive;
+  Shell.ensure_dir outside;
+  Unix.symlink outside (Filename.concat archive "worker-1");
+  match State_path.archived ~home ~run_id:"run-1" ~id:"worker-1" with
+  | Ok _ -> failwith "expected archive destination symlink to fail"
+  | Error msg -> assert_contains "archive symlink" msg "symlink alias"
+
+let test_transition_task_key_mismatch_is_rejected () =
+  let root = temp_root "transition-task-key" in
+  let home = Filename.concat root "home" in
+  let repo = Filename.concat root "repo" in
+  let context = Filename.concat root "context.md" in
+  Shell.ensure_dir repo;
+  Shell.write_file context "# Context\n";
+  let active = must (State_path.active ~home ~run_id:"run-1" ~id:"worker-1") in
+  let archived = must (State_path.archived ~home ~run_id:"run-1" ~id:"worker-1") in
+  Shell.ensure_dir active.worker_dir;
+  Yojson.Safe.to_file active.job_file
+    (`Assoc
+      [ ("id", `String "worker-1");
+        ("title", `String "Transition task mismatch");
+        ("repo", `String repo);
+        ("branch", `String "cto/worker-1");
+        ("context", `String context);
+        ("worker_dir", `String active.worker_dir);
+        ("run_dir", `String active.run_dir);
+        ("task_key", `String "local:local-001");
+        ("status", `String "completing");
+        ( "transition",
+          `Assoc
+            [ ("operation", `String "complete");
+              ("source", `String active.worker_dir);
+              ("target", `String archived.worker_dir);
+              ("task_key", `String "local:local-002");
+              ("force", `Bool false);
+              ("started_at", `String "2026-07-10T00:00:00Z") ] ) ]);
+  match Job_store.parse_job_file ~home active.job_file with
+  | Ok _ -> failwith "transition task key mismatch unexpectedly parsed"
+  | Error msg -> assert_contains "transition task mismatch" msg "does not match top-level"
+
+let test_job_store_rejects_symlink_escape () =
+  let root = temp_root "job-symlink" in
+  let home = Filename.concat root "home" in
+  let repo = Filename.concat root "repo" in
+  let context = Filename.concat root "context.md" in
+  let outside = Filename.concat root "outside" in
+  Shell.ensure_dir repo;
+  Shell.ensure_dir outside;
+  Shell.write_file context "# Context\n";
+  write_legacy_job (Filename.concat outside "job.json") ~id:"worker-1" ~repo
+    ~context [];
+  let workers = Filename.concat home ".monty/runs/run-1/workers" in
+  Shell.ensure_dir workers;
+  let link = Filename.concat workers "worker-1" in
+  Unix.symlink outside link;
+  (match Job_store.parse_job_file ~home (Filename.concat link "job.json") with
+  | Ok _ -> failwith "expected symlink escape to fail"
+  | Error msg -> assert_contains "symlink escape" msg "symlink alias");
+  match Job_store.load ~home ~scope:Job_store.All with
+  | Ok _ -> failwith "expected discovery to reject a symlinked worker directory"
+  | Error msg -> assert_contains "discovery symlink" msg "job discovery will not traverse"
+
+let test_doctor_typed_checks_and_configuration () =
+  let home = temp_root "doctor" in
+  let operations =
+    Doctor.
+      {
+        find_command =
+          (fun command ->
+            if List.mem command [ "pi --fixed"; "gh" ] then Ok ("/fake/" ^ command)
+            else Error ("missing " ^ command));
+      }
+  in
+  let dry_checks =
+    Doctor.checks ~operations ~home ~pi_command:"pi --fixed" ~wt_command:"missing-wt"
+      ~backend:Terminal.Dry_run ~worktree_mode:Launcher.Never ()
+  in
+  assert_bool "dry-run doctor has no required failure"
+    (Doctor.exit_code dry_checks = 0);
+  let dry_output = Doctor.render dry_checks in
+  assert_contains "doctor pass" dry_output "PASS";
+  assert_contains "doctor warn" dry_output "WARN";
+  assert_not_contains "doctor dry-run ignores wt" dry_output "missing-wt";
+  let real_checks =
+    Doctor.checks ~operations ~home ~pi_command:"pi --fixed" ~wt_command:"missing-wt"
+      ~backend:Terminal.Ghostty ~worktree_mode:Launcher.Always ()
+  in
+  assert_bool "real doctor fails required dependencies"
+    (Doctor.exit_code real_checks = 1);
+  let real_output = Doctor.render real_checks in
+  assert_contains "doctor fail" real_output "FAIL";
+  assert_contains "doctor configured wt" real_output "missing-wt";
+  assert_contains "doctor recovery" real_output "Recovery:"
+
+let test_cli_factory_injects_environment_and_dispatch () =
+  let captured = ref [] in
+  let operations =
+    Cli.
+      {
+        default_operations with
+        launch_one =
+          (fun options job ->
+            captured := (options, job) :: !captured;
+            Ok ());
+      }
+  in
+  let getenv values name = List.assoc_opt name values in
+  let run suffix backend target worktree =
+    let home = temp_root ("cli-factory-" ^ suffix) in
+    let values =
+      [ ("MONTY_HOME", home);
+        ("MONTY_TERMINAL", backend);
+        ("MONTY_TARGET", target);
+        ("MONTY_WORKTREE", worktree);
+        ("MONTY_PI_COMMAND", "pi-" ^ suffix ^ " --fixed");
+        ("MONTY_WT_COMMAND", "wt-" ^ suffix ^ " --fixed");
+        ("MONTY_BRANCH_PREFIX", "branch-" ^ suffix) ]
+    in
+    let argv =
+      [| "monty"; "launch"; "--repo"; "/tmp/repo"; "--title";
+         ("Task " ^ suffix); "--context"; "/tmp/context.md" |]
+    in
+    assert_bool ("injected CLI dispatch " ^ suffix)
+      (Cli.eval ~getenv:(getenv values) ~operations argv = 0)
+  in
+  run "one" "dry-run" "split" "never";
+  run "two" "ghostty" "window" "always";
+  match List.rev !captured with
+  | [ (one, _); (two, _) ] ->
+      assert_contains "factory first home" one.Launcher.home "monty-cli-factory-one";
+      assert_contains "factory second home" two.Launcher.home "monty-cli-factory-two";
+      assert_equal "factory first pi" "pi-one --fixed" one.pi_command;
+      assert_equal "factory second pi" "pi-two --fixed" two.pi_command;
+      assert_equal "factory first wt" "wt-one --fixed" one.wt_command;
+      assert_equal "factory second wt" "wt-two --fixed" two.wt_command;
+      assert_equal "factory first prefix" "branch-one" one.branch_prefix;
+      assert_equal "factory second prefix" "branch-two" two.branch_prefix;
+      assert_bool "factory first backend" (one.backend = Terminal.Dry_run);
+      assert_bool "factory second backend" (two.backend = Terminal.Ghostty);
+      assert_bool "factory first target" (one.target = Terminal.Split);
+      assert_bool "factory second target" (two.target = Terminal.Window);
+      assert_bool "factory first worktree" (one.worktree_mode = Launcher.Never);
+      assert_bool "factory second worktree" (two.worktree_mode = Launcher.Always)
+  | _ -> failwith "injected CLI launch operation was not called twice"
+
+let run_named name test =
+  try
+    test ();
+    Fmt.pr "PASS %s\n" name
+  with exn -> failwith (Printf.sprintf "%s: %s" name (Printexc.to_string exn))
+
 let () =
-  test_slug ();
-  test_shell_quote ();
-  test_manifest ();
-  test_worker_memory_and_resume ();
-  test_wt_disambiguates_repo_when_branch_name_collides ();
-  test_done_refuses_dirty_worktree ();
-  test_done_force_archives ();
-  test_done_closes_linked_local_task ();
-  test_done_closes_legacy_local_task_matched_by_title ();
-  test_resume_archived_reactivates ();
-  test_launch_many_single_job_uses_single_job_defaults ();
-  test_launch_many_multiple_jobs_keeps_numbered_defaults ();
-  test_ghostty_tab_launch_focuses_new_terminal ();
-  test_list_jobs_render ();
-  test_tasks_sync_jobs_to_local_source ();
-  test_project_overview_local_tasks ()
+  [ ("slug", test_slug);
+    ("shell_quote", test_shell_quote);
+    ("manifest", test_manifest);
+    ("worker_memory_and_resume", test_worker_memory_and_resume);
+    ("wt_repo_disambiguation", test_wt_disambiguates_repo_when_branch_name_collides);
+    ("done_refuses_dirty_worktree", test_done_refuses_dirty_worktree);
+    ("done_force_archives", test_done_force_archives);
+    ("done_closes_linked_local_task", test_done_closes_linked_local_task);
+    ("done_does_not_infer_legacy_title", test_done_does_not_infer_legacy_local_task_by_title);
+    ("resume_archived_reactivates", test_resume_archived_reactivates);
+    ("launch_many_single_defaults", test_launch_many_single_job_uses_single_job_defaults);
+    ("launch_many_multiple_defaults", test_launch_many_multiple_jobs_keeps_numbered_defaults);
+    ("ghostty_tab_focus", test_ghostty_tab_launch_focuses_new_terminal);
+    ("list_jobs_render", test_list_jobs_render);
+    ("tasks_sync", test_tasks_sync_jobs_to_local_source);
+    ("project_overview_local_tasks", test_project_overview_local_tasks);
+    ("state_path_safe_components", test_state_path_safe_components);
+    ("atomic_failure_preserves_json", test_atomic_failure_before_rename_preserves_previous_json);
+    ("atomic_success_permissions", test_atomic_success_preserves_permissions_and_cleans_temp);
+    ("job_physical_paths", test_job_store_uses_physical_canonical_paths);
+    ("archived_physical_classification", test_archived_legacy_job_uses_physical_classification);
+    ("archive_symlink_escape", test_archive_destination_rejects_symlink_escape);
+    ("transition_task_key_mismatch", test_transition_task_key_mismatch_is_rejected);
+    ("job_symlink_escape", test_job_store_rejects_symlink_escape);
+    ("doctor_typed_configuration", test_doctor_typed_checks_and_configuration);
+    ("cli_factory_injection", test_cli_factory_injects_environment_and_dispatch) ]
+  |> List.iter (fun (name, test) -> run_named name test)

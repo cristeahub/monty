@@ -135,7 +135,19 @@ The default is `monty`, so `Fix issue 123` becomes `monty/fix-issue-123` for one
 With `--branch-prefix cto` or `MONTY_BRANCH_PREFIX=cto`, the same task becomes `cto/fix-issue-123` or `cto/01-fix-issue-123`.
 A manifest entry can include `task_key` to link a worker to a Monty-owned local task.
 When `monty done` archives that worker, it also marks the linked local task done.
-For older manifests that omit `task_key`, Monty infers a local task link from worker ids that start with `local-NNN` or from an unambiguous local task with the same title in the same project.
+Ordinary launch and reconciliation use only explicit task keys and stable repo, branch, and worker identities.
+Use `monty tasks repair-worker <worker>` for an explicit, ambiguity-checked repair of a legacy worker that has no stable link.
+
+Monty validates the complete manifest before creating a task, reserving worker memory, invoking `wt`, writing a launch script, or requesting a terminal.
+Preflight rejects missing repositories or contexts, unknown projects or tasks, unsafe paths, missing dependencies, existing-state conflicts, and duplicate worker IDs, worker directories, task links, or repo-plus-branch identities.
+Dry-run and real launch use the same preflight.
+A valid dry-run remains mutation-free.
+
+Real launch reserves every worker under the Monty state lock before external work begins.
+A runtime failure reports every manifest job as `launch-requested`, `launch-failed`, or `unattempted/prepared` and prints exact recovery commands.
+Rerunning the printed batch command safely continues prepared and definitely failed jobs.
+It skips `launch-requested` jobs because another automatic request could duplicate a session.
+Use the printed `monty resume <worker-id>` command when you intentionally want another request for such a worker.
 
 ## Worker memory and resume
 
@@ -165,9 +177,26 @@ dune exec -- monty resume issue-123
 ```
 
 `resume` reads `job.json`, recreates or reuses the repo-scoped worktree, and opens a new pi session with the same durable worker memory.
-Active jobs are found from worker `job.json` files.
-The original `jobs.json` manifest is only launch input.
+Resume always derives worktree mode from the durable record rather than a current CLI default, so a `never` worker cannot accidentally create an unmanaged worktree.
+Open jobs are found from worker `job.json` files.
+The original `jobs.json` manifest is launch input and a safe batch-retry contract.
+Durable `job.json` remains the lifecycle source of truth.
 `done` archives the worker and closes the linked Monty-owned local task in the same command.
+
+Open launch states have conservative meanings.
+
+- `prepared` means the durable identity is reserved and no terminal request has been made.
+- `launch-requested` means a terminal request was persisted before the external call, so automatic replay must not risk a duplicate.
+- `launch-failed` means launch preparation definitely failed before a terminal request and is safe to retry.
+
+A nonzero terminal command after `launch-requested` remains ambiguous because Ghostty may have created a surface before a later AppleScript step failed.
+Monty preserves `launch-requested` in that case and requires explicit resume.
+- Legacy `active` records remain open and resumable, but the value is not proof of process liveness.
+
+The active path is always `.monty/runs/<run-id>/workers/<worker-id>/job.json`.
+The archive path is always `.monty/runs/<run-id>/archive/<worker-id>/job.json`.
+Physical location determines active versus archived identity.
+Persisted path fields cannot override the canonical physical location.
 
 Resume an archived worker and move it back to active memory with:
 
@@ -216,12 +245,19 @@ Completing a job deletes the selected repo's worktree and branch, writes `status
 .monty/runs/<run-id>/archive/<worker-id>/
 ```
 
+Completion and archived resume are recoverable phase workflows.
+Monty persists `completing` or `reopening` intent before moving state, updating the linked local task, and finalizing status.
+A retry can continue from either canonical physical location.
+The original `--force` decision is persisted for the whole completion retry.
+`monty doctor` reports an exact recovery command for every incomplete lifecycle transition.
+
 ## Project overview and local tasks
 
 Monty can keep a small overview of projects and task sources.
-Project IDs are derived from repo names, with disambiguation when needed.
-External task sources, such as GitHub issues, are fetched every time instead of copied into Monty state.
-Monty-owned local tasks are only for work that has no external source of truth.
+Project IDs are stable persisted identities derived from repo names, with deterministic disambiguation when needed.
+External task sources, such as GitHub issues, refresh local external metadata such as title and URL.
+The local task registry always owns user-facing open or done status, even when a remote issue changes state.
+Monty-owned local tasks are the task inventory for both external and local work.
 
 Add a project with optional GitHub issues as its task source:
 
@@ -254,8 +290,12 @@ dune exec -- monty tasks list --project monty
 ```
 
 `list` and `tasks list` are equivalent task-listing views and show `ID`, `PROJECT`, `STATUS`, `TITLE`, and `BRANCH`.
-They automatically sync worker jobs into the local task source of truth before rendering.
-Worker jobs are linked back to local tasks with `task_key`.
+They automatically reconcile worker jobs into the local task source of truth before rendering.
+Worker jobs are linked back to local tasks with exact `task_key` values and stable repo-plus-branch-plus-worker identities.
+Reconciliation is sorted and replay-safe.
+It writes tasks before patching job links, so interruption can be retried without creating duplicate tasks.
+Corrupt or unknown neighboring workers produce diagnostics while healthy records continue.
+Use `--no-sync` with either inventory command for a read-only view with no reconciliation writes or external metadata fetches.
 You can run `dune exec -- monty tasks sync` explicitly when repairing or inspecting sync behavior.
 
 Add or complete a local task:
@@ -275,7 +315,8 @@ Monty stores project overview state under:
 
 ## Dry run
 
-Use dry-run mode to inspect what Monty would do without creating worktrees or opening Ghostty.
+Use dry-run mode to inspect what Monty would do without creating tasks, worker reservations, launch scripts, worktrees, or Ghostty requests.
+Dry-run performs the same complete path, identity, project, task, state-conflict, and dependency validation as real launch.
 
 ```sh
 dune exec -- monty launch-many \
@@ -316,4 +357,37 @@ MONTY_HOME=/path/to/monty
 dune exec -- monty doctor
 ```
 
-This checks for `pi`, `wt`, `gh`, Ghostty, `osascript`, `sdef`, and Dune.
+Doctor prints a stable table with `PASS`, `WARN`, and `FAIL` levels plus exact recovery commands.
+The configured pi command is required.
+The configured wt command is required only when worktree mode is `always`.
+Ghostty and `osascript` are required only for the Ghostty backend.
+Optional integrations such as `gh` and `sdef` produce warnings when unavailable.
+Doctor also inspects durable worker state for corruption, incomplete lifecycle transitions, and pending launch states.
+It exits zero when checks contain only PASS and WARN, and exits nonzero when any FAIL is present.
+
+## Durable state safety
+
+Monty stores durable state as plain JSON and Markdown under the configured home.
+Every mutation uses one advisory lock at `.monty/state.lock`.
+The lock protects only short local read-plan-write phases and is never held around `gh`, `wt`, Ghostty, pi, `osascript`, git, or other slow external commands.
+
+JSON updates use a same-directory temporary file, file `fsync`, atomic rename, and parent-directory `fsync`.
+Canonical path validation rejects traversal, unsafe components, symlink escapes, and persisted path metadata that disagrees with physical state.
+Unsafe legacy records require explicit repair and are never silently migrated.
+Launch-state changes use locked compare-and-update and refuse to overwrite a concurrent completion or reopening transition.
+Persisted launch-script paths are accepted only when the complete script bytes prove ownership or an absent destination remains under an explicitly trusted script root.
+Scripts are published through same-directory atomic replacement so a destination symlink swap cannot redirect the write.
+
+## Tests
+
+The checkout-binary E2E suite uses a unique temporary `MONTY_HOME` for every scenario.
+It installs fake `wt`, `gh`, pi, Ghostty, `osascript`, and related tools, and uses real temporary Git repositories when repository identity matters.
+The suite covers concurrent mutation, atomic faults, canonical paths, lifecycle recovery, deterministic reconciliation, whole-batch preflight, partial launch recovery, parser behavior, and doctor exit contracts.
+
+Run the complete validation with:
+
+```sh
+dune build @all
+dune runtest --force
+git diff --check
+```

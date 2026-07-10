@@ -50,18 +50,29 @@ A task must not depend on the worktree as the only place where important knowled
 `jobs.json` is launch input only.
 After launch, the durable worker `job.json` is the source of truth.
 
-Active jobs are discovered from worker `job.json` files.
-Archived jobs are discovered from archive `job.json` files.
+Open jobs are discovered only from canonical `.monty/runs/<run-id>/workers/<job-id>/job.json` files.
+Archived jobs are discovered only from canonical `.monty/runs/<run-id>/archive/<job-id>/job.json` files.
+Physical location is authoritative when persisted status or path metadata disagrees.
 Lifecycle commands should read and write these files rather than maintaining competing state.
 
-This avoids split-brain state.
+Launch state is deliberately conservative.
+`prepared` reserves an identity before external work.
+`launch-requested` records intent before a terminal request that could become indeterminate.
+`launch-failed` records only a definite failure before the terminal request.
+A terminal command error after request intent remains `launch-requested` because a surface may already exist.
+Launch-state updates must compare the expected durable source state under the home lock and must never overwrite a concurrent lifecycle transition.
+No durable state claims process liveness.
+
+This avoids split-brain state and duplicate recovery requests.
 It also lets `monty list`, `monty resume`, `monty done`, and future lifecycle commands operate from one durable record.
 
 ## Monty knows where task truth lives
 
 Monty should know what projects exist and where task truth lives for each project.
-If GitHub issues are the source of truth, Monty should fetch them live instead of copying them into local state.
-If no external source of truth exists, Monty may own a local task.
+If GitHub issues provide external identity and metadata, Monty may refresh their title and URL into the local task registry.
+Remote issue state must never override the local task's user-facing open or done status.
+The local task registry owns task status for external and purely local work.
+Worker links use exact local task keys and stable repo-plus-branch-plus-worker identities rather than ordinary title matching.
 
 Project memory belongs in Markdown under `.monty/projects/`.
 Project memory should describe stable context such as purpose, conventions, architecture notes, and working commands.
@@ -74,6 +85,7 @@ The durable code identity for a worker is the repo plus the branch.
 
 Monty must always know which repo a worktree belongs to.
 Monty must never accidentally resume, archive, or delete the wrong repo's worktree because another repo has the same branch name.
+Resume must honor the worker's persisted worktree mode instead of current CLI defaults.
 
 ## Always use `wt` for worktrees
 
@@ -87,7 +99,9 @@ Monty should make `wt` safer and more deterministic for AI workflows, not replac
 ## Lifecycle commands are first-class
 
 Jobs have a lifecycle.
-A job can be planned, launched, active, resumed, marked done, archived, and reopened.
+A job can be planned, prepared, launch-requested, definitely launch-failed, resumed, marked done, archived, and reopened.
+Completion and reopening persist operation-specific intent and can continue from either canonical physical location after interruption.
+The persisted force decision remains immutable across a completion retry.
 
 The current lifecycle commands include:
 
@@ -147,8 +161,15 @@ This is especially important if Monty is used to extend itself.
 
 Operational behavior should be inspectable and testable.
 Dry-run modes help users and agents understand what Monty will do before it mutates anything.
-`monty doctor` helps diagnose missing external dependencies.
-Tests should cover state transitions, parsing behavior, lifecycle commands, and repo-disambiguation logic.
+Launch dry-run uses the same complete preflight as real launch while creating no tasks, reservations, scripts, worktrees, or terminal requests.
+Complete preflight rejects any invalid or colliding batch before the first side effect.
+
+`monty doctor` reports structured PASS, WARN, and FAIL checks with exact recovery commands.
+Required dependencies are configuration-aware.
+Doctor exits nonzero for FAIL and zero for PASS/WARN-only results.
+
+Tests should cover state transitions, parsing behavior, lifecycle commands, repo disambiguation, concurrent writers, atomic-write faults, deterministic reconciliation, whole-batch validation, partial launch recovery, and CLI exit contracts.
+Checkout-binary E2E tests should use isolated homes, fake external tools, reliable cleanup, and real temporary Git repositories when identity matters.
 
 Monty controls sessions, files, worktrees, and branches.
 We need confidence before automation expands.
@@ -160,6 +181,20 @@ Important settings include `MONTY_HOME`, `MONTY_BRANCH_PREFIX`, `MONTY_WT_COMMAN
 
 Monty is used from development checkouts and installed wrappers.
 Its behavior must be predictable in both contexts.
+
+## Durable mutation protocol
+
+Monty should keep one advisory lock per configured home.
+Every state mutation must reload, validate, plan, and atomically write while holding that lock.
+The lock must never cover network calls, worktree operations, terminal requests, pi startup, git, or other slow external commands.
+
+JSON replacement should use a same-directory temporary file, file `fsync`, atomic rename, and parent-directory `fsync`.
+Canonical path validation must reject traversal, symlink escape, ambiguous physical identity, and unsafe legacy metadata.
+Unsafe legacy state requires explicit repair rather than silent migration.
+
+Reconciliation should be deterministic and replay-safe.
+Local tasks are committed before worker links so an interruption can reuse committed identity without creating duplicates.
+Read-only `--no-sync` inventory must perform no reconciliation write or external fetch.
 
 ## Simplicity over cleverness
 

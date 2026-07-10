@@ -35,8 +35,8 @@ let executable_home_candidate () =
   in
   List.find_opt looks_like_monty_root candidates
 
-let default () =
-  match Sys.getenv_opt "MONTY_HOME" with
+let default_with_getenv getenv =
+  match getenv "MONTY_HOME" with
   | Some path when String.trim path <> "" -> Shell.normalize (Shell.abs_path path)
   | _ -> (
       match find_up (Sys.getcwd ()) with
@@ -45,6 +45,8 @@ let default () =
           match executable_home_candidate () with
           | Some root -> Shell.normalize root
           | None -> Sys.getcwd () |> Shell.normalize))
+
+let default () = default_with_getenv Sys.getenv_opt
 
 let runtime_script_dir ?home () =
   let home = match home with Some home -> home | None -> default () in

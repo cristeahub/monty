@@ -1,3 +1,10 @@
 (test
  (name test_monty)
- (libraries monty))
+ (modules test_monty)
+ (libraries monty unix yojson))
+
+(test
+ (name test_cli_e2e)
+ (modules test_cli_e2e)
+ (libraries monty unix yojson)
+ (deps ../bin/main.exe))

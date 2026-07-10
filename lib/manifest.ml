@@ -31,7 +31,14 @@ let parse_job index json =
   let* title = string_field json "title" in
   let* repo = string_field json "repo" in
   let* context = string_field json "context" in
-  let* id = optional_string_field json "id" in
+  let* id =
+    match Util.member "id" json with
+    | `Null -> Ok None
+    | `String value ->
+        State_path.safe_component ~label:"manifest worker id" value
+        |> Result.map Option.some
+    | _ -> Error "field \"id\" must be a string when present"
+  in
   let* branch = optional_string_field json "branch" in
   let* worker_dir = optional_worker_dir_field json in
   let* prompt = optional_string_field json "prompt" in
@@ -59,24 +66,25 @@ let resolve_repo ~cwd path =
   if Filename.is_relative path |> not then Shell.normalize path
   else Shell.normalize (Filename.concat cwd path)
 
-let resolve_worker_dir ~cwd ~manifest_dir path =
+let resolve_worker_dir ?home ~manifest_dir path =
   if Filename.is_relative path |> not then Shell.normalize path
-  else
-    let from_cwd = Filename.concat cwd path in
-    if Sys.file_exists from_cwd then Shell.normalize from_cwd
-    else Shell.normalize (Filename.concat manifest_dir path)
+  else if String.equal path ".monty" || String.starts_with ~prefix:".monty/" path then
+    match home with
+    | Some home -> Filename.concat home path |> Shell.normalize
+    | None -> Filename.concat manifest_dir path |> Shell.normalize
+  else Filename.concat manifest_dir path |> Shell.normalize
 
 let default_worker_dir ~manifest_dir job =
   let branch = match job.Job.branch with Some branch -> branch | None -> job.Job.title in
   let id = Job.id_or_default ~branch job in
   Filename.concat (Filename.concat manifest_dir "workers") id |> Shell.normalize
 
-let resolve_job_paths ~cwd ~manifest_dir (index, job) =
+let resolve_job_paths ?home ~cwd ~manifest_dir (index, job) =
   let repo = resolve_repo ~cwd job.Job.repo in
   let context = resolve_context ~cwd ~manifest_dir job.Job.context in
   let worker_dir =
     match job.Job.worker_dir with
-    | Some worker_dir -> Some (resolve_worker_dir ~cwd ~manifest_dir worker_dir)
+    | Some worker_dir -> Some (resolve_worker_dir ?home ~manifest_dir worker_dir)
     | None -> Some (default_worker_dir ~manifest_dir job)
   in
   ( index,
@@ -91,7 +99,7 @@ let resolve_job_paths ~cwd ~manifest_dir (index, job) =
       task_key = job.Job.task_key;
     } )
 
-let load path =
+let load ?home path =
   let cwd = Sys.getcwd () in
   let manifest_path = Shell.abs_path ~base:cwd path |> Shell.normalize in
   let manifest_dir = Filename.dirname manifest_path in
@@ -108,7 +116,7 @@ let load path =
          (Ok [])
     |> Result.map (fun jobs ->
            jobs |> List.rev
-           |> List.map (resolve_job_paths ~cwd ~manifest_dir))
+           |> List.map (resolve_job_paths ?home ~cwd ~manifest_dir))
   with
   | Sys_error msg -> Error msg
   | Yojson.Json_error msg -> Error ("invalid JSON manifest: " ^ msg)

@@ -40,19 +40,18 @@ let rehydrate_lines ~monty_command ~wt_command ~branch ~source_repo =
     "fi";
     "cd \"$MONTY_JOB_WORKTREE\"" ]
 
-let write_launch_script ~options ~job ~id ~branch ~source_repo ~initial_workdir
-    ~context ~instructions ~worker_dir ~worktree_mode ~wt_command =
-  Shell.ensure_dir options.script_dir;
-  let path = script_filename ~script_dir:options.script_dir ~title:job.Job.title in
+let launch_script_contents ~options ~job ~id ~branch ~source_repo
+    ~initial_workdir ~context ~instructions ~worker_dir ~worktree_mode
+    ~wt_command =
   let command = build_command ~options ~instructions:(Some instructions) ~job ~context in
   let setup_lines =
     match worktree_mode with
     | "always" -> rehydrate_lines ~monty_command:options.monty_command ~wt_command ~branch ~source_repo
     | _ -> [ "cd " ^ Shell.quote initial_workdir; "MONTY_JOB_WORKTREE=" ^ Shell.quote initial_workdir ]
   in
-  let contents =
-    String.concat "\n"
+  String.concat "\n"
       ([ "#!/bin/sh";
+         "# monty-launch-script-v1";
          "set -eu";
          "export PATH="
          ^ Shell.quote
@@ -78,7 +77,22 @@ let write_launch_script ~options ~job ~id ~branch ~source_repo ~initial_workdir
           "printf '%s\\n\\n' " ^ Shell.quote ("Context: " ^ context);
           command;
           "" ])
+
+let write_launch_script ?path ~options ~job ~id ~branch ~source_repo
+    ~initial_workdir ~context ~instructions ~worker_dir ~worktree_mode
+    ~wt_command () =
+  Shell.ensure_dir options.script_dir;
+  let path =
+    Option.value
+      ~default:(script_filename ~script_dir:options.script_dir ~title:job.Job.title)
+      path
   in
-  Shell.write_file path contents;
-  Shell.chmod_executable path;
+  let contents =
+    launch_script_contents ~options ~job ~id ~branch ~source_repo
+      ~initial_workdir ~context ~instructions ~worker_dir ~worktree_mode
+      ~wt_command
+  in
+  (match State_store.write_file_atomic ~path ~perm:0o700 contents with
+  | Ok () -> ()
+  | Error message -> raise (Sys_error message));
   path
