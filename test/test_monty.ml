@@ -724,6 +724,87 @@ let test_cli_factory_injects_environment_and_dispatch () =
       assert_bool "factory second worktree" (two.worktree_mode = Launcher.Always)
   | _ -> failwith "injected CLI launch operation was not called twice"
 
+let test_headless_json_contract () =
+  let dispatch =
+    Headless.
+      { id = "issue-123";
+        title = "Fix issue 123";
+        repo = "/repo";
+        branch = "cto/issue-123";
+        worktree = "/worktrees/issue-123";
+        worker_dir = "/monty/.monty/runs/run-1/workers/issue-123";
+        instructions =
+          "/monty/.monty/runs/run-1/workers/issue-123/MONTY.md";
+        context = "/monty/.monty/runs/run-1/issue-123.md";
+        home = "/monty" }
+  in
+  let json = Headless.dispatch_json ~attempt_id:"attempt-test" dispatch in
+  assert_equal "headless dispatch schema" Headless.dispatch_schema
+    Yojson.Safe.Util.(json |> member "schema" |> to_string);
+  assert_equal "headless dispatch worktree" dispatch.worktree
+    Yojson.Safe.Util.(json |> member "worker" |> member "worktree" |> to_string);
+  assert_bool "headless dispatch excludes subagent runtime state"
+    Yojson.Safe.Util.(json |> member "worker" |> member "run_id" = `Null);
+  let harness_call = Yojson.Safe.Util.member "harness_call" json in
+  assert_equal "headless harness tool" "subagent"
+    Yojson.Safe.Util.(harness_call |> member "tool" |> to_string);
+  let arguments = Yojson.Safe.Util.member "arguments" harness_call in
+  assert_equal "headless harness context" "fresh"
+    Yojson.Safe.Util.(arguments |> member "context" |> to_string);
+  assert_equal "headless harness agent scope" "project"
+    Yojson.Safe.Util.(arguments |> member "agentScope" |> to_string);
+  assert_equal "headless harness cwd" dispatch.home
+    Yojson.Safe.Util.(arguments |> member "cwd" |> to_string);
+  assert_bool "headless harness is async"
+    Yojson.Safe.Util.(arguments |> member "async" |> to_bool);
+  assert_bool "headless harness disables clarify"
+    (not Yojson.Safe.Util.(arguments |> member "clarify" |> to_bool));
+  assert_bool "headless harness does not request Pi worktrees"
+    Yojson.Safe.Util.(arguments |> member "worktree" = `Null);
+  let chain = Yojson.Safe.Util.(arguments |> member "chain" |> to_list) in
+  assert_bool "headless 1-2-1 chain has three phases" (List.length chain = 3);
+  let implementation = List.nth chain 0 in
+  let reviewers =
+    Yojson.Safe.Util.(List.nth chain 1 |> member "parallel" |> to_list)
+  in
+  let fixer = List.nth chain 2 in
+  assert_bool "headless has two reviewers" (List.length reviewers = 2);
+  let attempt_root =
+    "/monty/.monty/runs/run-1/workers/issue-123/artifacts/headless/attempt-test"
+  in
+  let assert_child label relative_path child =
+    assert_equal (label ^ " output") (Filename.concat attempt_root relative_path)
+      Yojson.Safe.Util.(child |> member "output" |> to_string);
+    assert_bool (label ^ " progress disabled")
+      (not Yojson.Safe.Util.(child |> member "progress" |> to_bool));
+    let acceptance = Yojson.Safe.Util.member "acceptance" child in
+    assert_equal (label ^ " acceptance level") "none"
+      Yojson.Safe.Util.(acceptance |> member "level" |> to_string);
+    assert_equal (label ^ " acceptance reason") Headless.acceptance_reason
+      Yojson.Safe.Util.(acceptance |> member "reason" |> to_string)
+  in
+  assert_child "headless implementation" "implementation.md" implementation;
+  assert_child "headless correctness review" "reviews/correctness.md"
+    (List.nth reviewers 0);
+  assert_child "headless quality review" "reviews/quality.md"
+    (List.nth reviewers 1);
+  assert_child "headless final" "final.md" fixer;
+  let prepared =
+    Headless.
+      { id = dispatch.id;
+        title = dispatch.title;
+        branch = dispatch.branch;
+        worktree = Some dispatch.worktree;
+        worker_dir = dispatch.worker_dir;
+        status = "prepared" }
+  in
+  let prepared_json = Headless.prepare_json [ prepared ] in
+  assert_equal "headless prepare schema" Headless.prepare_schema
+    Yojson.Safe.Util.(prepared_json |> member "schema" |> to_string);
+  assert_equal "headless prepare status" "prepared"
+    Yojson.Safe.Util.(
+      prepared_json |> member "jobs" |> index 0 |> member "status" |> to_string)
+
 let run_named name test =
   try
     test ();
@@ -756,5 +837,6 @@ let () =
     ("transition_task_key_mismatch", test_transition_task_key_mismatch_is_rejected);
     ("job_symlink_escape", test_job_store_rejects_symlink_escape);
     ("doctor_typed_configuration", test_doctor_typed_checks_and_configuration);
-    ("cli_factory_injection", test_cli_factory_injects_environment_and_dispatch) ]
+    ("cli_factory_injection", test_cli_factory_injects_environment_and_dispatch);
+    ("headless_json_contract", test_headless_json_contract) ]
   |> List.iter (fun (name, test) -> run_named name test)

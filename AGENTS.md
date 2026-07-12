@@ -21,8 +21,10 @@ Use a short run id such as `2026-06-27-issues` or `run-001`.
 When the user chooses tasks to execute, create one Markdown context file per worker task.
 Each context file should be specific enough that a fresh pi worker can start without reading the whole planning conversation.
 Include the task summary, repo path, issue or PR links, relevant constraints, acceptance criteria, and any important planning notes.
-For implementation jobs, include a `Review loop` section in the context file.
+For implementation jobs that will run in Ghostty, include a `Review loop` section in the context file.
 That section must instruct the worker to run `/review` after the initial implementation and focused validation, verify each concrete finding, fix valid findings, rerun affected tests, and record the review findings plus fixes in worker memory.
+For explicitly headless jobs, use a `Headless review chain` section instead.
+State that Monty's fixed chain supplies one implementer, two independent parallel reviewers, and one fixer, so the implementer must not invoke `/review` or launch subagents itself.
 Workers must not post review comments, push, or open PRs unless explicitly approved.
 
 Create `.monty/runs/<run-id>/jobs.json` with this shape:
@@ -73,6 +75,42 @@ Use the printed batch command to retry `prepared` and `launch-failed` workers.
 Never automatically relaunch a `launch-requested` worker.
 Use the printed `monty resume <worker-id>` command only when the user intentionally wants another terminal request.
 
+Ghostty remains the default execution surface.
+Use the headless harness flow only when the user explicitly requests headless or Pi-subagent execution.
+Monty does not provide a custom Pi extension.
+It emits complete JSON arguments for the harness's existing `subagent` tool.
+
+Before any mutating headless command, call the harness `subagent` tool with `action: "list"` and confirm that the tool and required agents are available.
+If they are unavailable, stop without mutating Monty state.
+Run headless dry-run first when checking a new batch or when the user asks for a preview:
+
+```sh
+dune exec -- monty headless prepare-many --dry-run --manifest .monty/runs/<run-id>/jobs.json
+```
+
+Then prepare the real batch:
+
+```sh
+dune exec -- monty headless prepare-many --manifest .monty/runs/<run-id>/jobs.json
+```
+
+Headless preparation reserves every job and materializes its Monty-managed `wt` worktree while leaving the job `prepared`.
+For each prepared worker, run `monty headless begin <worker-id>` immediately before the harness call.
+Read the returned `harness_call.tool` and pass `harness_call.arguments` unchanged to that exposed harness tool.
+Do not manually reconstruct, simplify, or enrich the generated chain JSON.
+The generated asynchronous chains can run concurrently without waiting for earlier jobs to finish.
+
+Each chain gets fresh minimal context and runs one implementer, two mutually isolated reviewers in parallel, and one fixer.
+Reviewers may write only their separate reports outside the worktree.
+No child may create worktrees, stage, commit, push, open a PR, post remotely, or run `monty done`.
+A successful chain leaves the task open and its worktree intact.
+Never infer completion from Pi runtime status.
+
+If a harness call fails after `begin`, leave the worker `launch-requested`.
+Run `monty headless resume <worker-id>` only when the user intentionally requests a fresh successor chain, then pass its generated `harness_call.arguments` unchanged to the harness tool.
+Never persist a backend, Pi run ID, async status, or runtime state in `job.json`.
+Never automatically run `monty done` after a headless chain.
+
 At the start of a day or planning session, review active jobs with:
 
 ```sh
@@ -105,6 +143,7 @@ Use `monty task add --project <project> --title <title>` for local tracking reco
 ## Worker expectations
 
 Worker sessions are launched in repo-scoped worktrees created by Monty's `ensure-worktree` flow.
+Headless child agents receive the exact same Monty-managed worktree as their explicit `cwd`; they must never request Pi-managed worktrees.
 Monty validates that any `wt` result belongs to the requested repo, because different repos may use the same branch name.
 Treat wt worktrees as ephemeral.
 Durable session memory belongs in the worker directory under `.monty/runs/<run-id>/workers/<worker-id>/`.
@@ -143,6 +182,8 @@ The implementation is OCaml built with Dune.
 Use Dune package management and dependencies in `dune-project`.
 Do not add opam files.
 Use Ghostty as the default terminal backend.
+Keep headless state and payload generation in Monty, while execution uses the harness's existing subagent tool.
+Do not add a Monty-specific Pi extension or a new persisted backend.
 Use Monty's repo-scoped `ensure-worktree` flow for worktree creation and reuse.
 It must use the existing `wt` CLI, validate the selected repo, and automatically answer `wt` repo-selection prompts when branch names collide across repos.
 Never bypass `wt` with direct `git worktree` commands.

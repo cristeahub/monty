@@ -251,6 +251,7 @@ copy_monty_home() {
       --exclude './_build' \
       --exclude './.git' \
       --exclude './.monty' \
+      --exclude './.pi-subagents' \
       -cf - .
   ) | (cd "$tmp_dir" && tar -xf -)
   rm -rf "$monty_home"

@@ -1,2 +1,10 @@
 _build/
 .monty/
+.pi-subagents/
+
+# Monty's project-local head-butler integration is part of the repository.
+!.pi/
+.pi/*
+!.pi/agents/
+.pi/agents/*
+!.pi/agents/monty-headless-reviewer.md

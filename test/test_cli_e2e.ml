@@ -662,6 +662,32 @@ let init_git_repo path =
   must_run "git add tracked.txt";
   must_run "git commit -qm initial"
 
+let install_create_wt ~root ~log =
+  let worktrees = Filename.concat root "created-worktrees" in
+  let wt = Filename.concat root "fake-bin/wt" in
+  Shell.write_file wt
+    (String.concat "\n"
+       [ "#!/bin/sh";
+         "set -eu";
+         "printf '%s\\n' \"$0 $*\" >> " ^ Shell.quote log;
+         "case \"$1\" in";
+         "  b)";
+         "    branch=$2";
+         "    if [ \"${MONTY_TEST_WT_FAIL_BRANCH:-}\" = \"$branch\" ]; then exit 77; fi";
+         "    safe=$(printf '%s' \"$branch\" | tr '/ ' '__')";
+         "    worktree=" ^ Shell.quote worktrees ^ "/$safe";
+         "    if [ ! -d \"$worktree\" ]; then";
+         "      mkdir -p " ^ Shell.quote worktrees;
+         "      git worktree add -q -b \"$branch\" \"$worktree\"";
+         "    fi";
+         "    printf '%s\\n' \"$worktree\"";
+         "    ;;";
+         "  list) printf '%s\\n' \"repo:\" ;;";
+         "  *) exit 92 ;;";
+         "esac";
+         "" ]);
+  Shell.chmod_executable wt
+
 let install_remove_only_wt ~root ~repo ~branch ~present =
   let log = Filename.concat root "remove-wt.log" in
   let wt = Filename.concat root "fake-bin/wt" in
@@ -2360,6 +2386,230 @@ let test_forged_launch_script_and_resume_mode_are_safe () =
       require_contains "atomically republished script"
         (Shell.read_file owned_script) "# monty-launch-script-v1")
 
+let test_headless_prepare_begin_and_resume () =
+  with_temp_root "headless" (fun root ->
+      let home, log, env = setup_environment root in
+      let repo = Filename.concat root "repo" in
+      let context = Filename.concat root "context.md" in
+      let manifest = Filename.concat home ".monty/runs/run-headless/jobs.json" in
+      init_git_repo repo;
+      add_project ~root ~home ~env repo;
+      install_create_wt ~root ~log;
+      Shell.write_file context "# Headless task\n\nImplement the requested change.\n";
+      write_manifest manifest
+        [ manifest_job ~id:"headless-one" ~branch:"cto/headless-one"
+            ~title:"Headless one" ~repo ~context ();
+          manifest_job ~id:"headless-two" ~branch:"cto/headless-two"
+            ~title:"Headless two" ~repo ~context () ];
+      let dry =
+        run ~root ~env 1950
+          [ "headless"; "prepare-many"; "--manifest"; manifest; "--home";
+            home; "--dry-run" ]
+      in
+      require_code 0 dry;
+      let dry_json = Yojson.Safe.from_string dry.stdout in
+      if
+        Yojson.Safe.Util.(dry_json |> member "schema" |> to_string)
+        <> Headless.prepare_schema
+      then failwith "headless dry-run returned the wrong schema";
+      if
+        Yojson.Safe.Util.(dry_json |> member "jobs" |> to_list |> List.length)
+        <> 2
+      then failwith "headless dry-run did not plan both workers";
+      if Sys.file_exists (Filename.concat home ".monty/tasks.local.json") then
+        failwith "headless dry-run created tasks";
+      require_empty_log log;
+      let prepare_failure_env =
+        replace_env env [ ("MONTY_TEST_WT_FAIL_BRANCH", "cto/headless-two") ]
+      in
+      let failed_prepare =
+        run ~root ~env:prepare_failure_env 1951
+          [ "headless"; "prepare-many"; "--manifest"; manifest; "--home";
+            home ]
+      in
+      if failed_prepare.code = 0 then
+        failwith "headless preparation ignored a failing worktree request";
+      let staged_job_file id =
+        Filename.concat home
+          (".monty/runs/run-headless/workers/" ^ id ^ "/job.json")
+      in
+      List.iter
+        (fun id ->
+          if job_status (staged_job_file id) <> "prepared" then
+            failf "failed headless preparation did not leave %s prepared" id)
+        [ "headless-one"; "headless-two" ];
+      let prepared =
+        run ~root ~env 1957
+          [ "headless"; "prepare-many"; "--manifest"; manifest; "--home";
+            home ]
+      in
+      require_code 0 prepared;
+      let prepared_json = Yojson.Safe.from_string prepared.stdout in
+      let jobs = Yojson.Safe.Util.(prepared_json |> member "jobs" |> to_list) in
+      if List.length jobs <> 2 then failwith "headless prepare did not return both workers";
+      let worktrees =
+        List.map
+          (fun job ->
+            let worktree = Yojson.Safe.Util.(job |> member "worktree" |> to_string) in
+            if not (Sys.file_exists worktree && Sys.is_directory worktree) then
+              failf "headless worktree is missing: %s" worktree;
+            worktree)
+          jobs
+      in
+      let job_file id =
+        Filename.concat home
+          (".monty/runs/run-headless/workers/" ^ id ^ "/job.json")
+      in
+      let require_no_terminal_script id =
+        let json = Yojson.Safe.from_file (job_file id) in
+        let script = Yojson.Safe.Util.(json |> member "launch_script" |> to_string) in
+        if Sys.file_exists script then
+          failf "headless worker %s unexpectedly wrote a terminal launch script" id
+      in
+      List.iter
+        (fun id ->
+          let path = job_file id in
+          if job_status path <> "prepared" then
+            failf "headless prepare did not leave %s prepared" id;
+          let json = Yojson.Safe.from_file path in
+          let worktree = Yojson.Safe.Util.(json |> member "last_known_worktree" |> to_string) in
+          if not (List.mem worktree worktrees) then
+            failf "headless prepare did not persist %s worktree" id;
+          List.iter
+            (fun forbidden ->
+              if Yojson.Safe.Util.member forbidden json <> `Null then
+                failf "headless state persisted forbidden field %s" forbidden)
+            [ "worker_backend"; "subagent"; "run_id"; "async_dir" ];
+          require_no_terminal_script id)
+        [ "headless-one"; "headless-two" ];
+      require_contains "headless wt invocation" (read_file log) "/wt b";
+      let stale_manifest =
+        match Manifest.load ~home manifest with
+        | Ok jobs -> jobs
+        | Error message -> failwith message
+      in
+      let stale_options =
+        Launcher.
+          { backend = Terminal.Dry_run;
+            target = Terminal.Tab;
+            pi_command = "pi";
+            wt_command = Filename.concat root "fake-bin/wt";
+            worktree_mode = Always;
+            branch_prefix = "monty";
+            fork = None;
+            home;
+            script_dir = Home.runtime_script_dir ~home ();
+            monty_command = executable }
+      in
+      let stale_preflight =
+        match Launcher.preflight_batch stale_options stale_manifest with
+        | Ok prepared -> prepared
+        | Error message -> failwith message
+      in
+      if string_contains (read_file log) "osascript"
+         || string_contains (read_file log) "/pi "
+      then failwith "headless prepare invoked Pi or Ghostty";
+      let premature_resume =
+        run ~root ~env 1952
+          [ "headless"; "resume"; "headless-two"; "--home"; home ]
+      in
+      if premature_resume.code = 0 then
+        failwith "headless resume accepted a worker without a predecessor chain";
+      require_contains "headless successor guard" premature_resume.stderr
+        "launch-requested";
+      let fault_env =
+        replace_env env [ ("MONTY_FAULT_INJECT", "launch-before-request-state") ]
+      in
+      let faulted =
+        run ~root ~env:fault_env 1953
+          [ "headless"; "begin"; "headless-two"; "--home"; home ]
+      in
+      if faulted.code = 0 then failwith "headless begin ignored its injected fault";
+      if job_status (job_file "headless-two") <> "prepared" then
+        failwith "a pre-dispatch headless failure was not retryable as prepared";
+      let begun =
+        run ~root ~env 1954
+          [ "headless"; "begin"; "headless-one"; "--home"; home ]
+      in
+      require_code 0 begun;
+      let dispatch = Yojson.Safe.from_string begun.stdout in
+      if
+        Yojson.Safe.Util.(dispatch |> member "schema" |> to_string)
+        <> Headless.dispatch_schema
+      then failwith "headless begin returned the wrong schema";
+      let begun_worktree =
+        Yojson.Safe.Util.(dispatch |> member "worker" |> member "worktree" |> to_string)
+      in
+      if not (List.mem begun_worktree worktrees) then
+        failwith "headless begin returned an unexpected worktree";
+      let harness_call = Yojson.Safe.Util.(dispatch |> member "harness_call") in
+      if Yojson.Safe.Util.(harness_call |> member "tool" |> to_string) <> "subagent"
+      then failwith "headless begin did not target the harness subagent tool";
+      let chain =
+        Yojson.Safe.Util.(harness_call |> member "arguments" |> member "chain" |> to_list)
+      in
+      let reviewers =
+        Yojson.Safe.Util.(List.nth chain 1 |> member "parallel" |> to_list)
+      in
+      let children = List.nth chain 0 :: reviewers @ [ List.nth chain 2 ] in
+      List.iter
+        (fun child ->
+          let acceptance = Yojson.Safe.Util.member "acceptance" child in
+          if Yojson.Safe.Util.(acceptance |> member "level" |> to_string) <> "none"
+          then failwith "headless child did not explicitly disable inferred acceptance";
+          if
+            Yojson.Safe.Util.(acceptance |> member "reason" |> to_string)
+            <> Headless.acceptance_reason
+          then failwith "headless child acceptance reason did not identify the review gate")
+        children;
+      if job_status (job_file "headless-one") <> "launch-requested" then
+        failwith "headless begin did not claim its worker";
+      if job_status (job_file "headless-two") <> "prepared" then
+        failwith "headless begin changed another worker";
+      (match
+         Launcher.reserve_batch ~reject_requested:true stale_options
+           stale_preflight
+       with
+      | Ok _ ->
+          failwith
+            "headless reservation accepted a worker claimed after stale preflight"
+      | Error message ->
+          require_contains "headless post-lock claim guard" message
+            "became launch-requested");
+      if job_status (job_file "headless-one") <> "launch-requested" then
+        failwith "stale headless reservation reset a claimed worker";
+      if job_status (job_file "headless-two") <> "prepared" then
+        failwith "stale headless reservation mutated another worker";
+      let duplicate =
+        run ~root ~env 1955
+          [ "headless"; "begin"; "headless-one"; "--home"; home ]
+      in
+      if duplicate.code = 0 then failwith "headless begin replayed a requested worker";
+      require_contains "headless begin replay recovery" duplicate.stderr
+        "headless resume";
+      let resumed =
+        run ~root ~env 1956
+          [ "headless"; "resume"; "headless-one"; "--home"; home ]
+      in
+      require_code 0 resumed;
+      if job_status (job_file "headless-one") <> "launch-requested" then
+        failwith "explicit headless resume changed the open launch state";
+      require_no_terminal_script "headless-one";
+      require_no_terminal_script "headless-two";
+      let tasks = local_tasks_json home in
+      if List.length tasks <> 2 then failwith "headless workers did not retain two local tasks";
+      if
+        List.exists
+          (fun task ->
+            not
+              (String.equal
+                 Yojson.Safe.Util.(task |> member "status" |> to_string)
+                 "open"))
+          tasks
+      then failwith "headless execution completed a local task automatically";
+      if string_contains (read_file log) "osascript" then
+        failwith "headless begin or resume opened Ghostty")
+
 let test_cli_parser_and_doctor_contracts () =
   with_temp_root "parser-doctor" (fun root ->
       let home, _log, env = setup_environment root in
@@ -2523,5 +2773,7 @@ let () =
       test_launch_state_race_preserves_completion_transition );
     ( "cli_forged_launch_script_and_resume_mode_are_safe",
       test_forged_launch_script_and_resume_mode_are_safe );
+    ( "cli_headless_prepare_begin_and_resume",
+      test_headless_prepare_begin_and_resume );
     ( "cli_parser_and_doctor_contracts", test_cli_parser_and_doctor_contracts ) ]
   |> List.iter (fun (name, test) -> run_named name test)

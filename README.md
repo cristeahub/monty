@@ -1,8 +1,10 @@
 # monty, the head butler
 
-Monty is a small OCaml launcher for running a head pi session that plans work and spins out worker pi sessions in new Ghostty tabs, windows, or splits.
+Monty is a small OCaml launcher for running a head pi session that plans work and spins out worker pi sessions.
+Ghostty tabs, windows, and splits remain the default execution surface.
+An optional head-butler workflow can instead run workers through the harness's existing Pi subagent tool without opening Ghostty.
 The model does the planning.
-Monty handles the glue around Ghostty, `wt`, worktrees, manifests, and `pi` startup commands.
+Monty handles the glue around Ghostty, `wt`, worktrees, manifests, Pi subagents, and `pi` startup commands.
 
 ## Requirements
 
@@ -10,6 +12,7 @@ Monty handles the glue around Ghostty, `wt`, worktrees, manifests, and `pi` star
 - Dune package management, with dependencies declared in `dune-project`.
 - No opam files are used by this repo.
 - `pi` on `PATH`.
+- The `pi-subagents` package enabled when using headless chains.
 - `wt` on `PATH`.
 - Ghostty on macOS for normal launching.
 - `gh` on `PATH` when using GitHub issues as a project task source.
@@ -148,6 +151,61 @@ A runtime failure reports every manifest job as `launch-requested`, `launch-fail
 Rerunning the printed batch command safely continues prepared and definitely failed jobs.
 It skips `launch-requested` jobs because another automatic request could duplicate a session.
 Use the printed `monty resume <worker-id>` command when you intentionally want another request for such a worker.
+
+## Headless Pi subagent chains
+
+Headless execution is an explicit alternative for the head-butler session.
+Ordinary `launch`, `launch-many`, and `resume` commands continue to use Ghostty by default.
+Monty does not install a Pi extension for this workflow.
+Instead, it generates complete JSON arguments for the harness's existing `subagent` tool.
+
+The head-butler workflow is:
+
+1. Confirm that the current harness exposes the `subagent` tool before mutating Monty state.
+2. Run a complete mutation-free preflight.
+3. Reserve the batch and materialize every repo-scoped `wt` worktree.
+4. Run `headless begin` for one prepared worker immediately before invoking the generated harness call.
+5. Pass `harness_call.arguments` directly to the harness's `subagent` tool.
+
+```sh
+monty headless prepare-many \
+  --manifest .monty/runs/run-1/jobs.json \
+  --dry-run
+
+monty headless prepare-many \
+  --manifest .monty/runs/run-1/jobs.json
+
+monty headless begin issue-123
+```
+
+`headless begin` emits the versioned `monty:headless-dispatch:v2` envelope.
+Its `harness_call.tool` is `subagent`, and `harness_call.arguments` contains the complete asynchronous chain.
+No prompt needs to reconstruct the chain manually.
+
+Each generated chain runs in its supplied Monty worktree:
+
+1. One fresh implementer changes the worktree and runs focused validation.
+2. Two mutually isolated fresh reviewers inspect the same worktree concurrently and write only their separate reports outside it.
+3. One fresh fixer verifies both reports, fixes valid findings, reruns affected validation, and records the final handoff in durable worker memory.
+
+The generated arguments do not request Pi-managed worktrees and explicitly disable progress-file side effects and structured acceptance policy.
+All step outputs use absolute paths under the worker's durable `artifacts/headless/` directory.
+Child prompts prohibit staging, commits, pushes, pull requests, review comments, other remote writes, worktree management, and automatic `monty done` calls.
+Successful chains leave the task open, preserve the worktree, and require the normal explicit `monty done <worker-id>` lifecycle command later.
+
+Headless dispatch uses a conservative two-phase protocol.
+Preparation reserves all identities and records their worktrees while every job remains `prepared`.
+A preparation or other pre-dispatch failure remains retryable as `prepared`.
+Immediately before the harness tool call, `begin` atomically changes only that worker to `launch-requested` and emits its exact tool arguments.
+A failure after that point remains ambiguous and is never replayed automatically.
+When a fresh successor chain is intentional, run:
+
+```sh
+monty headless resume issue-123
+```
+
+The successor envelope also contains the complete harness call.
+Monty does not persist a backend, Pi run ID, async status, or subagent runtime state in `job.json`.
 
 ## Worker memory and resume
 
@@ -382,7 +440,7 @@ Scripts are published through same-directory atomic replacement so a destination
 
 The checkout-binary E2E suite uses a unique temporary `MONTY_HOME` for every scenario.
 It installs fake `wt`, `gh`, pi, Ghostty, `osascript`, and related tools, and uses real temporary Git repositories when repository identity matters.
-The suite covers concurrent mutation, atomic faults, canonical paths, lifecycle recovery, deterministic reconciliation, whole-batch preflight, partial launch recovery, parser behavior, and doctor exit contracts.
+The suite covers concurrent mutation, atomic faults, canonical paths, lifecycle recovery, deterministic reconciliation, whole-batch preflight, partial launch recovery, the headless two-phase protocol, generated harness tool arguments, clean-context chain construction, parser behavior, and doctor exit contracts.
 
 Run the complete validation with:
 

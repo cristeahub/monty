@@ -13,8 +13,9 @@ The head butler and worker agents decide what work should be done.
 Monty makes that work repeatable, inspectable, resumable, and safe.
 
 Monty owns operational mechanics such as terminal launch, repo-scoped worktree selection, durable job state, and lifecycle commands.
-Pi owns agent interaction and natural language execution.
+Pi owns agent interaction, natural language execution, and subagent runtime orchestration.
 The model owns planning, judgment, and implementation choices.
+Monty must not duplicate Pi run state in its durable schema.
 
 ## Head butler and worker model
 
@@ -24,6 +25,14 @@ Workers execute focused tasks, keep durable notes, and report back through their
 
 A worker must be able to start from its context file and Monty instructions without reading the full planning conversation.
 The head butler must be able to inspect current work without entering every worker session.
+
+Headless execution is a head-butler-only alternative to terminal workers.
+Monty generates complete arguments for the harness's existing subagent tool and gives every child a Monty-owned repo-scoped worktree rather than requesting a Pi-managed worktree.
+Monty does not need its own Pi extension or a second agent runtime.
+Each task chain uses a fresh implementer, two mutually isolated fresh reviewers in parallel, and a fresh fixer.
+Separate task chains are independent and may run concurrently.
+Reviewers can write their assigned reports outside the worktree but must otherwise remain read-only.
+The chain must not stage, commit, push, post remotely, manage worktrees, or complete the Monty task automatically.
 
 ## Durable memory beats ephemeral worktrees
 
@@ -62,6 +71,15 @@ Launch state is deliberately conservative.
 A terminal command error after request intent remains `launch-requested` because a surface may already exist.
 Launch-state updates must compare the expected durable source state under the home lock and must never overwrite a concurrent lifecycle transition.
 No durable state claims process liveness.
+
+Headless dispatch uses only `prepared` and `launch-requested` in its normal path.
+Preparation reserves every batch identity before external worktree calls and leaves workers `prepared` until their exact subagent request is ready.
+The head butler must confirm that the harness exposes the subagent tool before preparation mutates Monty state.
+A pre-dispatch failure stays `prepared` and is safe to retry.
+Monty atomically claims one worker as `launch-requested` and emits the complete harness arguments immediately before the head butler invokes that tool.
+Any later ambiguity requires an explicit successor-chain resume and must never trigger automatic replay.
+A completed headless chain remains open and `launch-requested` until the user intentionally runs the existing completion lifecycle.
+Pi run IDs, backend choice, and runtime status remain ephemeral and never enter `job.json`.
 
 This avoids split-brain state and duplicate recovery requests.
 It also lets `monty list`, `monty resume`, `monty done`, and future lifecycle commands operate from one durable record.
@@ -103,7 +121,7 @@ A job can be planned, prepared, launch-requested, definitely launch-failed, resu
 Completion and reopening persist operation-specific intent and can continue from either canonical physical location after interruption.
 The persisted force decision remains immutable across a completion retry.
 
-The current lifecycle commands include:
+The current public lifecycle commands include:
 
 ```sh
 monty launch
@@ -114,6 +132,10 @@ monty resume --archived
 monty done
 monty done --force
 ```
+
+The `monty headless prepare-many`, `begin`, and `resume` commands form a versioned harness protocol rather than a second public lifecycle.
+`begin` and `resume` emit complete arguments for the existing subagent tool, so the head butler does not reconstruct chain JSON by hand.
+Ghostty remains the default behavior of the existing public commands.
 
 Lifecycle commands should be designed as stable product surfaces.
 They are used by humans, the head butler, and worker sessions.
@@ -168,7 +190,7 @@ Complete preflight rejects any invalid or colliding batch before the first side 
 Required dependencies are configuration-aware.
 Doctor exits nonzero for FAIL and zero for PASS/WARN-only results.
 
-Tests should cover state transitions, parsing behavior, lifecycle commands, repo disambiguation, concurrent writers, atomic-write faults, deterministic reconciliation, whole-batch validation, partial launch recovery, and CLI exit contracts.
+Tests should cover state transitions, parsing behavior, lifecycle commands, repo disambiguation, concurrent writers, atomic-write faults, deterministic reconciliation, whole-batch validation, partial launch recovery, headless claim boundaries, generated harness arguments, isolated reviewer construction, and CLI exit contracts.
 Checkout-binary E2E tests should use isolated homes, fake external tools, reliable cleanup, and real temporary Git repositories when identity matters.
 
 Monty controls sessions, files, worktrees, and branches.
@@ -202,7 +224,7 @@ Monty should prefer small CLI commands, durable files, plain JSON, and plain Mar
 The system needs to be understandable by humans and AI agents.
 Simple state makes self-extension safer.
 
-## Extension checklist
+## Feature checklist
 
 Every new Monty feature should answer these questions.
 
@@ -222,5 +244,5 @@ Every new Monty feature should answer these questions.
 Monty should become better at managing the full lifecycle of AI-directed development work.
 It should help start the day, enumerate active work, launch focused workers, resume interrupted work, archive completed features, and preserve durable knowledge.
 
-Future extensions should make the head-butler workflow clearer and safer.
+Future features should make the head-butler workflow clearer and safer.
 They should not make the core state model more mysterious.

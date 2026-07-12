@@ -87,13 +87,14 @@ let check_dependency label command =
   | Ok _ -> Ok ()
   | Error msg -> Error (Printf.sprintf "%s dependency unavailable: %s" label msg)
 
+let check_worktree_dependency options =
+  match options.worktree_mode with
+  | Never -> Ok ()
+  | Always -> check_dependency "wt" options.wt_command
+
 let check_dependencies options =
   let* () = check_dependency "pi" options.pi_command in
-  let* () =
-    match options.worktree_mode with
-    | Never -> Ok ()
-    | Always -> check_dependency "wt" options.wt_command
-  in
+  let* () = check_worktree_dependency options in
   match options.backend with
   | Terminal.Dry_run -> Ok ()
   | Terminal.Ghostty ->
@@ -381,9 +382,8 @@ let map_task_jobs (prepared : prepared list) planned =
          | Some job -> { item with job }
          | None -> item)
 
-let prepare_batch options indexed_jobs =
+let preflight_batch options indexed_jobs =
   let use_indices = List.length indexed_jobs <> 1 in
-  let* () = check_dependencies options in
   let rec prepare acc = function
     | [] -> Ok (List.rev acc)
     | (index, job) :: rest ->
@@ -430,6 +430,10 @@ let prepare_batch options indexed_jobs =
         classify (item :: acc) rest
   in
   classify [] prepared
+
+let prepare_batch options indexed_jobs =
+  let* () = check_dependencies options in
+  preflight_batch options indexed_jobs
 
 let matching_current (prepared : prepared) =
   if not (State_path.path_exists prepared.state_path.State_path.job_file) then
@@ -658,7 +662,7 @@ let reservation_fault checkpoint =
       Error (Printf.sprintf "fault injected at %s" checkpoint)
   | _ -> Ok ()
 
-let reserve_batch options prepared =
+let reserve_batch ?(reject_requested = false) options prepared =
   State_store.with_lock ~home:options.home (fun () ->
       let input_jobs =
         List.map
@@ -685,6 +689,21 @@ let reserve_batch options prepared =
             reclassify (item :: acc) rest
       in
       let* prepared = reclassify [] prepared in
+      let* () =
+        if not reject_requested then Ok ()
+        else
+          match
+            List.find_opt
+              (fun (item : prepared) -> item.existing = Requested)
+              prepared
+          with
+          | None -> Ok ()
+          | Some item ->
+              Error
+                (Printf.sprintf
+                   "worker %s became launch-requested during headless preparation; use the explicit headless resume action when another subagent run is intentional"
+                   item.id)
+      in
       let rec stage acc = function
         | [] -> Ok (List.rev acc)
         | item :: rest -> (
@@ -905,7 +924,17 @@ let pi_options (options : options) =
       branch_prefix = options.branch_prefix;
       monty_command = options.monty_command }
 
-let request_one options (prepared : prepared) ~expected_statuses =
+type begun_request = {
+  workdir : string;
+  initial_workdir : string;
+}
+
+let begin_request ?(persist_failure = true) ?(write_script = true) options
+    (prepared : prepared) ~expected_statuses =
+  let fail message =
+    if persist_failure then mark_failed options prepared ~expected_statuses message
+    else message
+  in
   let workdir_result =
     match options.worktree_mode with
     | Never -> Ok prepared.repo
@@ -914,58 +943,62 @@ let request_one options (prepared : prepared) ~expected_statuses =
           ~branch:prepared.branch
   in
   match workdir_result with
-  | Error message ->
-      `Failed (mark_failed options prepared ~expected_statuses message)
+  | Error message -> `Failed (fail message)
   | Ok workdir ->
       let initial_workdir =
         match options.worktree_mode with Always -> prepared.repo | Never -> workdir
       in
       let script_result =
-        try
-          ignore
-            (Pi_command.write_launch_script ~path:prepared.script_path
-               ~options:(pi_options options) ~job:prepared.job ~id:prepared.id
-               ~branch:prepared.branch ~source_repo:prepared.repo
-               ~initial_workdir ~context:prepared.context
-               ~instructions:prepared.instructions
-               ~worker_dir:prepared.worker_dir
-               ~worktree_mode:(worktree_mode_string options)
-               ~wt_command:options.wt_command ());
-          Ok ()
-        with
-        | Sys_error msg -> Error msg
-        | Unix.Unix_error (err, fn, arg) ->
-            Error
-              (Printf.sprintf "failed to write launch script via %s(%s): %s" fn arg
-                 (Unix.error_message err))
+        if not write_script then Ok ()
+        else
+          try
+            ignore
+              (Pi_command.write_launch_script ~path:prepared.script_path
+                 ~options:(pi_options options) ~job:prepared.job ~id:prepared.id
+                 ~branch:prepared.branch ~source_repo:prepared.repo
+                 ~initial_workdir ~context:prepared.context
+                 ~instructions:prepared.instructions
+                 ~worker_dir:prepared.worker_dir
+                 ~worktree_mode:(worktree_mode_string options)
+                 ~wt_command:options.wt_command ());
+            Ok ()
+          with
+          | Sys_error msg -> Error msg
+          | Unix.Unix_error (err, fn, arg) ->
+              Error
+                (Printf.sprintf "failed to write launch script via %s(%s): %s" fn
+                   arg (Unix.error_message err))
       in
       (match script_result with
-      | Error message ->
-          `Failed (mark_failed options prepared ~expected_statuses message)
+      | Error message -> `Failed (fail message)
       | Ok () -> (
           match fault "launch-before-request-state" with
-          | Error message ->
-              `Failed (mark_failed options prepared ~expected_statuses message)
+          | Error message -> `Failed (fail message)
           | Ok () -> (
               match
                 update_launch_state options prepared ~expected_statuses
                   ~status:"launch-requested" ~worktree:workdir ()
               with
               | Error message -> `Failed message
-              | Ok () -> (
-                  match fault "launch-after-request-state" with
-                  | Error message -> `Requested_error message
-                  | Ok () -> (
-                      match
-                        Ghostty.launch ~target:options.target
-                          ~workdir:initial_workdir
-                          ~script_path:prepared.script_path
-                      with
-                      | Error message -> `Requested_error message
-                      | Ok () -> (
-                          match fault "launch-after-terminal-request" with
-                          | Error message -> `Requested_error message
-                          | Ok () -> `Requested))))))
+              | Ok () -> `Ready { workdir; initial_workdir })))
+
+let request_one options (prepared : prepared) ~expected_statuses =
+  match begin_request options prepared ~expected_statuses with
+  | `Failed message -> `Failed message
+  | `Ready request -> (
+      match fault "launch-after-request-state" with
+      | Error message -> `Requested_error message
+      | Ok () -> (
+          match
+            Ghostty.launch ~target:options.target
+              ~workdir:request.initial_workdir
+              ~script_path:prepared.script_path
+          with
+          | Error message -> `Requested_error message
+          | Ok () -> (
+              match fault "launch-after-terminal-request" with
+              | Error message -> `Requested_error message
+              | Ok () -> `Requested)))
 
 let common_retry_options options =
   String.concat " "

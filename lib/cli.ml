@@ -127,6 +127,15 @@ let options_term =
     const options $ backend_arg $ target_arg $ pi_command_arg $ wt_command_arg $ worktree_arg
     $ branch_prefix_arg $ fork_arg $ home_arg $ script_dir_arg)
  in
+let headless_options pi_command wt_command branch_prefix fork home script_dir =
+  options Terminal.Dry_run Terminal.Tab pi_command wt_command Launcher.Always
+    branch_prefix fork home script_dir
+ in
+let headless_options_term =
+  Cmdliner.Term.(
+    const headless_options $ pi_command_arg $ wt_command_arg $ branch_prefix_arg
+    $ fork_arg $ home_arg $ script_dir_arg)
+ in
 let start name home pi_command = operations.start ~name ~home ~pi_command |> exit_code
  in
 let start_term =
@@ -176,6 +185,42 @@ let launch_many_term =
     Cmdliner.Arg.(required & opt (some string) None & info [ "manifest" ] ~docv:"FILE" ~doc)
   in
   Cmdliner.Term.(const launch_many $ manifest $ options_term)
+ in
+let headless_prepare_many manifest dry_run options =
+  let manifest = Shell.abs_path manifest |> Shell.normalize in
+  match Manifest.load ~home:options.Launcher.home manifest with
+  | Error msg -> exit_code (Error msg)
+  | Ok jobs -> (
+      match Headless.prepare_many ~dry_run options jobs with
+      | Error msg -> exit_code (Error msg)
+      | Ok json ->
+          Headless.print_json json;
+          0)
+ in
+let headless_prepare_many_term =
+  let manifest =
+    let doc = "JSON manifest containing the Monty jobs to prepare." in
+    Cmdliner.Arg.(required & opt (some string) None & info [ "manifest" ] ~docv:"FILE" ~doc)
+  in
+  let dry_run =
+    let doc = "Perform complete preflight without reserving workers or creating worktrees." in
+    Cmdliner.Arg.(value & flag & info [ "dry-run" ] ~doc)
+  in
+  Cmdliner.Term.(const headless_prepare_many $ manifest $ dry_run $ headless_options_term)
+ in
+let headless_begin explicit_resume worker options =
+  match Headless.begin_worker ~explicit_resume options worker with
+  | Error msg -> exit_code (Error msg)
+  | Ok json ->
+      Headless.print_json json;
+      0
+ in
+let headless_worker_term explicit_resume =
+  let worker =
+    let doc = "Worker id, branch leaf, branch, or title slug." in
+    Cmdliner.Arg.(required & pos 0 (some string) None & info [] ~docv:"WORKER" ~doc)
+  in
+  Cmdliner.Term.(const (headless_begin explicit_resume) $ worker $ headless_options_term)
  in
 let resume archived worker options =
   let record =
@@ -508,6 +553,23 @@ let task_cmd =
   let doc = "Manage Monty-owned local task data." in
   Cmdliner.Cmd.group (Cmdliner.Cmd.info "task" ~doc) [ add_cmd; done_cmd ]
  in
+let headless_cmd =
+  let prepare_cmd =
+    let doc = "Reserve jobs and materialize their Monty-owned worktrees for headless dispatch." in
+    Cmdliner.Cmd.v (Cmdliner.Cmd.info "prepare-many" ~doc) headless_prepare_many_term
+  in
+  let begin_cmd =
+    let doc = "Claim one prepared worker and emit its harness subagent call." in
+    Cmdliner.Cmd.v (Cmdliner.Cmd.info "begin" ~doc) (headless_worker_term false)
+  in
+  let resume_cmd =
+    let doc = "Intentionally emit a successor harness call for an open worker." in
+    Cmdliner.Cmd.v (Cmdliner.Cmd.info "resume" ~doc) (headless_worker_term true)
+  in
+  let doc = "Generate headless calls for the harness subagent tool." in
+  Cmdliner.Cmd.group (Cmdliner.Cmd.info "headless" ~doc)
+    [ prepare_cmd; begin_cmd; resume_cmd ]
+ in
 let doctor_cmd =
   let doc = "Check Monty launch dependencies." in
   Cmdliner.Cmd.v (Cmdliner.Cmd.info "doctor" ~doc) doctor_term
@@ -534,6 +596,7 @@ let main_cmd =
       projects_cmd;
       tasks_cmd;
       task_cmd;
+      headless_cmd;
       ensure_worktree_cmd;
       doctor_cmd;
     ]
