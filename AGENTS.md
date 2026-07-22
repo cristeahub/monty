@@ -18,7 +18,12 @@ Ask clarifying questions when the selected work is ambiguous.
 Keep planning artifacts under `.monty/runs/<run-id>/`.
 Use a short run id such as `2026-06-27-issues` or `run-001`.
 
-When the user chooses tasks to execute, create one Markdown context file per worker task.
+Inside the native Monty Pi extension, use `/monty` to select work.
+An unstarted task remains in the head-butler session and enters read-only plan mode.
+After the user approves the plan, use the extension's Start task action or `/monty-start` so Monty prepares a native task subsession and launches its asynchronous chain while the head butler remains available.
+Use `/monty-open <task>` to enter a running or resumable task and `/monty-back` to return to the exact head session.
+
+For explicit Ghostty or manual batch workflows, create one Markdown context file per worker task.
 Each context file should be specific enough that a fresh pi worker can start without reading the whole planning conversation.
 Include the task summary, repo path, issue or PR links, relevant constraints, acceptance criteria, and any important planning notes.
 For implementation jobs that will run in Ghostty, include a `Review loop` section in the context file.
@@ -56,7 +61,7 @@ When `task_key` is present, `monty done <worker-id>` closes the linked local tas
 Ordinary launch and reconciliation never infer a task from a worker title or branch.
 Use `monty tasks repair-worker <worker-id>` only for an explicit, ambiguity-checked legacy repair.
 
-After writing the manifest and context files, launch workers with:
+After writing a manual batch manifest and its context files, launch workers with:
 
 ```sh
 dune exec -- monty launch-many --manifest .monty/runs/<run-id>/jobs.json
@@ -75,10 +80,11 @@ Use the printed batch command to retry `prepared` and `launch-failed` workers.
 Never automatically relaunch a `launch-requested` worker.
 Use the printed `monty resume <worker-id>` command only when the user intentionally wants another terminal request.
 
-Ghostty remains the default execution surface.
-Use the headless harness flow only when the user explicitly requests headless or Pi-subagent execution.
-Monty does not provide a custom Pi extension.
-It emits complete JSON arguments for the harness's existing `subagent` tool.
+`monty start` loads Monty's process-wide Pi extension.
+The extension owns task selection, read-only plan mode, native task subsessions, minimal location status, and return navigation.
+It uses Monty's JSON descriptors and the existing `pi-subagents` RPC rather than duplicating session or agent runtime state.
+Ghostty remains available through explicit `launch`, `launch-many`, and `resume` commands.
+The direct headless CLI flow remains available for manual and recovery use.
 
 Before any mutating headless command, call the harness `subagent` tool with `action: "list"` and confirm that the tool and required agents are available.
 If they are unavailable, stop without mutating Monty state.
@@ -178,15 +184,17 @@ Any FAIL exits nonzero and must be resolved before relying on launch or lifecycl
 
 ## Project conventions
 
-The implementation is OCaml built with Dune.
+The deterministic CLI and state layer is OCaml built with Dune.
+The bundled native Pi adapter lives under `pi-extension/` and uses Pi's public extension and session APIs.
 Use Dune package management and dependencies in `dune-project`.
 Do not add opam files.
-Use Ghostty as the default terminal backend.
-Keep headless state and payload generation in Monty, while execution uses the harness's existing subagent tool.
-Do not add a Monty-specific Pi extension or a new persisted backend.
+Keep headless state and payload generation in Monty, while execution uses the harness's existing subagent tool or stable RPC.
+Do not add a new persisted backend.
 Use Monty's repo-scoped `ensure-worktree` flow for worktree creation and reuse.
 It must use the existing `wt` CLI, validate the selected repo, and automatically answer `wt` repo-selection prompts when branch names collide across repos.
 Never bypass `wt` with direct `git worktree` commands.
 All JSON mutations must use Monty's one-home lock and atomic replacement path.
 Never hold that lock while invoking `gh`, `wt`, Ghostty, pi, `osascript`, git, or other slow external commands.
 When changing state or lifecycle behavior, add isolated checkout-binary E2E coverage with a unique `MONTY_HOME`, fake external tools, reliable cleanup, and real temporary Git repositories where identity matters.
+Keep Pi navigation state in custom Pi session entries.
+Never write Pi session paths, process IDs, run IDs, or subagent runtime state to `job.json`.

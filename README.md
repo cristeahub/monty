@@ -1,10 +1,11 @@
 # monty, the head butler
 
-Monty is a small OCaml launcher for running a head pi session that plans work and spins out worker pi sessions.
-Ghostty tabs, windows, and splits remain the default execution surface.
-An optional head-butler workflow can instead run workers through the harness's existing Pi subagent tool without opening Ghostty.
+Monty is a small OCaml control room for planning and running task work in Pi.
+`monty start` loads Monty's native Pi extension, which keeps the head butler and task subsessions inside one Pi process.
+Asynchronous task chains continue running while the user returns to the head butler to plan other work.
+The existing Ghostty and headless CLI workflows remain available for compatibility and explicit batch use.
 The model does the planning.
-Monty handles the glue around Ghostty, `wt`, worktrees, manifests, Pi subagents, and `pi` startup commands.
+Monty handles the glue around Pi sessions, `wt`, worktrees, manifests, Pi subagents, and durable task state.
 
 ## Requirements
 
@@ -87,11 +88,25 @@ After installation, run:
 monty
 ```
 
-This changes to the Monty control-room directory and runs:
+This changes to the Monty control-room directory and runs Pi with the bundled `pi-extension` package.
+The extension marks the persisted head session and provides:
 
-```sh
-pi --name "Monty Head Butler"
-```
+- `/monty` to choose a task.
+- `/monty-open <task>` to open, resume, or plan a task.
+- `/monty-back` to return to the exact head-butler session.
+- `/monty-start` to prepare the approved plan and start its asynchronous chain without leaving the head butler.
+- `/monty-run` to start a prepared task chain from a task subsession.
+- `/monty-run resume` to intentionally start a successor chain.
+- `/monty-plan-cancel` to leave read-only planning mode.
+
+The location indicator shows only `MONTY · HEAD BUTLER`, the task being planned, or `MONTY · TASK: <title>`.
+Task subsessions are ordinary persisted Pi sessions bound to their validated worktree cwd.
+Their custom session entries hold Pi navigation links, while Monty keeps lifecycle and worktree state authoritative.
+
+When a selected task has a canonical worker, Monty rehydrates its workspace through `wt` and opens the existing linked Pi subsession when one exists.
+When no worker or task subsession exists, the extension stays in the head session and enables read-only plan mode.
+Starting the approved plan prepares `.monty/runs/pi/<task-id>.md`, creates a resumable task subsession, launches Monty's fixed asynchronous chain through the `pi-subagents` RPC, and leaves the user in the head session.
+Because those chains are owned by the head session, they remain visible there and continue running while more tasks are planned.
 
 ## Launch one worker
 
@@ -154,10 +169,9 @@ Use the printed `monty resume <worker-id>` command when you intentionally want a
 
 ## Headless Pi subagent chains
 
-Headless execution is an explicit alternative for the head-butler session.
+Headless execution is the chain protocol used by the native Pi extension and remains available as an explicit CLI workflow.
 Ordinary `launch`, `launch-many`, and `resume` commands continue to use Ghostty by default.
-Monty does not install a Pi extension for this workflow.
-Instead, it generates complete JSON arguments for the harness's existing `subagent` tool.
+Monty generates complete JSON arguments for the harness's existing `subagent` tool and in-process RPC.
 
 The head-butler workflow is:
 
@@ -345,7 +359,13 @@ List tasks:
 dune exec -- monty list
 dune exec -- monty tasks list
 dune exec -- monty tasks list --project monty
+dune exec -- monty tasks list --json --no-sync
 ```
+
+The versioned `monty:pi-tasks:v1` JSON snapshot is the read-only integration contract used by the Pi extension.
+It labels each task `open`, `plan`, `blocked`, or `done` without treating worker launch state as process liveness.
+The extension uses `monty task enter <task> --json` to validate and rehydrate an existing workspace.
+It uses `monty task prepare <task> --plan <file> --json` to turn an approved head-butler plan into a prepared worker and native Pi entry descriptor.
 
 `list` and `tasks list` are equivalent task-listing views and show `ID`, `PROJECT`, `STATUS`, `TITLE`, and `BRANCH`.
 They automatically reconcile worker jobs into the local task source of truth before rendering.
@@ -407,6 +427,7 @@ MONTY_BRANCH_PREFIX=cto
 MONTY_PI_COMMAND=pi
 MONTY_WT_COMMAND=wt
 MONTY_HOME=/path/to/monty
+MONTY_COMMAND=/path/to/monty
 ```
 
 ## Doctor
@@ -440,7 +461,7 @@ Scripts are published through same-directory atomic replacement so a destination
 
 The checkout-binary E2E suite uses a unique temporary `MONTY_HOME` for every scenario.
 It installs fake `wt`, `gh`, pi, Ghostty, `osascript`, and related tools, and uses real temporary Git repositories when repository identity matters.
-The suite covers concurrent mutation, atomic faults, canonical paths, lifecycle recovery, deterministic reconciliation, whole-batch preflight, partial launch recovery, the headless two-phase protocol, generated harness tool arguments, clean-context chain construction, parser behavior, and doctor exit contracts.
+The suite covers concurrent mutation, atomic faults, canonical paths, lifecycle recovery, deterministic reconciliation, whole-batch preflight, partial launch recovery, native Pi task preparation, head-session startup, the headless two-phase protocol, generated harness tool arguments, extension protocol helpers, parser behavior, and doctor exit contracts.
 
 Run the complete validation with:
 
