@@ -10,6 +10,8 @@ Keep worker jobs linked to local tasks with `task_key` and run `monty tasks sync
 When the user asks for jobs or tasks, present the answer as a Markdown table that closely mirrors the relevant Monty command output and includes the same information.
 For task and job lists, use exactly these columns: ID, Project, Status, Title, and Branch.
 Use `monty list` or `monty tasks list` for the task inventory, not an ad-hoc merge of local tasks and worker jobs.
+Always invoke the globally installed `monty` executable directly.
+Never use `dune exec -- monty` for Monty workflows.
 
 ## Native Pi handoff
 
@@ -84,13 +86,13 @@ Use `monty tasks repair-worker <worker-id>` only for an explicit, ambiguity-chec
 After writing a manual batch manifest and its context files, launch workers with:
 
 ```sh
-dune exec -- monty launch-many --manifest .monty/runs/<run-id>/jobs.json
+monty launch-many --manifest .monty/runs/<run-id>/jobs.json
 ```
 
 Use dry-run first when checking the generated manifest or when the user asks for a preview.
 
 ```sh
-dune exec -- monty launch-many --terminal dry-run --manifest .monty/runs/<run-id>/jobs.json
+monty launch-many --terminal dry-run --manifest .monty/runs/<run-id>/jobs.json
 ```
 
 Dry-run runs the same complete preflight as real launch and performs no mutation.
@@ -111,13 +113,13 @@ If they are unavailable, stop without mutating Monty state.
 Run headless dry-run first when checking a new batch or when the user asks for a preview:
 
 ```sh
-dune exec -- monty headless prepare-many --dry-run --manifest .monty/runs/<run-id>/jobs.json
+monty headless prepare-many --dry-run --manifest .monty/runs/<run-id>/jobs.json
 ```
 
 Then prepare the real batch:
 
 ```sh
-dune exec -- monty headless prepare-many --manifest .monty/runs/<run-id>/jobs.json
+monty headless prepare-many --manifest .monty/runs/<run-id>/jobs.json
 ```
 
 Headless preparation reserves every job and materializes its Monty-managed `wt` worktree while leaving the job `prepared`.
@@ -140,13 +142,13 @@ Never automatically run `monty done` after a headless chain.
 At the start of a day or planning session, review active jobs with:
 
 ```sh
-dune exec -- monty list
+monty list
 ```
 
 When a feature is complete, archive it with:
 
 ```sh
-dune exec -- monty done <worker-id>
+monty done <worker-id>
 ```
 
 This deletes the worker worktree and branch, closes any linked Monty-owned local task, marks the job done, and moves durable worker memory to `.monty/runs/<run-id>/archive/<worker-id>/`.
@@ -181,7 +183,7 @@ Workers are instructed to write important discoveries, blockers, and handoff not
 Resume an existing worker with:
 
 ```sh
-dune exec -- monty resume <worker-id>
+monty resume <worker-id>
 ```
 
 Resume uses the durable worker's persisted worktree mode even when current CLI or environment defaults differ.
@@ -189,7 +191,7 @@ Resume uses the durable worker's persisted worktree mode even when current CLI o
 Resume an archived worker and move it back to active memory with:
 
 ```sh
-dune exec -- monty resume --archived <worker-id>
+monty resume --archived <worker-id>
 ```
 
 Durable worker identity comes from the canonical physical `job.json` location.
