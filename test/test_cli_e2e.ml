@@ -2610,6 +2610,75 @@ let test_headless_prepare_begin_and_resume () =
       if string_contains (read_file log) "osascript" then
         failwith "headless begin or resume opened Ghostty")
 
+let test_pi_task_snapshot_prepare_and_enter () =
+  with_temp_root "pi-task" (fun root ->
+      let home, log, env = setup_environment root in
+      let repo = Filename.concat root "repo" in
+      let plan = Filename.concat root "plan.md" in
+      init_git_repo repo;
+      add_project ~root ~home ~env repo;
+      require_code 0
+        (run ~root ~env 1970
+           [ "task"; "add"; "--home"; home; "--project"; "repo";
+             "--title"; "Native Pi task" ]);
+      let before = Shell.read_file (Filename.concat home ".monty/tasks.local.json") in
+      let listed =
+        run ~root ~env 1971
+          [ "tasks"; "list"; "--json"; "--no-sync"; "--home"; home ]
+      in
+      require_code 0 listed;
+      if Shell.read_file (Filename.concat home ".monty/tasks.local.json") <> before then
+        failwith "read-only Pi task snapshot changed local task state";
+      let list_json = Yojson.Safe.from_string listed.stdout in
+      if Yojson.Safe.Util.(list_json |> member "schema" |> to_string) <> Pi_bridge.tasks_schema
+      then failwith "Pi task snapshot returned the wrong schema";
+      let first = Yojson.Safe.Util.(list_json |> member "tasks" |> to_list |> List.hd) in
+      if Yojson.Safe.Util.(first |> member "action" |> to_string) <> "plan" then
+        failwith "unstarted Pi task was not marked for planning";
+      require_empty_log log;
+      install_create_wt ~root ~log;
+      Shell.write_file plan "Plan:\n1. Implement the native Pi task flow.\n";
+      let prepared =
+        run ~root ~env 1972
+          [ "task"; "prepare"; "local-001"; "--plan"; plan; "--json";
+            "--home"; home ]
+      in
+      require_code 0 prepared;
+      let entry = Yojson.Safe.from_string prepared.stdout in
+      if Yojson.Safe.Util.(entry |> member "schema" |> to_string) <> Pi_bridge.entry_schema
+      then failwith "Pi task prepare returned the wrong schema";
+      let worker = Yojson.Safe.Util.(entry |> member "worker") in
+      if Yojson.Safe.Util.(worker |> member "id" |> to_string) <> "local-001"
+         || Yojson.Safe.Util.(worker |> member "status" |> to_string) <> "prepared"
+      then failwith "Pi task prepare returned the wrong worker";
+      let cwd = Yojson.Safe.Util.(entry |> member "cwd" |> to_string) in
+      if not (Sys.file_exists cwd && Sys.is_directory cwd) then
+        failwith "Pi task prepare did not materialize its worktree";
+      let opened =
+        run ~root ~env 1973
+          [ "task"; "enter"; "local:local-001"; "--json"; "--home"; home ]
+      in
+      require_code 0 opened;
+      if Yojson.Safe.Util.(Yojson.Safe.from_string opened.stdout |> member "cwd" |> to_string) <> cwd
+      then failwith "Pi task enter did not reuse its worktree";
+      let tasks = local_tasks_json home in
+      if List.length tasks <> 1
+         || json_string "worker_id" (List.hd tasks) <> "local-001"
+      then failwith "Pi task prepare did not retain one stable task link";
+      let refreshed =
+        run ~root ~env 1974
+          [ "tasks"; "list"; "--json"; "--no-sync"; "--home"; home ]
+      in
+      require_code 0 refreshed;
+      let item =
+        Yojson.Safe.Util.(Yojson.Safe.from_string refreshed.stdout |> member "tasks"
+                          |> to_list |> List.hd)
+      in
+      if Yojson.Safe.Util.(item |> member "action" |> to_string) <> "open" then
+        failwith "prepared Pi task was not marked openable";
+      if string_contains (read_file log) "osascript" || string_contains (read_file log) "/pi "
+      then failwith "Pi task preparation launched a terminal or Pi")
+
 let test_cli_parser_and_doctor_contracts () =
   with_temp_root "parser-doctor" (fun root ->
       let home, _log, env = setup_environment root in
@@ -2775,5 +2844,7 @@ let () =
       test_forged_launch_script_and_resume_mode_are_safe );
     ( "cli_headless_prepare_begin_and_resume",
       test_headless_prepare_begin_and_resume );
+    ( "cli_pi_task_snapshot_prepare_and_enter",
+      test_pi_task_snapshot_prepare_and_enter );
     ( "cli_parser_and_doctor_contracts", test_cli_parser_and_doctor_contracts ) ]
   |> List.iter (fun (name, test) -> run_named name test)

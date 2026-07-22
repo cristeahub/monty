@@ -376,25 +376,31 @@ let projects_add_term =
 let print_sync_warnings warnings =
   List.iter (fun warning -> Fmt.epr "monty: warning: %s\n" warning) warnings
  in
-let tasks_list project all no_sync home =
+let tasks_list project all no_sync json home =
   let result =
     let ( let* ) = Result.bind in
-    let* sync_warnings =
+    let* warnings =
       if no_sync then Ok []
       else
         Project_overview.sync_jobs_to_local_tasks ~home
         |> Result.map (fun result -> result.Project_overview.warnings)
     in
-    let* tasks, inventory_warnings =
-      Project_overview.load_tasks_with_warnings ~home ?project ~all ()
-    in
-    Ok (tasks, List.sort_uniq String.compare (sync_warnings @ inventory_warnings))
+    if json then
+      let* value = Pi_bridge.tasks_json ~home ?project ~all () in
+      Ok (`Json value, warnings)
+    else
+      let* tasks, inventory =
+        Project_overview.load_tasks_with_warnings ~home ?project ~all ()
+      in
+      Ok (`Text tasks, warnings @ inventory)
   in
   match result with
   | Error msg -> exit_code (Error msg)
-  | Ok (tasks, warnings) ->
-      print_sync_warnings warnings;
-      Fmt.pr "%s" (Project_overview.render_tasks tasks);
+  | Ok (output, warnings) ->
+      print_sync_warnings (List.sort_uniq String.compare warnings);
+      (match output with
+      | `Json value -> Headless.print_json value
+      | `Text tasks -> Fmt.pr "%s" (Project_overview.render_tasks tasks));
       0
  in
 let tasks_list_term =
@@ -410,7 +416,11 @@ let tasks_list_term =
     let doc = "Read inventory without reconciliation writes or external task fetches." in
     Cmdliner.Arg.(value & flag & info [ "no-sync" ] ~doc)
   in
-  Cmdliner.Term.(const tasks_list $ project $ all $ no_sync $ home_arg)
+  let json =
+    let doc = "Emit the versioned native Pi task snapshot as JSON." in
+    Cmdliner.Arg.(value & flag & info [ "json" ] ~doc)
+  in
+  Cmdliner.Term.(const tasks_list $ project $ all $ no_sync $ json $ home_arg)
  in
 let tasks_sync home =
   match Project_overview.sync_jobs_to_local_tasks ~home with
@@ -454,6 +464,50 @@ let task_add_term =
     Cmdliner.Arg.(required & opt (some string) None & info [ "title" ] ~docv:"TITLE" ~doc)
   in
   Cmdliner.Term.(const task_add $ project $ title $ home_arg)
+ in
+let print_entry json value =
+  if json then Headless.print_json value
+  else Fmt.pr "%s\n" Yojson.Safe.Util.(value |> member "cwd" |> to_string)
+ in
+let task_enter task json home wt_command =
+  match Pi_bridge.enter ~home ~wt_command task with
+  | Error msg -> exit_code (Error msg)
+  | Ok value ->
+      print_entry json value;
+      0
+ in
+let task_enter_term =
+  let task =
+    let doc = "Stable task key, local task id, external id, or linked worker id." in
+    Cmdliner.Arg.(required & pos 0 (some string) None & info [] ~docv:"TASK" ~doc)
+  in
+  let json =
+    let doc = "Emit the versioned native Pi entry descriptor as JSON." in
+    Cmdliner.Arg.(value & flag & info [ "json" ] ~doc)
+  in
+  Cmdliner.Term.(const task_enter $ task $ json $ home_arg $ wt_command_arg)
+ in
+let task_prepare task plan json options =
+  match Pi_bridge.prepare options task plan with
+  | Error msg -> exit_code (Error msg)
+  | Ok value ->
+      print_entry json value;
+      0
+ in
+let task_prepare_term =
+  let task =
+    let doc = "Stable task key, local task id, external id, or linked worker id." in
+    Cmdliner.Arg.(required & pos 0 (some string) None & info [] ~docv:"TASK" ~doc)
+  in
+  let plan =
+    let doc = "Approved Markdown plan used to create the native Pi task context." in
+    Cmdliner.Arg.(required & opt (some string) None & info [ "plan" ] ~docv:"FILE" ~doc)
+  in
+  let json =
+    let doc = "Emit the versioned native Pi entry descriptor as JSON." in
+    Cmdliner.Arg.(value & flag & info [ "json" ] ~doc)
+  in
+  Cmdliner.Term.(const task_prepare $ task $ plan $ json $ headless_options_term)
  in
 let task_done id home =
   Project_overview.done_local_task ~home id |> exit_code
@@ -546,12 +600,21 @@ let task_cmd =
     let doc = "Add a Monty-owned local task." in
     Cmdliner.Cmd.v (Cmdliner.Cmd.info "add" ~doc) task_add_term
   in
+  let enter_cmd =
+    let doc = "Rehydrate a prepared task workspace and emit its native Pi descriptor." in
+    Cmdliner.Cmd.v (Cmdliner.Cmd.info "enter" ~doc) task_enter_term
+  in
+  let prepare_cmd =
+    let doc = "Prepare an unstarted task for a native Pi subsession." in
+    Cmdliner.Cmd.v (Cmdliner.Cmd.info "prepare" ~doc) task_prepare_term
+  in
   let done_cmd =
     let doc = "Mark a Monty-owned local task done." in
     Cmdliner.Cmd.v (Cmdliner.Cmd.info "done" ~doc) task_done_term
   in
   let doc = "Manage Monty-owned local task data." in
-  Cmdliner.Cmd.group (Cmdliner.Cmd.info "task" ~doc) [ add_cmd; done_cmd ]
+  Cmdliner.Cmd.group (Cmdliner.Cmd.info "task" ~doc)
+    [ add_cmd; enter_cmd; prepare_cmd; done_cmd ]
  in
 let headless_cmd =
   let prepare_cmd =
