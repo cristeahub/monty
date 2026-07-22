@@ -93,11 +93,16 @@ The extension marks the persisted head session and provides:
 
 - `/monty` to choose a task.
 - `/monty-open <task>` to open, resume, or plan a task.
-- `/monty-back` to return to the exact head-butler session.
+- `/monty-head-butler` to go to the exact head-butler session.
 - `/monty-start` to prepare the approved plan and start its asynchronous chain without leaving the head butler.
 - `/monty-run` to start a prepared task chain from a task subsession.
 - `/monty-run resume` to intentionally start a successor chain.
 - `/monty-plan-cancel` to leave read-only planning mode.
+
+For a conversational request to begin concrete work, the head butler first reuses or creates the local task, shows the updated `monty list` inventory, and asks the user: `Jump to the task by running /monty.`
+Pi does not expose command dispatch or session switching to model tools, so the user enters that native command to open the selector.
+A direct navigation command entered by the user during a foreground Pi response cancels that response, shows a spinner while cancellation settles, and then switches sessions.
+Detached Monty worker chains are not cancelled or awaited by navigation.
 
 The location indicator shows only `MONTY · HEAD BUTLER`, the task being planned, or `MONTY · TASK: <title>`.
 Task subsessions are ordinary persisted Pi sessions bound to their validated worktree cwd.
@@ -107,7 +112,8 @@ A superseded task session receives the session-wide `monty-task-retired:v1` tomb
 When a selected task has a canonical worker, Monty rehydrates its workspace through `wt` and opens the existing linked Pi subsession when one exists.
 When no worker or task subsession exists, the extension stays in the head session and enables read-only plan mode.
 Starting the approved plan prepares `.monty/runs/pi/<task-id>.md`, creates a resumable task subsession, launches Monty's fixed asynchronous chain through the `pi-subagents` RPC, and leaves the user in the head session.
-Because those chains are owned by the head session, they remain visible there and continue running while more tasks are planned.
+Pi-subagents runs these chains in detached processes associated with the session that dispatched them.
+They continue running when the user moves between the head butler and task subsessions, and returning to the dispatching session restores its run visibility.
 
 ## Launch one worker
 

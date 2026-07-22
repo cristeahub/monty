@@ -12,6 +12,7 @@ const wt = process.env.MONTY_WT_COMMAND?.trim() || "wt";
 const piCmd = process.env.MONTY_PI_COMMAND?.trim() || "pi";
 const prefix = process.env.MONTY_BRANCH_PREFIX?.trim() || "monty";
 const planTools = new Set(["read", "grep", "find", "ls", "questionnaire"]);
+const cancelFrames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 const requiredAgents = REQUIRED_AGENTS;
 
@@ -129,6 +130,38 @@ export default function monty(pi) {
     loc(ctx);
   }
 
+  function showCancelSpinner(ctx) {
+    let index = 0;
+    const draw = () => {
+      const frame = cancelFrames[index++ % cancelFrames.length];
+      ctx.ui.setStatus("monty-cancel",
+        ctx.ui.theme.fg("warning", `${frame} Cancelling current response...`));
+    };
+    draw();
+    const timer = setInterval(draw, 80);
+    timer.unref?.();
+    return () => {
+      clearInterval(timer);
+      ctx.ui.setStatus("monty-cancel", undefined);
+    };
+  }
+
+  async function cancelForeground(ctx) {
+    if (ctx.isIdle()) return;
+    const stopSpinner = showCancelSpinner(ctx);
+    try {
+      ctx.abort();
+      await ctx.waitForIdle();
+    } finally { stopSpinner(); }
+  }
+
+  async function switchMontySession(ctx, file, options) {
+    await cancelForeground(ctx);
+    const result = await ctx.switchSession(file, options);
+    if (result.cancelled) ctx.ui.notify("Monty session switch was cancelled", "info");
+    return result;
+  }
+
   async function snapshot() {
     return cli(["tasks", "list", "--json", "--no-sync", "--home", home]);
   }
@@ -226,8 +259,7 @@ export default function monty(pi) {
     const entry = await cli(["task", "enter", task.key, "--json", "--home", home, "--wt-command", wt]);
     const file = await ensureSession(entry, ctx);
     if (!file) return;
-    await ctx.waitForIdle();
-    await ctx.switchSession(file);
+    await switchMontySession(ctx, file);
   }
 
   async function choose(ctx) {
@@ -259,8 +291,7 @@ export default function monty(pi) {
     if (!current || !same(current, head)) {
       const marker = { home, enabled: true, key: task.key, title: task.title };
       SessionManager.open(head).appendCustomEntry(PLAN, marker);
-      await ctx.waitForIdle();
-      const result = await ctx.switchSession(head, {
+      const result = await switchMontySession(ctx, head, {
         withSession: next => next.sendUserMessage(planPrompt(task)),
       });
       if (result.cancelled) SessionManager.open(head).appendCustomEntry(PLAN, { home, enabled: false });
@@ -435,18 +466,23 @@ export default function monty(pi) {
   }
 
   pi.registerCommand("monty", { description: "Choose a Monty task", handler: async (_, ctx) => {
-    try { await choose(ctx); } catch (e) { ctx.ui.notify(e.message, "error"); }
+    try {
+      await cancelForeground(ctx);
+      await choose(ctx);
+    } catch (e) { ctx.ui.notify(e.message, "error"); }
   }});
   pi.registerCommand("monty-open", { description: "Open or plan a Monty task", handler: async (args, ctx) => {
-    try { args.trim() ? await openArg(args, ctx) : await choose(ctx); }
-    catch (e) { ctx.ui.notify(e.message, "error"); }
-  }});
-  pi.registerCommand("monty-back", { description: "Return to the Monty head butler", handler: async (_, ctx) => {
     try {
+      await cancelForeground(ctx);
+      args.trim() ? await openArg(args, ctx) : await choose(ctx);
+    } catch (e) { ctx.ui.notify(e.message, "error"); }
+  }});
+  pi.registerCommand("monty-head-butler", { description: "Go to the Monty head butler", handler: async (_, ctx) => {
+    try {
+      await cancelForeground(ctx);
       const head = await getHead(ctx);
       if (!head) throw new Error("The Monty head-butler session could not be found");
-      await ctx.waitForIdle();
-      await ctx.switchSession(head);
+      await switchMontySession(ctx, head);
     } catch (e) { ctx.ui.notify(e.message, "error"); }
   }});
   pi.registerCommand("monty-start", { description: "Start the task currently being planned", handler: async (_, ctx) => {

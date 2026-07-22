@@ -11,6 +11,26 @@ When the user asks for jobs or tasks, present the answer as a Markdown table tha
 For task and job lists, use exactly these columns: ID, Project, Status, Title, and Branch.
 Use `monty list` or `monty tasks list` for the task inventory, not an ad-hoc merge of local tasks and worker jobs.
 
+## Native Pi handoff
+
+When Monty is running through `monty start`, use Monty's task registry first and the native Pi slash commands for workflow and navigation.
+Do not inspect Monty's implementation, reconstruct manifests, read raw state files, or research how task dispatch works before handling an ordinary task request.
+
+When the user asks to begin a concrete task:
+
+1. Check `monty list` so an existing task is not duplicated.
+2. If the task is absent, create it with `monty task add --project <project> --title <title>` once its project and title are unambiguous.
+3. Run `monty list` again and present the task inventory with exactly the columns ID, Project, Status, Title, and Branch.
+4. End with: `Jump to the task by running /monty.`
+
+Ask a focused clarifying question instead of inventing a project or title when either is ambiguous.
+The model cannot invoke Pi slash commands or switch sessions itself, so do not claim that a conversational request already opened or navigated to a task.
+After the user enters `/monty`, the native selector owns task choice, planning, and session replacement.
+Use `/monty-start` only after the user approves the current plan, `/monty-run resume` only when the user explicitly requests a successor run, `/monty-head-butler` to go to the head session, and `/monty-plan-cancel` to abandon planning.
+Do not infer approval to complete a task, run a successor chain, push, or perform another remote action from a general request to start or inspect work.
+In native plan mode, inspect only the selected task's relevant project context, remain read-only, and finish with a concrete numbered `Plan:` section.
+Do not create manual manifests or context files for the native conversational flow because `/monty-start` creates the canonical task context and worker state.
+
 ## Head-butler workflow
 
 When the user asks what to work on, inspect the provided repos, issues, links, or notes.
@@ -18,10 +38,10 @@ Ask clarifying questions when the selected work is ambiguous.
 Keep planning artifacts under `.monty/runs/<run-id>/`.
 Use a short run id such as `2026-06-27-issues` or `run-001`.
 
-Inside the native Monty Pi extension, use `/monty` to select work.
+Inside the native Monty Pi extension, use `/monty` to select work, `/monty-open <task>` to open named work, `/monty-start` to start an approved plan, and `/monty-head-butler` to go to the exact head session.
+Direct session-navigation commands cancel an active foreground Pi response and show a spinner while cancellation settles, but they must never stop or await detached Monty worker chains.
 An unstarted task remains in the head-butler session and enters read-only plan mode.
-After the user approves the plan, use the extension's Start task action or `/monty-start` so Monty prepares a native task subsession and launches its asynchronous chain while the head butler remains available.
-Use `/monty-open <task>` to enter a running or resumable task and `/monty-back` to return to the exact head session.
+After the user approves the plan, the native start action prepares a task subsession and launches its asynchronous chain while the head butler remains available.
 
 For explicit Ghostty or manual batch workflows, create one Markdown context file per worker task.
 Each context file should be specific enough that a fresh pi worker can start without reading the whole planning conversation.

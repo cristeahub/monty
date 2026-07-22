@@ -22,6 +22,15 @@ const tasks = [
   { key: "local:local-002", id: "github:owner/repo#2", project: "app", status: "open", title: "Fix app", branch: "cto/fix", worker: { id: "fix-app" } },
 ];
 
+async function waitUntil(predicate, message, timeout = 3000) {
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await new Promise(resolve => setTimeout(resolve, 20));
+  }
+  assert.fail(message);
+}
+
 function findPi() {
   const names = process.platform === "win32" ? ["pi.cmd", "pi.exe", "pi"] : ["pi"];
   for (const dir of (process.env.PATH || "").split(delimiter)) for (const name of names) {
@@ -122,6 +131,11 @@ test("offline Pi RPC loads Monty and preserves persisted navigation", { timeout:
   const cliLog = join(root, "cli.log");
   const toolLog = join(root, "tools.jsonl");
   const ping = join(root, "ping.json");
+  const foregroundGate = join(root, "foreground-gate");
+  const foregroundLog = join(root, "foreground.log");
+  const detachedState = join(root, "detached-state");
+  const detachedRelease = join(root, "detached-release");
+  const detachedRunner = join(root, "detached-runner.cjs");
   const reviewer = join(home, ".pi", "agents", "monty-headless-reviewer.md");
   const implementer = join(home, ".pi", "agents", "monty-headless-worker.md");
   const harness = { agent: "chain", cwd: taskCwd, tasks: [{ agent: "implementer", task: "exact" }] };
@@ -154,10 +168,75 @@ test("offline Pi RPC loads Monty and preserves persisted navigation", { timeout:
       worker: { id: "native-pi" }, cwd: taskCwd, instructions, context, memory: join(root, "memory.md"),
     }));
     writeFileSync(fakeMonty, `#!/bin/sh\nprintf '%s\\n' "$*" >> "$MONTY_TEST_CLI_LOG"\ncase "$*" in\n  *"tasks list"*) cat "$MONTY_TEST_SNAPSHOT" ;;\n  *"task enter"*) cat "$MONTY_TEST_ENTRY" ;;\n  *"headless begin"*) printf '%s\\n' "$MONTY_TEST_HARNESS" ;;\n  *) echo "unexpected fake monty command: $*" >&2; exit 2 ;;\nesac\n`, { mode: 0o755 });
-    writeFileSync(bridge, `import { appendFileSync, readFileSync } from "node:fs";
+    writeFileSync(detachedRunner, `const { existsSync, writeFileSync } = require("node:fs");
+const [state, release] = process.argv.slice(2);
+const deadline = Date.now() + 15000;
+const timer = setInterval(() => {
+  if (existsSync(release)) {
+    writeFileSync(state, "completed\\n");
+    clearInterval(timer);
+  } else if (Date.now() >= deadline) {
+    clearInterval(timer);
+  }
+}, 20);
+`);
+    writeFileSync(bridge, `import { spawn } from "node:child_process";
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
+
+function streamTestModel(model, _context, options) {
+  const stream = createAssistantMessageEventStream();
+  queueMicrotask(async () => {
+    const output = {
+      role: "assistant", content: [], api: model.api, provider: model.provider, model: model.id,
+      usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+      stopReason: "stop", timestamp: Date.now(),
+    };
+    stream.push({ type: "start", partial: output });
+    if (existsSync(process.env.MONTY_TEST_FOREGROUND_GATE)) {
+      output.content.push({ type: "text", text: "" });
+      stream.push({ type: "text_start", contentIndex: 0, partial: output });
+      appendFileSync(process.env.MONTY_TEST_FOREGROUND_LOG, "started\\n");
+      await new Promise(resolve => {
+        if (options?.signal?.aborted) resolve();
+        else options?.signal?.addEventListener("abort", resolve, { once: true });
+      });
+      appendFileSync(process.env.MONTY_TEST_FOREGROUND_LOG, "cancelled\\n");
+      output.stopReason = "aborted";
+      output.errorMessage = "Test response was cancelled";
+      stream.push({ type: "error", reason: "aborted", error: output });
+    } else {
+      output.content.push({ type: "text", text: "ok" });
+      stream.push({ type: "text_start", contentIndex: 0, partial: output });
+      stream.push({ type: "text_delta", contentIndex: 0, delta: "ok", partial: output });
+      stream.push({ type: "text_end", contentIndex: 0, content: "ok", partial: output });
+      stream.push({ type: "done", reason: "stop", message: output });
+    }
+    stream.end();
+  });
+  return stream;
+}
+
 export default function (pi) {
+  pi.registerProvider("monty-test", {
+    baseUrl: "http://localhost.invalid", apiKey: "test", api: "monty-test-stream",
+    models: [{ id: "slow", name: "Slow test model", reasoning: false, input: ["text"],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 1000 }],
+    streamSimple: streamTestModel,
+  });
+  // This bridge deliberately exercises Monty's RPC client contract without claiming
+  // to reproduce pi-subagents' detached-process implementation.
   pi.events.on("subagents:rpc:v1:request", request => {
     appendFileSync(process.env.MONTY_TEST_RPC_LOG, JSON.stringify(request) + "\\n");
+    if (request.method === "spawn" && !existsSync(process.env.MONTY_TEST_DETACHED_STATE)) {
+      writeFileSync(process.env.MONTY_TEST_DETACHED_STATE, "running\\n");
+      const child = spawn(process.execPath, [process.env.MONTY_TEST_DETACHED_RUNNER,
+        process.env.MONTY_TEST_DETACHED_STATE, process.env.MONTY_TEST_DETACHED_RELEASE], {
+        detached: true, stdio: "ignore",
+      });
+      child.unref();
+    }
     const data = request.method === "ping"
       ? JSON.parse(readFileSync(process.env.MONTY_TEST_PING, "utf8")) : { ok: true };
     pi.events.emit("subagents:rpc:v1:reply:" + request.requestId, { success: true, data });
@@ -173,22 +252,33 @@ export default function (pi) {
     const { RpcClient, SessionManager } = piPackage;
     process.env.PI_CODING_AGENT_DIR = agentDir;
     const extension = new URL("../pi-extension/extensions/monty.js", import.meta.url).pathname;
+    const uiEvents = [];
     client = new RpcClient({
       cliPath: piCli, cwd: home,
       env: {
         MONTY_HOME: homeAlias, MONTY_COMMAND: fakeMonty, MONTY_TEST_SNAPSHOT: snapshot,
         MONTY_TEST_ENTRY: entry, MONTY_TEST_RPC_LOG: rpcLog,
-        MONTY_TEST_CLI_LOG: cliLog, MONTY_TEST_TOOL_LOG: toolLog, MONTY_TEST_PING: ping,
+        MONTY_TEST_CLI_LOG: cliLog, MONTY_TEST_TOOL_LOG: toolLog,
+        MONTY_TEST_PING: ping, MONTY_TEST_FOREGROUND_GATE: foregroundGate,
+        MONTY_TEST_FOREGROUND_LOG: foregroundLog,
+        MONTY_TEST_DETACHED_STATE: detachedState, MONTY_TEST_DETACHED_RELEASE: detachedRelease,
+        MONTY_TEST_DETACHED_RUNNER: detachedRunner,
         MONTY_TEST_HARNESS: JSON.stringify({ harness_call: { arguments: harness } }),
         PI_CODING_AGENT_DIR: agentDir, PI_OFFLINE: "1",
       },
+      provider: "monty-test", model: "slow",
       args: ["--offline", "--no-extensions", "--no-context-files", "--extension", bridge, "--extension", extension],
+    });
+    client.onEvent(event => {
+      if (event.type === "extension_ui_request") uiEvents.push(event);
     });
     await client.start();
 
     const commands = await client.getCommands();
-    for (const name of ["monty", "monty-open", "monty-back", "monty-start", "monty-run", "monty-plan-cancel"])
+    for (const name of ["monty", "monty-open", "monty-head-butler", "monty-start", "monty-run", "monty-plan-cancel"])
       assert.ok(commands.some(command => command.name === name), `missing /${name}`);
+    assert.ok(!commands.some(command => command.name === "monty-back"), "obsolete /monty-back was removed");
+
     const head = await client.getState();
     assert.ok(head.model, "offline Pi selected a model for session materialization");
     assert.ok(head.sessionFile && existsSync(head.sessionFile), "head session was not materialized");
@@ -217,6 +307,56 @@ export default function (pi) {
     await client.prompt("/monty-run");
     assert.deepEqual(rpcCalls().map(call => call.method), ["ping", "spawn"], "/monty-run pings then spawns");
     assert.deepEqual(rpcCalls()[1].params, harness, "Monty forwards harness arguments unchanged");
+    assert.equal(readFileSync(detachedState, "utf8").trim(), "running",
+      "the asynchronous runner remained active after spawn acknowledgement");
+
+    const callsBeforeNavigation = rpcCalls().length;
+    await client.prompt("/monty-head-butler");
+    assert.equal((await client.getState()).sessionFile, head.sessionFile,
+      "navigation reached the head while the asynchronous runner was active");
+    await client.prompt("/monty-open local:local-001");
+    assert.equal((await client.getState()).sessionFile, taskFile,
+      "navigation reused the task session while its asynchronous runner was active");
+    assert.equal(rpcCalls().length, callsBeforeNavigation,
+      "navigation did not restart or duplicate the asynchronous runner");
+    assert.equal(readFileSync(detachedState, "utf8").trim(), "running",
+      "the asynchronous runner survived head-to-task navigation");
+
+    writeFileSync(foregroundGate, "hold\n");
+    await client.prompt("Keep this foreground response active");
+    await waitUntil(() => existsSync(foregroundLog), "the foreground response did not start");
+    assert.equal((await client.getState()).isStreaming, true, "the navigation reproduction is actively streaming");
+    const cancelEventStart = uiEvents.length;
+    const navigation = client.prompt("/monty-head-butler");
+    const navigationOutcome = await Promise.race([
+      navigation.then(() => "completed"),
+      new Promise(resolveDelay => setTimeout(() => resolveDelay("blocked"), 500)),
+    ]);
+    if (navigationOutcome === "blocked") {
+      await client.abort();
+      await navigation;
+    }
+    rmSync(foregroundGate, { force: true });
+    assert.equal(navigationOutcome, "completed",
+      "head navigation must cancel the foreground response instead of waiting indefinitely");
+    assert.equal((await client.getState()).sessionFile, head.sessionFile,
+      "foreground cancellation completed before switching to the head");
+    assert.match(readFileSync(foregroundLog, "utf8"), /started\ncancelled\n/,
+      "the active foreground response observed cancellation");
+    const cancelEvents = uiEvents.slice(cancelEventStart)
+      .filter(event => event.method === "setStatus" && event.statusKey === "monty-cancel");
+    assert.ok(cancelEvents.some(event => /Cancelling current response/.test(event.statusText || "")),
+      "waiting for foreground cancellation showed a spinner status");
+    assert.equal(cancelEvents.at(-1)?.statusText, undefined,
+      "the foreground-cancellation spinner was cleared");
+    await client.prompt("/monty-open local:local-001");
+    assert.equal((await client.getState()).sessionFile, taskFile,
+      "the task remained reachable after foreground cancellation");
+    assert.equal(readFileSync(detachedState, "utf8").trim(), "running",
+      "foreground cancellation did not stop the detached task runner");
+    writeFileSync(detachedRelease, "release\n");
+    await waitUntil(() => readFileSync(detachedState, "utf8").trim() === "completed",
+      "the detached task runner did not complete after navigation");
 
     const callsBeforeForeignLink = rpcCalls().length;
     SessionManager.open(taskFile).appendCustomEntry("monty-task-link:v1", {
@@ -290,7 +430,7 @@ export default function (pi) {
     rmSync(userSettings);
 
     await client.setSessionName("Renamed task");
-    await client.prompt("/monty-back");
+    await client.prompt("/monty-head-butler");
     assert.equal((await client.getState()).sessionFile, head.sessionFile, "returned to the exact persisted head");
 
     const branchedTask = SessionManager.create(taskCwd, undefined, { parentSession: head.sessionFile });
@@ -316,9 +456,9 @@ export default function (pi) {
     assert.ok(decoyHeadInfo?.modified > linkedHeadInfo?.modified,
       "the global fallback would prefer the newer decoy head");
     await client.switchSession(branchedTaskFile);
-    await client.prompt("/monty-back");
+    await client.prompt("/monty-head-butler");
     assert.equal((await client.getState()).sessionFile, head.sessionFile,
-      "/monty-back recovered the exact session-wide task head after branching before its marker");
+      "/monty-head-butler recovered the exact session-wide task head after branching before its marker");
     assert.ok(existsSync(newerDecoyHeadFile), "the newer global decoy was not removed during navigation");
     rmSync(newerDecoyHeadFile);
 
@@ -333,9 +473,9 @@ export default function (pi) {
       home, key: "local:local-001", title: "Native Pi", worker: "native-pi", cwd: join(root, "stale-cwd"),
     });
     await client.switchSession(taskFile);
-    await client.prompt("/monty-back");
+    await client.prompt("/monty-head-butler");
     assert.equal((await client.getState()).sessionFile, branchedHeadFile,
-      "/monty-back discovered a renamed head after branching before its HEAD marker");
+      "/monty-head-butler discovered a renamed head after branching before its HEAD marker");
     await client.switchSession(taskFile);
     rmSync(branchedHeadFile);
     SessionManager.open(taskFile).appendCustomEntry("monty-task-link:v1", {
@@ -392,9 +532,9 @@ export default function (pi) {
     await client.prompt("/monty-run");
     assert.equal(rpcCalls().length, callsBeforeRetiredBranch,
       "branching before the old task marker did not reactivate the retired session");
-    await client.prompt("/monty-back");
+    await client.prompt("/monty-head-butler");
     assert.equal((await client.getState()).sessionFile, head.sessionFile,
-      "/monty-back honored the retired predecessor's exact persisted head");
+      "/monty-head-butler honored the retired predecessor's exact persisted head");
     assert.ok(existsSync(retiredDecoyHeadFile),
       "retired-predecessor navigation did not remove the newer valid decoy head");
     rmSync(retiredDecoyHeadFile);
@@ -437,13 +577,17 @@ export default function (pi) {
       .filter(e => e.type === "custom" && e.customType === PLAN && e.data?.home === realpathSync(home));
     assert.equal(ownedPlans.at(-1)?.data?.enabled, true,
       "switching away left plan state durable and ignored a foreign plan marker");
-    await client.prompt("/monty-back");
+    await client.prompt("/monty-head-butler");
     await client.prompt("/test-tools");
     assert.ok(!lastTools().includes("bash"), "returning to the planning head restored read-only mode");
     await client.abort();
     await client.prompt("/monty-plan-cancel");
     assert.equal(last(SessionManager.open(head.sessionFile).getBranch(), "monty-plan:v1")?.enabled, false);
   } finally {
+    if (existsSync(root)) {
+      writeFileSync(detachedRelease, "release\n");
+      await new Promise(resolveDelay => setTimeout(resolveDelay, 100));
+    }
     if (client) await client.stop().catch(() => {});
     if (oldAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
     else process.env.PI_CODING_AGENT_DIR = oldAgentDir;
