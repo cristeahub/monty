@@ -2460,6 +2460,31 @@ let test_headless_prepare_begin_and_resume () =
         Filename.concat home
           (".monty/runs/run-headless/workers/" ^ id ^ "/job.json")
       in
+      let set_worker_task_status worker status =
+        let path = Filename.concat home ".monty/tasks.local.json" in
+        let json = Yojson.Safe.from_file path in
+        let tasks = Yojson.Safe.Util.(json |> member "tasks" |> to_list) in
+        let tasks =
+          List.map
+            (fun task ->
+              if json_string "worker_id" task = worker then
+                replace_assoc_field "status" (`String status) task
+              else task)
+            tasks
+        in
+        Yojson.Safe.to_file path
+          (replace_assoc_field "tasks" (`List tasks) json)
+      in
+      let wait_for_new_wt log_size =
+        let rec wait attempts =
+          if String.length (Shell.read_file log) > log_size then ()
+          else if attempts = 0 then failwith "headless command did not reach wt"
+          else (
+            Unix.sleepf 0.01;
+            wait (attempts - 1))
+        in
+        wait 300
+      in
       let require_no_terminal_script id =
         let json = Yojson.Safe.from_file (job_file id) in
         let script = Yojson.Safe.Util.(json |> member "launch_script" |> to_string) in
@@ -2527,6 +2552,26 @@ let test_headless_prepare_begin_and_resume () =
       if faulted.code = 0 then failwith "headless begin ignored its injected fault";
       if job_status (job_file "headless-two") <> "prepared" then
         failwith "a pre-dispatch headless failure was not retryable as prepared";
+      let state_lock = Filename.concat home ".monty/state.lock" in
+      let state_fd = Unix.openfile state_lock [ Unix.O_CREAT; Unix.O_RDWR ] 0o600 in
+      Unix.lockf state_fd Unix.F_LOCK 0;
+      let log_size = String.length (Shell.read_file log) in
+      let raced_begin =
+        spawn ~root ~env 1958
+          [ "headless"; "begin"; "headless-two"; "--home"; home ]
+      in
+      wait_for_new_wt log_size;
+      set_worker_task_status "headless-two" "done";
+      Unix.lockf state_fd Unix.F_ULOCK 0;
+      Unix.close state_fd;
+      let raced_begin = await raced_begin in
+      if raced_begin.code = 0 then
+        failwith "headless begin claimed a worker whose task closed under lock";
+      require_contains "atomic headless begin task guard" raced_begin.stderr
+        "not open";
+      if job_status (job_file "headless-two") <> "prepared" then
+        failwith "rejected headless begin changed prepared state";
+      set_worker_task_status "headless-two" "open";
       let begun =
         run ~root ~env 1954
           [ "headless"; "begin"; "headless-one"; "--home"; home ]
@@ -2587,6 +2632,25 @@ let test_headless_prepare_begin_and_resume () =
       if duplicate.code = 0 then failwith "headless begin replayed a requested worker";
       require_contains "headless begin replay recovery" duplicate.stderr
         "headless resume";
+      let state_fd = Unix.openfile state_lock [ Unix.O_CREAT; Unix.O_RDWR ] 0o600 in
+      Unix.lockf state_fd Unix.F_LOCK 0;
+      let log_size = String.length (Shell.read_file log) in
+      let raced_resume =
+        spawn ~root ~env 1959
+          [ "headless"; "resume"; "headless-one"; "--home"; home ]
+      in
+      wait_for_new_wt log_size;
+      set_worker_task_status "headless-one" "done";
+      Unix.lockf state_fd Unix.F_ULOCK 0;
+      Unix.close state_fd;
+      let raced_resume = await raced_resume in
+      if raced_resume.code = 0 then
+        failwith "headless resume claimed a worker whose task closed under lock";
+      require_contains "atomic headless resume task guard" raced_resume.stderr
+        "not open";
+      if job_status (job_file "headless-one") <> "launch-requested" then
+        failwith "rejected headless resume changed launch-requested state";
+      set_worker_task_status "headless-one" "open";
       let resumed =
         run ~root ~env 1956
           [ "headless"; "resume"; "headless-one"; "--home"; home ]
@@ -2661,6 +2725,38 @@ let test_pi_task_snapshot_prepare_and_enter () =
       require_code 0 opened;
       if Yojson.Safe.Util.(Yojson.Safe.from_string opened.stdout |> member "cwd" |> to_string) <> cwd
       then failwith "Pi task enter did not reuse its worktree";
+      let job_file =
+        Filename.concat home ".monty/runs/pi/workers/local-001/job.json"
+      in
+      let original_job = Yojson.Safe.from_file job_file in
+      let worker_dir = Filename.dirname job_file in
+      let transition =
+        `Assoc
+          [ ("operation", `String "complete");
+            ("source", `String worker_dir);
+            ( "target",
+              `String
+                (Filename.concat home
+                   ".monty/runs/pi/archive/local-001") );
+            ("task_key", `String "local:local-001");
+            ("force", `Bool false);
+            ("started_at", `String "2026-01-01T00:00:00Z") ]
+      in
+      Yojson.Safe.to_file job_file
+        (original_job
+        |> replace_assoc_field "transition" transition
+        |> replace_assoc_field "status" (`String "completing"));
+      Shell.write_file log "";
+      let transitioning =
+        run ~root ~env 1976
+          [ "task"; "enter"; "local:local-001"; "--json"; "--home"; home ]
+      in
+      if transitioning.code = 0 then
+        failwith "Pi task enter accepted a lifecycle transition";
+      require_contains "Pi task transition diagnostic" transitioning.stderr
+        "in a complete transition";
+      require_empty_log log;
+      Yojson.Safe.to_file job_file original_job;
       let tasks = local_tasks_json home in
       if List.length tasks <> 1
          || json_string "worker_id" (List.hd tasks) <> "local-001"
@@ -2678,6 +2774,288 @@ let test_pi_task_snapshot_prepare_and_enter () =
         failwith "prepared Pi task was not marked openable";
       if string_contains (read_file log) "osascript" || string_contains (read_file log) "/pi "
       then failwith "Pi task preparation launched a terminal or Pi")
+
+let test_pi_task_enter_revalidates_open_task_under_lock () =
+  with_temp_root "pi-task-enter-race" (fun root ->
+      let home, log, env = setup_environment root in
+      let repo = Filename.concat root "repo" in
+      let plan = Filename.concat root "plan.md" in
+      init_git_repo repo;
+      add_project ~root ~home ~env repo;
+      install_create_wt ~root ~log;
+      require_code 0
+        (run ~root ~env 1990
+           [ "task"; "add"; "--home"; home; "--project"; "repo";
+             "--title"; "Atomic Pi entry" ]);
+      Shell.write_file plan "Plan:\n1. Revalidate entry under the state lock.\n";
+      let prepared =
+        run ~root ~env 1991
+          [ "task"; "prepare"; "local-001"; "--plan"; plan; "--json";
+            "--home"; home ]
+      in
+      require_code 0 prepared;
+      let prepared_cwd =
+        Yojson.Safe.Util.
+          (Yojson.Safe.from_string prepared.stdout |> member "cwd" |> to_string)
+      in
+      let job_file =
+        Filename.concat home ".monty/runs/pi/workers/local-001/job.json"
+      in
+      let job = Yojson.Safe.from_file job_file in
+      Yojson.Safe.to_file job_file
+        (replace_assoc_field "last_known_worktree" (`String repo) job);
+      let state_lock = Filename.concat home ".monty/state.lock" in
+      let state_fd = Unix.openfile state_lock [ Unix.O_CREAT; Unix.O_RDWR ] 0o600 in
+      Unix.lockf state_fd Unix.F_LOCK 0;
+      let log_size = String.length (Shell.read_file log) in
+      let entering =
+        spawn ~root ~env 1992
+          [ "task"; "enter"; "local:local-001"; "--json"; "--home"; home ]
+      in
+      let rec wait_for_wt attempts =
+        if String.length (Shell.read_file log) > log_size then ()
+        else if attempts = 0 then failwith "Pi task enter did not reach wt"
+        else (
+          Unix.sleepf 0.01;
+          wait_for_wt (attempts - 1))
+      in
+      wait_for_wt 300;
+      let tasks_path = Filename.concat home ".monty/tasks.local.json" in
+      let tasks_json = Yojson.Safe.from_file tasks_path in
+      let tasks = Yojson.Safe.Util.(tasks_json |> member "tasks" |> to_list) in
+      let tasks =
+        List.map
+          (fun task ->
+            if json_string "id" task = "local-001" then
+              replace_assoc_field "status" (`String "done") task
+            else task)
+          tasks
+      in
+      Yojson.Safe.to_file tasks_path
+        (replace_assoc_field "tasks" (`List tasks) tasks_json);
+      Unix.lockf state_fd Unix.F_ULOCK 0;
+      Unix.close state_fd;
+      let entered = await entering in
+      if entered.code = 0 then
+        failwith "Pi task enter accepted a task closed while waiting for state lock";
+      require_contains "atomic Pi task entry guard" entered.stderr "not open";
+      if String.trim entered.stdout <> "" then
+        failwith "rejected Pi task entry emitted session handoff JSON";
+      let rejected_job = Yojson.Safe.from_file job_file in
+      if json_string "status" rejected_job <> "prepared" then
+        failwith "rejected Pi task entry changed worker launch state";
+      if json_string "last_known_worktree" rejected_job <> repo then
+        failwith "rejected Pi task entry committed a stale workspace update";
+      if Yojson.Safe.Util.member "transition" rejected_job <> `Null then
+        failwith "rejected Pi task entry started a lifecycle transition";
+      if not (Sys.file_exists prepared_cwd && Sys.is_directory prepared_cwd) then
+        failwith "rejected Pi task entry damaged the prepared worktree";
+      if string_contains (read_file log) "osascript" || string_contains (read_file log) "/pi "
+      then failwith "rejected Pi task entry launched a terminal or Pi")
+
+let test_pi_task_exact_resolution_collision () =
+  with_temp_root "pi-task-exact-collision" (fun root ->
+      let home, log, env = setup_environment root in
+      let repo = Filename.concat root "repo" in
+      let plan = Filename.concat root "plan.md" in
+      init_git_repo repo;
+      add_project ~root ~home ~env repo;
+      install_create_wt ~root ~log;
+      require_code 0
+        (run ~root ~env 1977
+           [ "task"; "add"; "--home"; home; "--project"; "repo";
+             "--title"; "local-002" ]);
+      require_code 0
+        (run ~root ~env 1978
+           [ "task"; "add"; "--home"; home; "--project"; "repo";
+             "--title"; "Exact target" ]);
+      Shell.write_file plan "Plan:\n1. Resolve the exact local ID.\n";
+      require_code 0
+        (run ~root ~env 1979
+           [ "task"; "prepare"; "local-002"; "--plan"; plan; "--json";
+             "--home"; home ]);
+      let context = Filename.concat home ".monty/runs/pi/local-002.md" in
+      require_contains "exact task context" (Shell.read_file context)
+        "# Exact target")
+
+let test_pi_task_prepare_preflight_context_cleanup () =
+  with_temp_root "pi-task-missing-repo" (fun root ->
+      let home, log, env = setup_environment root in
+      let repo = Filename.concat root "repo" in
+      let plan = Filename.concat root "plan.md" in
+      add_project ~root ~home ~env repo;
+      require_code 0
+        (run ~root ~env 1980
+           [ "task"; "add"; "--home"; home; "--project"; "repo";
+             "--title"; "Missing repo" ]);
+      remove_tree repo;
+      Shell.write_file plan "Plan:\n1. First plan.\n";
+      let result =
+        run ~root ~env 1981
+          [ "task"; "prepare"; "local-001"; "--plan"; plan; "--json";
+            "--home"; home ]
+      in
+      if result.code = 0 then failwith "task preparation accepted a missing repo";
+      let context = Filename.concat home ".monty/runs/pi/local-001.md" in
+      if Sys.file_exists context then
+        failwith "repo preflight failure wrote a task context";
+      require_empty_log log);
+  with_temp_root "pi-task-revised-plan" (fun root ->
+      let home, log, env = setup_environment root in
+      let repo = Filename.concat root "repo" in
+      let plan = Filename.concat root "plan.md" in
+      init_git_repo repo;
+      add_project ~root ~home ~env repo;
+      install_create_wt ~root ~log;
+      require_code 0
+        (run ~root ~env 1982
+           [ "task"; "add"; "--home"; home; "--project"; "repo";
+             "--title"; "Revised plan" ]);
+      let context = Filename.concat home ".monty/runs/pi/local-001.md" in
+      Shell.write_file plan "Plan:\n1. Rejected version.\n";
+      let failed =
+        run ~root
+          ~env:(replace_env env [ ("MONTY_FAULT_INJECT", "reserve-after-stage") ])
+          1983
+          [ "task"; "prepare"; "local-001"; "--plan"; plan; "--json";
+            "--home"; home ]
+      in
+      if failed.code = 0 then failwith "reservation fault unexpectedly succeeded";
+      if Sys.file_exists context then
+        failwith "pre-reservation failure retained an unclaimed task context";
+      Shell.write_file plan "Plan:\n1. Accepted revision.\n";
+      let retried =
+        run ~root ~env 1984
+          [ "task"; "prepare"; "local-001"; "--plan"; plan; "--json";
+            "--home"; home ]
+      in
+      require_code 0 retried;
+      require_contains "revised task context" (Shell.read_file context)
+        "Accepted revision");
+  with_temp_root "pi-task-prepared-context" (fun root ->
+      let home, log, env = setup_environment root in
+      let repo = Filename.concat root "repo" in
+      let plan = Filename.concat root "plan.md" in
+      init_git_repo repo;
+      add_project ~root ~home ~env repo;
+      install_create_wt ~root ~log;
+      let wt = Filename.concat root "fake-bin/wt" in
+      Shell.write_file wt
+        (String.concat "\n"
+           [ "#!/bin/sh";
+             "printf '%s\\n' \"$0 $*\" >> " ^ Shell.quote log;
+             "exit 77";
+             "" ]);
+      Shell.chmod_executable wt;
+      require_code 0
+        (run ~root ~env 1985
+           [ "task"; "add"; "--home"; home; "--project"; "repo";
+             "--title"; "Prepared context" ]);
+      Shell.write_file plan "Plan:\n1. Preserve after reservation.\n";
+      let failed =
+        run ~root ~env 1986
+          [ "task"; "prepare"; "local-001"; "--plan"; plan; "--json";
+            "--home"; home ]
+      in
+      if failed.code = 0 then failwith "worktree failure unexpectedly succeeded";
+      let context = Filename.concat home ".monty/runs/pi/local-001.md" in
+      if not (Sys.file_exists context) then
+        failwith "post-reservation failure removed the canonical worker context";
+      if
+        not
+          (Sys.file_exists
+             (Filename.concat home
+                ".monty/runs/pi/workers/local-001/job.json"))
+      then failwith "worktree failure did not leave its prepared worker claim")
+
+let test_pi_task_prepare_serializes_same_task () =
+  with_temp_root "pi-task-serialized-prepare" (fun root ->
+      let home, log, env = setup_environment root in
+      let repo = Filename.concat root "repo" in
+      let first_plan = Filename.concat root "first-plan.md" in
+      let second_plan = Filename.concat root "second-plan.md" in
+      let started = Filename.concat root "wt-started" in
+      let worktrees = Filename.concat root "created-worktrees" in
+      let wt = Filename.concat root "fake-bin/wt" in
+      init_git_repo repo;
+      add_project ~root ~home ~env repo;
+      Shell.write_file wt
+        (String.concat "\n"
+           [ "#!/bin/sh";
+             "set -eu";
+             "printf '%s\\n' \"$0 $*\" >> " ^ Shell.quote log;
+             "case \"$1\" in";
+             "  b)";
+             "    touch " ^ Shell.quote started;
+             "    sleep 0.3";
+             "    branch=$2";
+             "    safe=$(printf '%s' \"$branch\" | tr '/ ' '__')";
+             "    worktree=" ^ Shell.quote worktrees ^ "/$safe";
+             "    if [ ! -d \"$worktree\" ]; then";
+             "      mkdir -p " ^ Shell.quote worktrees;
+             "      git worktree add -q -b \"$branch\" \"$worktree\"";
+             "    fi";
+             "    printf '%s\\n' \"$worktree\"";
+             "    ;;";
+             "  list) printf '%s\\n' 'repo:' ;;";
+             "  *) exit 92 ;;";
+             "esac";
+             "" ]);
+      Shell.chmod_executable wt;
+      require_code 0
+        (run ~root ~env 1987
+           [ "task"; "add"; "--home"; home; "--project"; "repo";
+             "--title"; "Serialized prepare" ]);
+      Shell.write_file first_plan "Plan:\n1. Canonical prepared plan.\n";
+      Shell.write_file second_plan "Plan:\n1. Concurrent revised plan.\n";
+      let prepare_lock =
+        Filename.concat home ".monty/prepare-local-001.lock"
+      in
+      let lock_fd = Unix.openfile prepare_lock [ Unix.O_CREAT; Unix.O_RDWR ] 0o600 in
+      Unix.lockf lock_fd Unix.F_LOCK 0;
+      let first =
+        spawn ~root ~env 1988
+          [ "task"; "prepare"; "local-001"; "--plan"; first_plan;
+            "--json"; "--home"; home ]
+      in
+      Unix.sleepf 0.1;
+      let tasks_path = Filename.concat home ".monty/tasks.local.json" in
+      let tasks_json = Yojson.Safe.from_file tasks_path in
+      let tasks = Yojson.Safe.Util.(tasks_json |> member "tasks" |> to_list) in
+      let tasks =
+        List.map
+          (fun task ->
+            if json_string "id" task = "local-001" then
+              replace_assoc_field "title" (`String "Re-resolved prepare") task
+            else task)
+          tasks
+      in
+      Yojson.Safe.to_file tasks_path
+        (replace_assoc_field "tasks" (`List tasks) tasks_json);
+      Unix.lockf lock_fd Unix.F_ULOCK 0;
+      Unix.close lock_fd;
+      let rec wait attempts =
+        if Sys.file_exists started then ()
+        else if attempts = 0 then failwith "first preparation did not reach wt"
+        else (
+          Unix.sleepf 0.01;
+          wait (attempts - 1))
+      in
+      wait 300;
+      let second =
+        spawn ~root ~env 1989
+          [ "task"; "prepare"; "local-001"; "--plan"; second_plan;
+            "--json"; "--home"; home ]
+      in
+      require_code 0 (await first);
+      require_code 0 (await second);
+      let context = Filename.concat home ".monty/runs/pi/local-001.md" in
+      require_contains "serialized re-resolved task" (Shell.read_file context)
+        "# Re-resolved prepare";
+      require_contains "serialized canonical context" (Shell.read_file context)
+        "Canonical prepared plan";
+      if string_contains (Shell.read_file context) "Concurrent revised plan" then
+        failwith "concurrent preparation replaced a prepared worker context")
 
 let test_start_loads_native_pi_extension () =
   with_temp_root "pi-start" (fun root ->
@@ -2873,6 +3251,14 @@ let () =
       test_headless_prepare_begin_and_resume );
     ( "cli_pi_task_snapshot_prepare_and_enter",
       test_pi_task_snapshot_prepare_and_enter );
+    ( "cli_pi_task_enter_revalidates_open_task_under_lock",
+      test_pi_task_enter_revalidates_open_task_under_lock );
+    ( "cli_pi_task_exact_resolution_collision",
+      test_pi_task_exact_resolution_collision );
+    ( "cli_pi_task_prepare_preflight_context_cleanup",
+      test_pi_task_prepare_preflight_context_cleanup );
+    ( "cli_pi_task_prepare_serializes_same_task",
+      test_pi_task_prepare_serializes_same_task );
     ( "cli_start_loads_native_pi_extension",
       test_start_loads_native_pi_extension );
     ( "cli_parser_and_doctor_contracts", test_cli_parser_and_doctor_contracts ) ]

@@ -769,6 +769,15 @@ let test_headless_json_contract () =
   in
   let fixer = List.nth chain 2 in
   assert_bool "headless has two reviewers" (List.length reviewers = 2);
+  assert_equal "headless project implementer" "monty-headless-worker"
+    Yojson.Safe.Util.(implementation |> member "agent" |> to_string);
+  assert_equal "headless project fixer" "monty-headless-worker"
+    Yojson.Safe.Util.(fixer |> member "agent" |> to_string);
+  List.iter
+    (fun reviewer ->
+      assert_equal "headless project reviewer" "monty-headless-reviewer"
+        Yojson.Safe.Util.(reviewer |> member "agent" |> to_string))
+    reviewers;
   let attempt_root =
     "/monty/.monty/runs/run-1/workers/issue-123/artifacts/headless/attempt-test"
   in

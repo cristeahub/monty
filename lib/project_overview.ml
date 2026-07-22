@@ -75,6 +75,8 @@ let load_tasks_with_warnings = Reconciliation.load_tasks_with_warnings
 let load_tasks = Reconciliation.load_tasks
 let validate_job_project = Reconciliation.validate_job_project
 let validate_worker_task_link = Reconciliation.validate_worker_task_link
+let validate_worker_task_open_unlocked =
+  Reconciliation.validate_worker_task_open_unlocked
 let set_worker_task_status = Reconciliation.set_worker_task_status
 let preflight_launch_task_links = Reconciliation.preflight_launch_task_links
 let reserve_launch_task_links_unlocked = Reconciliation.reserve_launch_task_links_unlocked

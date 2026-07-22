@@ -8,3 +8,4 @@ _build/
 !.pi/agents/
 .pi/agents/*
 !.pi/agents/monty-headless-reviewer.md
+!.pi/agents/monty-headless-worker.md

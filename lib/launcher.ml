@@ -860,7 +860,7 @@ let fault checkpoint =
   | _ -> Ok ()
 
 let update_launch_state options (prepared : prepared) ~expected_statuses ~status
-    ?error ?worktree () =
+    ?error ?worktree ?validate_current () =
   let updates =
     [ Job_store.string "status" status;
       Job_store.string "updated_at" (Worker_memory.now_utc ());
@@ -902,6 +902,11 @@ let update_launch_state options (prepared : prepared) ~expected_statuses ~status
           Error
             (Printf.sprintf "worker %s identity changed during launch" current.id)
       in
+      let* () =
+        match validate_current with
+        | None -> Ok ()
+        | Some validate -> validate current
+      in
       Job_store.update_file_unlocked
         ~remove:(if error = None then [ "launch_error" ] else [])
         prepared.state_path.job_file updates)
@@ -929,8 +934,8 @@ type begun_request = {
   initial_workdir : string;
 }
 
-let begin_request ?(persist_failure = true) ?(write_script = true) options
-    (prepared : prepared) ~expected_statuses =
+let begin_request ?(persist_failure = true) ?(write_script = true)
+    ?validate_current options (prepared : prepared) ~expected_statuses =
   let fail message =
     if persist_failure then mark_failed options prepared ~expected_statuses message
     else message
@@ -977,7 +982,7 @@ let begin_request ?(persist_failure = true) ?(write_script = true) options
           | Ok () -> (
               match
                 update_launch_state options prepared ~expected_statuses
-                  ~status:"launch-requested" ~worktree:workdir ()
+                  ~status:"launch-requested" ~worktree:workdir ?validate_current ()
               with
               | Error message -> `Failed message
               | Ok () -> `Ready { workdir; initial_workdir })))

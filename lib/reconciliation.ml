@@ -179,6 +179,22 @@ let validate_worker_task_link ~home record =
   let* tasks = load_local_tasks ~home in
   validate_worker_task_link_in projects tasks record
 
+let validate_worker_task_open_unlocked ~home record =
+  let ( let* ) = Result.bind in
+  let* projects = load_projects ~home in
+  let* tasks = load_local_tasks ~home in
+  let* task_id = validate_worker_task_link_in projects tasks record in
+  match task_id with
+  | None -> Ok ()
+  | Some id -> (
+      match find_local_task_by_id tasks id with
+      | Some task when String.equal task.status "open" -> Ok ()
+      | Some task ->
+          Error
+            (Printf.sprintf "linked local Monty task %s is %s, not open" id
+               task.status)
+      | None -> Error (Printf.sprintf "linked local Monty task is missing: %s" id))
+
 let set_worker_task_status ~home record status =
   State_store.with_lock ~home (fun () ->
       let ( let* ) = Result.bind in

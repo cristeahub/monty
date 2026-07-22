@@ -84,17 +84,20 @@ let tasks_json ~home ?project ~all () =
         ("tasks", `List (List.map (task_json scan.records) tasks));
         ("warnings", `List (List.map (fun s -> `String s) warnings)) ])
 
-let matches value (t : local_task) =
-  let values =
-    [ key t; t.id; Option.value ~default:"" t.external_key;
-      Option.value ~default:"" t.worker_id ]
-  in
-  List.exists (String.equal value) values
-  || String.equal (Slug.of_title value) (Slug.of_title t.title)
+let exact_match value (t : local_task) =
+  [ key t; t.id; Option.value ~default:"" t.external_key;
+    Option.value ~default:"" t.worker_id ]
+  |> List.exists (String.equal value)
+
+let slug_match value (t : local_task) =
+  String.equal (Slug.of_title value) (Slug.of_title t.title)
 
 let resolve ~home value =
   let* tasks = Task_storage.load_local_tasks ~home in
-  match List.filter (matches (String.trim value)) tasks with
+  let value = String.trim value in
+  let exact = List.filter (exact_match value) tasks in
+  let matches = if exact = [] then List.filter (slug_match value) tasks else exact in
+  match matches with
   | [ t ] -> Ok t
   | [] -> Error (Printf.sprintf "no Monty task matching %S" value)
   | many ->
@@ -128,6 +131,9 @@ let save_cwd ~home (r : Job_store.record) cwd =
               (Printf.sprintf "worker %s is in a %s transition" r.id
                  (Job_store.operation_name tr.operation))
         | None ->
+            let* () =
+              Project_overview.validate_worker_task_open_unlocked ~home cur
+            in
             Job_store.update_file_unlocked cur.path
               [ Job_store.string "last_known_worktree" cwd;
                 Job_store.string "updated_at" (Worker_memory.now_utc ()) ])
@@ -146,6 +152,14 @@ let enter ~home ~wt_command value =
   if done_ t then Error (Printf.sprintf "task %s is done" (key t))
   else
     let* r = record ~home t in
+    let* () =
+      match r.transition with
+      | None -> Ok ()
+      | Some transition ->
+          Error
+            (Printf.sprintf "worker %s is in a %s transition" r.id
+               (Job_store.operation_name transition.operation))
+    in
     let* _ = Project_overview.validate_worker_task_link ~home r in
     let* cwd =
       match String.lowercase_ascii r.worktree_mode with
@@ -187,34 +201,79 @@ let write_context ~home ~path text =
   State_store.with_lock ~home (fun () ->
       let* path = State_path.path_under_resolved_home ~home path in
       if Sys.file_exists path then
-        if String.equal (Shell.read_file path) text then Ok ()
+        if String.equal (Shell.read_file path) text then Ok false
         else Error (Printf.sprintf "task context already exists with different contents: %s" path)
-      else State_store.write_file_atomic ~path ~perm:0o600 text)
+      else
+        let* () = State_store.write_file_atomic ~path ~perm:0o600 text in
+        Ok true)
 
-let prepare options value plan_file =
+let remove_unclaimed_context ~home path =
+  State_store.with_lock ~home (fun () ->
+      let* path = State_path.path_under_resolved_home ~home path in
+      let* records = Job_store.load_all ~home in
+      let claimed =
+        List.exists
+          (fun (r : Job_store.record) ->
+            match State_path.canonicalize r.job.Job.context with
+            | Ok context -> String.equal context path
+            | Error _ -> false)
+          records
+      in
+      if claimed || not (State_path.path_exists path) then Ok ()
+      else
+        try
+          if (Unix.lstat path).Unix.st_kind = Unix.S_REG then Unix.unlink path;
+          Ok ()
+        with Unix.Unix_error (err, fn, arg) ->
+          Error
+            (Printf.sprintf "cannot remove unclaimed task context via %s(%s): %s"
+               fn arg (Unix.error_message err)))
+
+let prepare_locked options plan_file (t : local_task) =
   let home = options.Launcher.home in
-  let* t = resolve ~home value in
   if done_ t then Error (Printf.sprintf "task %s is done" (key t))
   else
     match record ~home t with
-    | Ok _ -> enter ~home ~wt_command:options.wt_command value
-    | Error _ when t.worker_id <> None || t.worker_key <> None -> record ~home t |> Result.map (fun _ -> assert false)
+    | Ok _ -> enter ~home ~wt_command:options.wt_command (key t)
+    | Error _ when t.worker_id <> None || t.worker_key <> None ->
+        record ~home t |> Result.map (fun _ -> assert false)
     | Error _ ->
         let* plan = Launcher.canonical_existing "plan" plan_file in
         let plan = Shell.read_file plan in
         let* projects = Project_storage.load_projects ~home in
         let* project = Project_storage.resolve_project projects t.project in
+        let* _ = Launcher.canonical_existing "repo" project.repo in
+        let dependency_options =
+          { options with Launcher.worktree_mode = Launcher.Always }
+        in
+        let* () = Launcher.check_worktree_dependency dependency_options in
         let id = t.id in
         let branch =
-          Option.value ~default:(Slug.branch ~prefix:options.branch_prefix (t.id ^ " " ^ t.title)) t.branch
+          Option.value
+            ~default:(Slug.branch ~prefix:options.branch_prefix (t.id ^ " " ^ t.title))
+            t.branch
         in
         let* state = State_path.active ~home ~run_id:"pi" ~id in
         let context_file = Filename.concat state.run_dir (id ^ ".md") in
         let text = context t project.repo branch plan in
-        let* () = write_context ~home ~path:context_file text in
+        let* created = write_context ~home ~path:context_file text in
         let job =
           Job.make ~id ~branch ~worker_dir:state.worker_dir ~task_key:(key t)
             ~title:t.title ~repo:project.repo ~context:context_file ()
         in
-        let* _ = Headless.prepare_many ~dry_run:false options [ (1, job) ] in
-        enter ~home ~wt_command:options.wt_command value
+        (match Headless.prepare_many ~dry_run:false options [ (1, job) ] with
+        | Ok _ -> enter ~home ~wt_command:options.wt_command (key t)
+        | Error message ->
+            if not created then Error message
+            else
+              (match remove_unclaimed_context ~home context_file with
+              | Ok () -> Error message
+              | Error cleanup -> Error (message ^ "; " ^ cleanup)))
+
+let prepare options value plan_file =
+  let home = options.Launcher.home in
+  let* t = resolve ~home value in
+  State_store.with_named_lock ~home ~name:("prepare-" ^ t.id ^ ".lock")
+    (fun () ->
+      let* current = resolve ~home (key t) in
+      prepare_locked options plan_file current)

@@ -2,6 +2,7 @@
 name: monty-headless-reviewer
 description: Independent read-only reviewer for Monty headless worker chains
 tools: read, grep, find, ls, bash
+model: inherit
 thinking: high
 systemPromptMode: replace
 inheritProjectContext: true

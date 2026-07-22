@@ -118,9 +118,7 @@ let rec open_lock_file lock_path =
       | Error _ when Sys.file_exists lock_path -> open_lock_file lock_path
       | result -> result)
 
-let with_lock ~home f =
-  let* state_dir = ensure_state_dir ~home in
-  let lock_path = Filename.concat state_dir "state.lock" in
+let with_lock_path lock_path f =
   let* fd = open_lock_file lock_path in
   protect_result ~action:"lock state" ~path:lock_path (fun () ->
       Fun.protect
@@ -131,6 +129,15 @@ let with_lock ~home f =
           Unix.lockf fd Unix.F_LOCK 0;
           let* () = verify_lock_identity lock_path fd in
           f ()))
+
+let with_lock ~home f =
+  let* state_dir = ensure_state_dir ~home in
+  with_lock_path (Filename.concat state_dir "state.lock") f
+
+let with_named_lock ~home ~name f =
+  let* name = State_path.safe_component ~label:"state lock name" name in
+  let* state_dir = ensure_state_dir ~home in
+  with_lock_path (Filename.concat state_dir name) f
 
 let read_json ~path =
   if not (Sys.file_exists path) then Ok None

@@ -102,6 +102,7 @@ The extension marks the persisted head session and provides:
 The location indicator shows only `MONTY · HEAD BUTLER`, the task being planned, or `MONTY · TASK: <title>`.
 Task subsessions are ordinary persisted Pi sessions bound to their validated worktree cwd.
 Their custom session entries hold Pi navigation links, while Monty keeps lifecycle and worktree state authoritative.
+A superseded task session receives the session-wide `monty-task-retired:v1` tombstone so branch navigation cannot reactivate it.
 
 When a selected task has a canonical worker, Monty rehydrates its workspace through `wt` and opens the existing linked Pi subsession when one exists.
 When no worker or task subsession exists, the extension stays in the head session and enables read-only plan mode.
@@ -195,6 +196,7 @@ monty headless begin issue-123
 `headless begin` emits the versioned `monty:headless-dispatch:v2` envelope.
 Its `harness_call.tool` is `subagent`, and `harness_call.arguments` contains the complete asynchronous chain.
 No prompt needs to reconstruct the chain manually.
+The native extension validates the project-owned `.pi/agents/monty-headless-worker.md` and `.pi/agents/monty-headless-reviewer.md` definitions before requesting `headless begin`.
 
 Each generated chain runs in its supplied Monty worktree:
 

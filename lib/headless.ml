@@ -128,7 +128,7 @@ let harness_arguments_json (dispatch : dispatch) attempt_id =
   let quality_output = Filename.concat review_dir "quality.md" in
   let final_output = Filename.concat attempt_root "final.md" in
   let implementation =
-    child_json ~phase:(Some "Implementation") ~agent:"worker"
+    child_json ~phase:(Some "Implementation") ~agent:"monty-headless-worker"
       ~label:(dispatch.title ^ " implementation") ~as_name:"implementation"
       ~task:(implementation_task dispatch) ~cwd:dispatch.worktree
       ~reads:[ dispatch.instructions; dispatch.context ]
@@ -161,7 +161,7 @@ let harness_arguments_json (dispatch : dispatch) attempt_id =
         ("failFast", `Bool false) ]
   in
   let fixer =
-    child_json ~phase:(Some "Fix") ~agent:"worker"
+    child_json ~phase:(Some "Fix") ~agent:"monty-headless-worker"
       ~label:(dispatch.title ^ " verified fixes") ~as_name:"final"
       ~task:(fixer_task dispatch) ~cwd:dispatch.worktree
       ~reads:[ dispatch.instructions; dispatch.context ] ~output:final_output
@@ -329,8 +329,10 @@ let begin_worker ~explicit_resume options worker =
   let* () = validate_worktree_mode record in
   let* options, prepared = prepare_existing options record in
   match
-    Launcher.begin_request ~persist_failure:false ~write_script:false options
-      prepared ~expected_statuses:[ record.Job_store.status ]
+    Launcher.begin_request ~persist_failure:false ~write_script:false
+      ~validate_current:(Project_overview.validate_worker_task_open_unlocked
+        ~home:options.home)
+      options prepared ~expected_statuses:[ record.Job_store.status ]
   with
   | `Failed message -> Error message
   | `Ready request ->
