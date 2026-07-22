@@ -8,3 +8,8 @@
  (modules test_cli_e2e)
  (libraries monty unix yojson)
  (deps ../bin/main.exe))
+
+(rule
+ (alias runtest)
+ (deps test_pi_extension.mjs ../pi-extension/package.json ../pi-extension/core.js ../pi-extension/extensions/monty.js)
+ (action (run node --test %{dep:test_pi_extension.mjs})))

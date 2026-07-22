@@ -2679,6 +2679,33 @@ let test_pi_task_snapshot_prepare_and_enter () =
       if string_contains (read_file log) "osascript" || string_contains (read_file log) "/pi "
       then failwith "Pi task preparation launched a terminal or Pi")
 
+let test_start_loads_native_pi_extension () =
+  with_temp_root "pi-start" (fun root ->
+      let home, _log, env = setup_environment root in
+      let extension = Filename.concat home "pi-extension" in
+      let pi = Filename.concat root "fake-bin/pi" in
+      let seen = Filename.concat root "pi-start.log" in
+      Shell.ensure_dir extension;
+      Shell.write_file (Filename.concat extension "package.json") "{}\n";
+      Shell.write_file pi
+        (String.concat "\n"
+           [ "#!/bin/sh";
+             "printf 'home=%s\\ncommand=%s\\nargs=%s\\n' \"$MONTY_HOME\" \"$MONTY_COMMAND\" \"$*\" > "
+             ^ Shell.quote seen;
+             "" ]);
+      Shell.chmod_executable pi;
+      let started =
+        run ~root ~env 1975
+          [ "start"; "--home"; home; "--pi-command"; pi; "--name";
+            "Native Monty" ]
+      in
+      require_code 0 started;
+      let output = read_file seen in
+      require_line "start home" output ("home=" ^ home);
+      require_line "start command" output ("command=" ^ executable);
+      require_contains "start extension" output
+        ("--extension " ^ extension ^ " --name Native Monty"))
+
 let test_cli_parser_and_doctor_contracts () =
   with_temp_root "parser-doctor" (fun root ->
       let home, _log, env = setup_environment root in
@@ -2846,5 +2873,7 @@ let () =
       test_headless_prepare_begin_and_resume );
     ( "cli_pi_task_snapshot_prepare_and_enter",
       test_pi_task_snapshot_prepare_and_enter );
+    ( "cli_start_loads_native_pi_extension",
+      test_start_loads_native_pi_extension );
     ( "cli_parser_and_doctor_contracts", test_cli_parser_and_doctor_contracts ) ]
   |> List.iter (fun (name, test) -> run_named name test)

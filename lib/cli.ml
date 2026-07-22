@@ -5,7 +5,12 @@ let exit_code = function
       1
 
 type operations = {
-  start : name:string -> home:string -> pi_command:string -> (unit, string) result;
+  start :
+    name:string ->
+    home:string ->
+    monty_command:string ->
+    pi_command:string ->
+    (unit, string) result;
   launch_one : Launcher.options -> Job.t -> (unit, string) result;
   doctor :
     home:string ->
@@ -18,7 +23,9 @@ type operations = {
 
 let default_operations =
   {
-    start = (fun ~name ~home ~pi_command -> Head_butler.start ~home ~pi_command ~name);
+    start =
+      (fun ~name ~home ~monty_command ~pi_command ->
+        Head_butler.start ~home ~monty_command ~pi_command ~name);
     launch_one = Launcher.launch_one;
     doctor =
       (fun ~home ~pi_command ~wt_command ~backend ~worktree_mode ->
@@ -136,7 +143,9 @@ let headless_options_term =
     const headless_options $ pi_command_arg $ wt_command_arg $ branch_prefix_arg
     $ fork_arg $ home_arg $ script_dir_arg)
  in
-let start name home pi_command = operations.start ~name ~home ~pi_command |> exit_code
+let start name home pi_command =
+  operations.start ~name ~home ~monty_command:(monty_command ()) ~pi_command
+  |> exit_code
  in
 let start_term =
   let name_arg =
