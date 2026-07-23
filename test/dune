@@ -8,3 +8,9 @@
  (modules test_cli_e2e)
  (libraries monty unix yojson)
  (deps ../bin/main.exe))
+
+(rule
+ (alias runtest)
+ (deps test_install.sh ../install.sh ../.monty/version)
+ (action
+  (run sh %{dep:test_install.sh} %{dep:../install.sh} %{dep:../.monty/version})))

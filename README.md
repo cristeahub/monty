@@ -39,7 +39,11 @@ Install the `monty` CLI without opam:
 ./install.sh
 ```
 
-The installer builds with Dune, copies the Monty control room to `~/.local/share/monty`, installs the real binary under that directory, and writes a wrapper at `~/.local/bin/monty`.
+The installer builds with Dune, copies the Monty control room to `~/.local/share/monty`, installs the real binary at `~/.local/libexec/monty/monty-real`, and writes a wrapper at `~/.local/bin/monty`.
+Control-room, binary, and wrapper activation is rollback-protected, and matching `.monty` state is preserved across reinstallations.
+The repository and installer currently use Monty state version `1`, stored in `.monty/version`.
+Existing unversioned state is adopted as version `1` without deleting it.
+If an existing version does not match, the installer warns that it will delete the current `.monty` folder and requires interactive confirmation or the explicit `--replace-state` option.
 It also writes `MONTY_HOME=~/.local/share/monty` and `MONTY_BRANCH_PREFIX=monty` to your shell startup file, such as `~/.zshrc`.
 If that file already has a non-Monty-managed `MONTY_HOME` setting, the installer asks before overriding it.
 The wrapper pins `MONTY_HOME` and `MONTY_BRANCH_PREFIX` on every invocation, so running `monty` from any directory starts pi in the installed Monty control room and uses the configured worker branch prefix.

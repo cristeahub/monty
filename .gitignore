@@ -1,5 +1,6 @@
 _build/
-.monty/
+.monty/*
+!.monty/version
 .pi-subagents/
 
 # Monty's project-local head-butler integration is part of the repository.
