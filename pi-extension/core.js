@@ -2,20 +2,16 @@ export const HEAD = "monty-head:v1";
 export const TASK = "monty-task-link:v1";
 export const RETIRED = "monty-task-retired:v1";
 export const PLAN = "monty-plan:v1";
-export const RPC = "subagents:rpc:v1:request";
-export const REPLY = "subagents:rpc:v1:reply:";
-
+export const RUN = "monty-task-run:v1";
 export const REQUIRED_AGENTS = {
   "monty-headless-worker": `---
-name: monty-headless-worker
 description: Implementation and fixer agent for Monty headless worker chains
 tools: read, grep, find, ls, bash, edit, write
 model: inherit
 thinking: high
-systemPromptMode: replace
-inheritProjectContext: true
-inheritSkills: false
-defaultContext: fresh
+prompt_mode: replace
+extensions: false
+skills: false
 ---
 
 You are the implementation agent in a Monty headless worker chain.
@@ -30,15 +26,13 @@ Never stage, commit, push, submit reviews, post comments, open pull requests, or
 Do not launch subagents or invoke \`/review\`.
 `,
   "monty-headless-reviewer": `---
-name: monty-headless-reviewer
 description: Independent read-only reviewer for Monty headless worker chains
 tools: read, grep, find, ls, bash
 model: inherit
 thinking: high
-systemPromptMode: replace
-inheritProjectContext: true
-inheritSkills: false
-defaultContext: fresh
+prompt_mode: replace
+extensions: false
+skills: false
 ---
 
 You are an independent, strictly read-only code reviewer in a Monty headless worker chain.

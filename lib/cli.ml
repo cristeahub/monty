@@ -631,14 +631,14 @@ let headless_cmd =
     Cmdliner.Cmd.v (Cmdliner.Cmd.info "prepare-many" ~doc) headless_prepare_many_term
   in
   let begin_cmd =
-    let doc = "Claim one prepared worker and emit its harness subagent call." in
+    let doc = "Claim one prepared worker and emit its internal TintinWeb workflow descriptor." in
     Cmdliner.Cmd.v (Cmdliner.Cmd.info "begin" ~doc) (headless_worker_term false)
   in
   let resume_cmd =
-    let doc = "Intentionally emit a successor harness call for an open worker." in
+    let doc = "Intentionally claim and describe a successor TintinWeb workflow for an open worker." in
     Cmdliner.Cmd.v (Cmdliner.Cmd.info "resume" ~doc) (headless_worker_term true)
   in
-  let doc = "Generate headless calls for the harness subagent tool." in
+  let doc = "Prepare and describe fixed headless workflows for the Monty Pi extension." in
   Cmdliner.Cmd.group (Cmdliner.Cmd.info "headless" ~doc)
     [ prepare_cmd; begin_cmd; resume_cmd ]
  in

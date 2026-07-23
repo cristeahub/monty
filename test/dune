@@ -11,11 +11,20 @@
 
 (rule
  (alias runtest)
+ (deps test_install.sh ../install.sh)
+ (action
+  (run sh %{dep:test_install.sh} %{dep:../install.sh})))
+
+(rule
+ (alias runtest)
  (deps
   test_pi_extension.mjs
   ../install.sh
   ../pi-extension/package.json
   ../pi-extension/core.js
+  ../pi-extension/navigation-spinner.js
+  ../pi-extension/subagent-chain.js
+  ../pi-extension/worker-view.js
   ../pi-extension/extensions/monty.js)
  (action
   (run node --test %{dep:test_pi_extension.mjs})))

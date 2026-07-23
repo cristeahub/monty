@@ -1,7 +1,8 @@
 let ( let* ) = Result.bind
 
 let prepare_schema = "monty:headless-prepare:v1"
-let dispatch_schema = "monty:headless-dispatch:v2"
+let dispatch_schema = "monty:headless-dispatch:v3"
+let workflow_schema = "monty:tintin-chain:v1"
 
 type prepared_job = {
   id : string;
@@ -21,6 +22,7 @@ type dispatch = {
   worker_dir : string;
   instructions : string;
   context : string;
+  task_key : string option;
   home : string;
 }
 
@@ -53,6 +55,7 @@ let implementation_task (dispatch : dispatch) =
   String.concat "\n\n"
     [ Printf.sprintf "Implement Monty worker %s: %s." dispatch.id dispatch.title;
       "Read only the supplied Monty instructions and task context before inspecting the repository.";
+      "Then find and read every applicable repository-local instruction file before editing.";
       "You are the only writer in this phase.";
       "Implement the requested scope completely and follow repository-local instructions.";
       "Do not invoke /review or spawn subagents; two independent reviewers run after this phase.";
@@ -67,6 +70,7 @@ let reviewer_task (dispatch : dispatch) focus =
     [ Printf.sprintf "Independently review Monty worker %s: %s." dispatch.id
         dispatch.title;
       "Start from the supplied task context and inspect the current worktree directly.";
+      "Find and read every applicable repository-local instruction file before evaluating the implementation.";
       "Do not rely on another agent's summary and do not look for another reviewer's output.";
       focus;
       "This is strictly read-only. Do not modify project, source, test, configuration, task, or worker-memory files.";
@@ -81,6 +85,7 @@ let fixer_task (dispatch : dispatch) =
   String.concat "\n\n"
     [ Printf.sprintf "Finalize Monty worker %s: %s." dispatch.id dispatch.title;
       "Read the supplied task context, inspect the current worktree, and review both independent reports below.";
+      "Find and read every applicable repository-local instruction file before changing the worktree.";
       "You are the only writer in this phase.";
       "Verify every finding against the code and requirements. Fix valid findings without widening scope and explicitly reject invalid findings.";
       "Rerun affected validation plus any broader checks required by the repository.";
@@ -95,109 +100,88 @@ let fixer_task (dispatch : dispatch) =
 
 let reads_json paths = `List (List.map (fun path -> `String path) paths)
 
-let acceptance_reason =
-  "Monty's explicit 1-2-1 reviewers and fixer provide the review gate."
+let optional_json = function None -> `Null | Some value -> `String value
 
-let child_json ~phase ~agent ~label ~as_name ~task ~cwd ~reads ~output =
-  let fields =
-    [ ("agent", `String agent);
-      ("label", `String label);
-      ("as", `String as_name);
-      ("task", `String task);
+let step_json ~role ~phase ~agent ~description ~prompt ~cwd ~reads ~output =
+  `Assoc
+    [ ("role", `String role);
+      ("phase", `String phase);
+      ("agent", `String agent);
+      ("description", `String description);
+      ("prompt", `String prompt);
       ("cwd", `String cwd);
       ("reads", reads_json reads);
-      ("output", `String output);
-      ("progress", `Bool false);
-      ( "acceptance",
-        `Assoc
-          [ ("level", `String "none");
-            ("reason", `String acceptance_reason) ] ) ]
-  in
-  match phase with
-  | None -> `Assoc fields
-  | Some phase -> `Assoc (("phase", `String phase) :: fields)
+      ("output", `String output) ]
 
-let harness_arguments_json (dispatch : dispatch) attempt_id =
+let workflow_json (dispatch : dispatch) attempt_id =
   let attempt_root =
     Filename.concat dispatch.worker_dir
       (Filename.concat "artifacts" (Filename.concat "headless" attempt_id))
   in
-  let implementation_output = Filename.concat attempt_root "implementation.md" in
-  let review_dir = Filename.concat attempt_root "reviews" in
-  let correctness_output = Filename.concat review_dir "correctness.md" in
-  let quality_output = Filename.concat review_dir "quality.md" in
-  let final_output = Filename.concat attempt_root "final.md" in
   let implementation =
-    child_json ~phase:(Some "Implementation") ~agent:"monty-headless-worker"
-      ~label:(dispatch.title ^ " implementation") ~as_name:"implementation"
-      ~task:(implementation_task dispatch) ~cwd:dispatch.worktree
+    step_json ~role:"implementation" ~phase:"Implementation"
+      ~agent:"monty-headless-worker" ~description:("Implement " ^ dispatch.id)
+      ~prompt:(implementation_task dispatch) ~cwd:dispatch.worktree
       ~reads:[ dispatch.instructions; dispatch.context ]
-      ~output:implementation_output
+      ~output:(Filename.concat attempt_root "implementation.md")
   in
+  let review_dir = Filename.concat attempt_root "reviews" in
   let correctness_review =
-    child_json ~phase:None ~agent:"monty-headless-reviewer"
-      ~label:"Correctness review"
-      ~as_name:"correctnessReview"
-      ~task:
+    step_json ~role:"correctnessReview" ~phase:"Review"
+      ~agent:"monty-headless-reviewer" ~description:"Review correctness"
+      ~prompt:
         (reviewer_task dispatch
            "Focus on correctness, regressions, edge cases, data integrity, security, and exact requirement compliance.")
       ~cwd:dispatch.worktree ~reads:[ dispatch.context ]
-      ~output:correctness_output
+      ~output:(Filename.concat review_dir "correctness.md")
   in
   let quality_review =
-    child_json ~phase:None ~agent:"monty-headless-reviewer"
-      ~label:"Quality and tests review" ~as_name:"qualityReview"
-      ~task:
+    step_json ~role:"qualityReview" ~phase:"Review"
+      ~agent:"monty-headless-reviewer" ~description:"Review quality and tests"
+      ~prompt:
         (reviewer_task dispatch
            "Focus on tests, failure handling, maintainability, simplicity, architectural fit, and missing validation.")
-      ~cwd:dispatch.worktree ~reads:[ dispatch.context ] ~output:quality_output
-  in
-  let reviews =
-    `Assoc
-      [ ("phase", `String "Review");
-        ("label", `String (dispatch.title ^ " independent reviews"));
-        ("parallel", `List [ correctness_review; quality_review ]);
-        ("concurrency", `Int 2);
-        ("failFast", `Bool false) ]
+      ~cwd:dispatch.worktree ~reads:[ dispatch.context ]
+      ~output:(Filename.concat review_dir "quality.md")
   in
   let fixer =
-    child_json ~phase:(Some "Fix") ~agent:"monty-headless-worker"
-      ~label:(dispatch.title ^ " verified fixes") ~as_name:"final"
-      ~task:(fixer_task dispatch) ~cwd:dispatch.worktree
-      ~reads:[ dispatch.instructions; dispatch.context ] ~output:final_output
+    step_json ~role:"final" ~phase:"Fix" ~agent:"monty-headless-worker"
+      ~description:"Apply verified fixes" ~prompt:(fixer_task dispatch)
+      ~cwd:dispatch.worktree ~reads:[ dispatch.instructions; dispatch.context ]
+      ~output:(Filename.concat attempt_root "final.md")
   in
   `Assoc
-    [ ("chain", `List [ implementation; reviews; fixer ]);
-      ("context", `String "fresh");
-      ("async", `Bool true);
-      ("clarify", `Bool false);
-      ("agentScope", `String "project");
-      ("cwd", `String dispatch.home);
-      ("chainDir", `String (Filename.concat attempt_root "chain"));
-      ("sessionDir", `String (Filename.concat attempt_root "sessions"));
-      ("artifacts", `Bool false) ]
+    [ ("schema", `String workflow_schema);
+      ("backend", `String "@tintinweb/pi-subagents");
+      ("home", `String dispatch.home);
+      ("attempt_id", `String attempt_id);
+      ("attempt_root", `String attempt_root);
+      ("implementation", implementation);
+      ("reviews", `List [ correctness_review; quality_review ]);
+      ("fixer", fixer) ]
+
+let worker_json (dispatch : dispatch) =
+  `Assoc
+    [ ("id", `String dispatch.id);
+      ("title", `String dispatch.title);
+      ("repo", `String dispatch.repo);
+      ("branch", `String dispatch.branch);
+      ("worktree", `String dispatch.worktree);
+      ("worker_dir", `String dispatch.worker_dir);
+      ("instructions", `String dispatch.instructions);
+      ("context", `String dispatch.context);
+      ("task_key", optional_json dispatch.task_key) ]
 
 let dispatch_json ?attempt_id (dispatch : dispatch) =
   let attempt_id =
     match attempt_id with Some attempt_id -> attempt_id | None -> fresh_attempt_id ()
   in
-  let harness_arguments = harness_arguments_json dispatch attempt_id in
+  let worker = worker_json dispatch in
+  let workflow = workflow_json dispatch attempt_id in
   `Assoc
     [ ("schema", `String dispatch_schema);
-      ( "worker",
-        `Assoc
-          [ ("id", `String dispatch.id);
-            ("title", `String dispatch.title);
-            ("repo", `String dispatch.repo);
-            ("branch", `String dispatch.branch);
-            ("worktree", `String dispatch.worktree);
-            ("worker_dir", `String dispatch.worker_dir);
-            ("instructions", `String dispatch.instructions);
-            ("context", `String dispatch.context) ] );
-      ( "harness_call",
-        `Assoc
-          [ ("tool", `String "subagent");
-            ("arguments", harness_arguments) ] ) ]
+      ("worker", worker);
+      ("workflow", workflow) ]
 
 let print_json json = Fmt.pr "%s\n" (Yojson.Safe.pretty_to_string json)
 
@@ -347,5 +331,6 @@ let begin_worker ~explicit_resume options worker =
              worker_dir = prepared.worker_dir;
              instructions = prepared.instructions;
              context = prepared.context;
+             task_key = prepared.job.Job.task_key;
              home = options.home;
            })

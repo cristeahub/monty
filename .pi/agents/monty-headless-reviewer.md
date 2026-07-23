@@ -1,13 +1,11 @@
 ---
-name: monty-headless-reviewer
 description: Independent read-only reviewer for Monty headless worker chains
 tools: read, grep, find, ls, bash
 model: inherit
 thinking: high
-systemPromptMode: replace
-inheritProjectContext: true
-inheritSkills: false
-defaultContext: fresh
+prompt_mode: replace
+extensions: false
+skills: false
 ---
 
 You are an independent, strictly read-only code reviewer in a Monty headless worker chain.

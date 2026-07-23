@@ -27,8 +27,8 @@ When the user asks to begin a concrete task:
 
 Ask a focused clarifying question instead of inventing a project or title when either is ambiguous.
 The model cannot invoke Pi slash commands or switch sessions itself, so do not claim that a conversational request already opened or navigated to a task.
-After the user enters `/monty`, the native selector owns task choice, planning, and session replacement.
-Use `/monty-start` only after the user approves the current plan, `/monty-run resume` only when the user explicitly requests a successor run, `/monty-head-butler` to go to the head session, and `/monty-plan-cancel` to abandon planning.
+After the user enters `/monty`, the native selector owns task choice, planning, and the task monitor shown in the permanent head-butler session.
+Use `/monty-start` only after the user approves the current plan, `/monty-run resume` only when the user explicitly requests a successor run, `/monty-worker` to reopen live worker output, `/monty-head-butler` to clear the task monitor and return to the plain head prompt, and `/monty-plan-cancel` to abandon planning.
 Do not infer approval to complete a task, run a successor chain, push, or perform another remote action from a general request to start or inspect work.
 In native plan mode, inspect only the selected task's relevant project context, remain read-only, and finish with a concrete numbered `Plan:` section.
 Do not create manual manifests or context files for the native conversational flow because `/monty-start` creates the canonical task context and worker state.
@@ -40,10 +40,14 @@ Ask clarifying questions when the selected work is ambiguous.
 Keep planning artifacts under `.monty/runs/<run-id>/`.
 Use a short run id such as `2026-06-27-issues` or `run-001`.
 
-Inside the native Monty Pi extension, use `/monty` to select work, `/monty-open <task>` to open named work, `/monty-start` to start an approved plan, and `/monty-head-butler` to go to the exact head session.
-Direct session-navigation commands cancel an active foreground Pi response and show a spinner while cancellation settles, but they must never stop or await detached Monty worker chains.
+Inside the native Monty Pi extension, use `/monty` to select work, `/monty-open <task>` to open named work, `/monty-start` to start an approved plan, `/monty-worker` to reopen live worker output, and `/monty-head-butler` to clear the selected task monitor.
+Entering a started task validates its Monty-owned worktree and selects its monitor without replacing the head-butler Pi session.
+Task loading, worktree entry, and legacy head-session recovery must show an animated navigation status until ready.
+TintinWeb agents run in process and are aborted by Pi session replacement, so the head-butler session remains the permanent top-level session while a Monty chain runs.
+Use TintinWeb FleetView or `/monty-worker` to inspect live agents, and return to the head prompt by closing the overlay or running `/monty-head-butler`.
+Monty blocks unrelated Pi session replacement while one of its chains is active.
 An unstarted task remains in the head-butler session and enters read-only plan mode.
-After the user approves the plan, the native start action prepares a task subsession and launches its asynchronous chain while the head butler remains available.
+After the user approves the plan, the native start action prepares the task and launches its asynchronous chain while the head butler remains available for normal conversation.
 
 For explicit Ghostty or manual batch workflows, create one Markdown context file per worker task.
 Each context file should be specific enough that a fresh pi worker can start without reading the whole planning conversation.
@@ -103,13 +107,13 @@ Never automatically relaunch a `launch-requested` worker.
 Use the printed `monty resume <worker-id>` command only when the user intentionally wants another terminal request.
 
 `monty start` loads Monty's process-wide Pi extension.
-The extension owns task selection, read-only plan mode, native task subsessions, minimal location status, and return navigation.
-It uses Monty's JSON descriptors and the existing `pi-subagents` RPC rather than duplicating session or agent runtime state.
+The extension owns task selection, read-only plan mode, the head-owned task monitor, minimal location status, and fixed-chain orchestration.
+It uses Monty's JSON descriptors and `@tintinweb/pi-subagents` RPC protocol 2 while keeping runtime IDs in Pi session entries rather than `job.json`.
 Ghostty remains available through explicit `launch`, `launch-many`, and `resume` commands.
 The direct headless CLI flow remains available for manual and recovery use.
 
-Before any mutating headless command, call the harness `subagent` tool with `action: "list"` and confirm that the tool and required agents are available.
-If they are unavailable, stop without mutating Monty state.
+Before any mutating headless command, confirm that the harness exposes `monty_headless_chain` and that the two project agents under `.pi/agents/` match Monty's fixed definitions.
+If the tool or agents are unavailable, stop without mutating Monty state.
 Run headless dry-run first when checking a new batch or when the user asks for a preview:
 
 ```sh
@@ -123,19 +127,24 @@ monty headless prepare-many --manifest .monty/runs/<run-id>/jobs.json
 ```
 
 Headless preparation reserves every job and materializes its Monty-managed `wt` worktree while leaving the job `prepared`.
-For each prepared worker, run `monty headless begin <worker-id>` immediately before the harness call.
-Read the returned `harness_call.tool` and pass `harness_call.arguments` unchanged to that exposed harness tool.
-Do not manually reconstruct, simplify, or enrich the generated chain JSON.
+For each prepared worker, call `monty_headless_chain` with the exact worker ID and `resume: false`.
+Do not run `monty headless begin` separately in the normal Pi-tool flow.
+The tool performs the atomic `prepared` to `launch-requested` claim immediately before it starts the generated workflow.
+Monty's tool uses TintinWeb's single-agent RPC to run the implementer, then both reviewers in parallel, then the fixer.
 The generated asynchronous chains can run concurrently without waiting for earlier jobs to finish.
+The low-level `monty headless begin` command remains available to trusted adapters and recovery tooling, but its versioned descriptor is not a replayable model tool call.
 
 Each chain gets fresh minimal context and runs one implementer, two mutually isolated reviewers in parallel, and one fixer.
+Monty captures every terminal result in the attempt artifact directory before advancing the workflow.
 Reviewers may write only their separate reports outside the worktree.
 No child may create worktrees, stage, commit, push, open a PR, post remotely, or run `monty done`.
 A successful chain leaves the task open and its worktree intact.
 Never infer completion from Pi runtime status.
 
-If a harness call fails after `begin`, leave the worker `launch-requested`.
-Run `monty headless resume <worker-id>` only when the user intentionally requests a fresh successor chain, then pass its generated `harness_call.arguments` unchanged to the harness tool.
+If `monty_headless_chain` reports that the worker was not claimed, the same first-run call is safe to retry.
+If it reports an ambiguous failure after claim, leave the worker `launch-requested` and do not retry automatically.
+Set `resume: true` only when the user intentionally requests a fresh successor chain.
+The tool then invokes the low-level `monty headless resume` transition itself.
 Never persist a backend, Pi run ID, async status, or runtime state in `job.json`.
 Never automatically run `monty done` after a headless chain.
 
@@ -210,7 +219,7 @@ The deterministic CLI and state layer is OCaml built with Dune.
 The bundled native Pi adapter lives under `pi-extension/` and uses Pi's public extension and session APIs.
 Use Dune package management and dependencies in `dune-project`.
 Do not add opam files.
-Keep headless state and payload generation in Monty, while execution uses the harness's existing subagent tool or stable RPC.
+Keep headless state and payload generation in Monty, while execution uses `monty_headless_chain` and TintinWeb RPC protocol 2.
 Do not add a new persisted backend.
 Use Monty's repo-scoped `ensure-worktree` flow for worktree creation and reuse.
 It must use the existing `wt` CLI, validate the selected repo, and automatically answer `wt` repo-selection prompts when branch names collide across repos.

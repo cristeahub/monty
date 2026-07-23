@@ -1,9 +1,15 @@
 import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { randomUUID } from "node:crypto";
+import { Type } from "@earendil-works/pi-ai";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
-import { HEAD, PLAN, REPLY, REQUIRED_AGENTS, RETIRED, RPC, TASK, ambiguousClaimFailure, definiteClaimFailure, find, last, latestPlan, msgText, row } from "../core.js";
+import {
+  HEAD, PLAN, REQUIRED_AGENTS, RETIRED, RUN, TASK, ambiguousClaimFailure,
+  definiteClaimFailure, find, last, latestPlan, msgText, row,
+} from "../core.js";
+import { TintinChainRunner, pingSubagents } from "../subagent-chain.js";
+import { hasWorkerTranscript, openWorkerView, readWorkerSnapshot, workerWidgetLines } from "../worker-view.js";
+import { showNavigationSpinner } from "../navigation-spinner.js";
 
 const rawHome = process.env.MONTY_HOME?.trim();
 const home = rawHome ? realpathSync(resolve(rawHome)) : null;
@@ -12,9 +18,12 @@ const wt = process.env.MONTY_WT_COMMAND?.trim() || "wt";
 const piCmd = process.env.MONTY_PI_COMMAND?.trim() || "pi";
 const prefix = process.env.MONTY_BRANCH_PREFIX?.trim() || "monty";
 const planTools = new Set(["read", "grep", "find", "ls", "questionnaire"]);
-const cancelFrames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-
-const requiredAgents = REQUIRED_AGENTS;
+const spinnerRenderDelayMs = 16;
+const chainTool = "monty_headless_chain";
+const emptyUsage = {
+  input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
+  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+};
 
 class CliRejected extends Error {}
 
@@ -37,21 +46,16 @@ function lastOwned(entries, type) {
     .find(entry => entry.type === "custom" && entry.customType === type && owned(entry.data))?.data;
 }
 
-function err(r) {
-  return (r.stderr || r.stdout || `Command exited ${r.code}`).trim();
+function err(result) {
+  return (result.stderr || result.stdout || `Command exited ${result.code}`).trim();
 }
 
-const emptyUsage = {
-  input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
-  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-};
-
-function materialize(sm, model) {
-  const file = sm.getSessionFile();
+function materialize(session, model) {
+  const file = session.getSessionFile();
   if (!file) throw new Error("Pi did not assign a session file");
   if (!existsSync(file)) {
     if (!model) throw new Error("Pi has no selected model to materialize the session safely");
-    sm.appendMessage({
+    session.appendMessage({
       role: "assistant", content: [], api: model.api, provider: model.provider, model: model.id,
       usage: emptyUsage, stopReason: "stop", timestamp: Date.now(),
     });
@@ -63,62 +67,108 @@ function materialize(sm, model) {
 export default function monty(pi) {
   let plan;
   let busy = false;
+  let taskWidgetTimer;
+  let taskWidgetText;
+  const chains = new TintinChainRunner(pi, home);
 
   async function cli(args, timeout = 120000) {
     if (!home) throw new Error("MONTY_HOME is not set");
-    const r = await pi.exec(cmd, args, { cwd: home, timeout });
-    if (r.killed) throw new Error(`Monty execution was killed or timed out: ${err(r)}`);
-    if (r.code) throw new CliRejected(err(r));
-    try { return JSON.parse(r.stdout); }
-    catch { throw new Error(`Monty returned invalid JSON: ${r.stdout.trim()}`); }
-  }
-
-  function rpc(method, params, timeout = 5000) {
-    return new Promise((ok, no) => {
-      const requestId = `monty-${randomUUID()}`;
-      const event = REPLY + requestId;
-      let off;
-      const timer = setTimeout(() => {
-        if (typeof off === "function") off();
-        no(new Error(`pi-subagents ${method} RPC timed out`));
-      }, timeout);
-      off = pi.events.on(event, reply => {
-        clearTimeout(timer);
-        if (typeof off === "function") off();
-        if (reply?.success) ok(reply.data);
-        else no(new Error(reply?.error?.message || `pi-subagents ${method} RPC failed`));
-      });
-      pi.events.emit(RPC, { version: 1, requestId, method, params, source: { extension: "monty" } });
-    });
+    const result = await pi.exec(cmd, args, { cwd: home, timeout });
+    if (result.killed) throw new Error(`Monty execution was killed or timed out: ${err(result)}`);
+    if (result.code) throw new CliRejected(err(result));
+    try { return JSON.parse(result.stdout); }
+    catch { throw new Error(`Monty returned invalid JSON: ${result.stdout.trim()}`); }
   }
 
   function cur(ctx, type) {
     return last(ctx.sessionManager.getBranch(), type);
   }
 
-  function isRetired(sm, key) {
-    return sm.getEntries().some(entry => entry.type === "custom"
+  function isRetired(session, key) {
+    return session.getEntries().some(entry => entry.type === "custom"
       && entry.customType === RETIRED && owned(entry.data) && entry.data?.key === key);
+  }
+
+  function headMarker(ctx) {
+    return lastOwned(ctx.sessionManager.getEntries(), HEAD);
+  }
+
+  function isHead(ctx) {
+    const file = ctx.sessionManager.getSessionFile();
+    const marker = headMarker(ctx);
+    return !!file && typeof marker?.session === "string" && same(marker.session, file)
+      && same(ctx.cwd, home || ctx.cwd);
   }
 
   function activeTask(ctx) {
     const task = cur(ctx, TASK);
-    return task && typeof task === "object" && owned(task) && !task.retired
-      && !isRetired(ctx.sessionManager, task.key) ? task : undefined;
+    return task && typeof task === "object" && owned(task) && task.selected !== false
+      && typeof task.key === "string" && !task.retired && !isRetired(ctx.sessionManager, task.key)
+      ? task : undefined;
+  }
+
+  function taskRun(ctx, task) {
+    return [...ctx.sessionManager.getBranch()].reverse().find(entry =>
+      entry.type === "custom" && entry.customType === RUN && owned(entry.data)
+      && (entry.data?.key === task.key || (!entry.data?.key && entry.data?.worker === task.worker)))?.data;
+  }
+
+  function attemptExists(ctx, attemptId) {
+    return ctx.sessionManager.getEntries().some(entry => entry.type === "custom"
+      && entry.customType === RUN && owned(entry.data) && entry.data?.attemptId === attemptId);
+  }
+
+  function runPersister(task) {
+    return snapshot => pi.appendEntry(RUN, {
+      ...snapshot,
+      key: task?.key || snapshot.key,
+      title: task?.title || snapshot.title,
+      worker: task?.worker || snapshot.worker,
+    });
+  }
+
+  function stopTaskWidget(ctx) {
+    if (taskWidgetTimer) clearInterval(taskWidgetTimer);
+    taskWidgetTimer = undefined;
+    taskWidgetText = undefined;
+    if (ctx?.hasUI) ctx.ui.setWidget("monty-worker", undefined);
+  }
+
+  function startTaskWidget(ctx, task) {
+    stopTaskWidget(ctx);
+    if (!ctx.hasUI) return;
+    const refresh = () => {
+      const lines = workerWidgetLines(readWorkerSnapshot(home, task, taskRun(ctx, task)));
+      const text = lines.join("\n");
+      if (text === taskWidgetText) return;
+      taskWidgetText = text;
+      ctx.ui.setWidget("monty-worker", lines);
+    };
+    refresh();
+    taskWidgetTimer = setInterval(refresh, 750);
+    taskWidgetTimer.unref?.();
+  }
+
+  async function showTaskWorker(ctx, task, always = false) {
+    const run = taskRun(ctx, task);
+    if (!always && !hasWorkerTranscript(home, task, run)) return false;
+    await openWorkerView(ctx, home, task, run);
+    return true;
   }
 
   function loc(ctx) {
     const task = activeTask(ctx);
-    const text = task ? `MONTY · TASK: ${task.title}`
-      : plan ? `MONTY · HEAD BUTLER · Planning: ${plan.title}`
-      : same(ctx.cwd, home || ctx.cwd) ? "MONTY · HEAD BUTLER" : undefined;
+    const text = plan ? `MONTY · HEAD BUTLER · Planning: ${plan.title}`
+      : isHead(ctx) && task ? `MONTY · HEAD BUTLER · Monitoring: ${task.title}`
+        : isHead(ctx) ? "MONTY · HEAD BUTLER"
+          : task ? `MONTY · LEGACY TASK: ${task.title}` : undefined;
     ctx.ui.setStatus("monty", text ? ctx.ui.theme.fg("accent", text) : undefined);
     if (text) ctx.ui.setTitle(text);
   }
 
   function usePlan(ctx) {
     if (!plan) return;
-    pi.setActiveTools((plan.tools || pi.getActiveTools()).filter(x => planTools.has(x)));
+    pi.setActiveTools((plan.tools || pi.getActiveTools()).filter(tool => planTools.has(tool)));
     loc(ctx);
   }
 
@@ -130,36 +180,52 @@ export default function monty(pi) {
     loc(ctx);
   }
 
-  function showCancelSpinner(ctx) {
-    let index = 0;
-    const draw = () => {
-      const frame = cancelFrames[index++ % cancelFrames.length];
-      ctx.ui.setStatus("monty-cancel",
-        ctx.ui.theme.fg("warning", `${frame} Cancelling current response...`));
-    };
-    draw();
-    const timer = setInterval(draw, 80);
-    timer.unref?.();
-    return () => {
-      clearInterval(timer);
-      ctx.ui.setStatus("monty-cancel", undefined);
-    };
+  function clearSelection(ctx) {
+    if (!activeTask(ctx)) return;
+    pi.appendEntry(TASK, { home, selected: false });
+    stopTaskWidget(ctx);
+    loc(ctx);
   }
 
-  async function cancelForeground(ctx) {
-    if (ctx.isIdle()) return;
-    const stopSpinner = showCancelSpinner(ctx);
+  async function withNavigationSpinner(ctx, message, work) {
+    const spinner = showNavigationSpinner(ctx, message);
     try {
-      ctx.abort();
-      await ctx.waitForIdle();
-    } finally { stopSpinner(); }
+      await new Promise(resolveDelay => setTimeout(resolveDelay, spinnerRenderDelayMs));
+      return await work();
+    } finally { spinner.stop(); }
+  }
+
+  async function preserveForeground(ctx) {
+    if (ctx.isIdle()) return;
+    await withNavigationSpinner(ctx, "Waiting for current response to finish...", () => ctx.waitForIdle());
   }
 
   async function switchMontySession(ctx, file, options) {
-    await cancelForeground(ctx);
-    const result = await ctx.switchSession(file, options);
-    if (result.cancelled) ctx.ui.notify("Monty session switch was cancelled", "info");
-    return result;
+    await preserveForeground(ctx);
+    const spinner = showNavigationSpinner(ctx, "Switching Monty session...");
+    await new Promise(resolveDelay => setTimeout(resolveDelay, spinnerRenderDelayMs));
+    let rebound = false;
+    try {
+      const result = await ctx.switchSession(file, {
+        ...options,
+        withSession: async next => {
+          rebound = true;
+          spinner.bind(next);
+          spinner.stop();
+          if (options?.withSession) await options.withSession(next);
+        },
+      });
+      if (result.cancelled) {
+        spinner.stop();
+        ctx.ui.notify("Monty session switch was cancelled", "info");
+      }
+      return result;
+    } catch (error) {
+      spinner.stop();
+      throw error;
+    } finally {
+      if (!rebound) spinner.stop();
+    }
   }
 
   async function snapshot() {
@@ -167,107 +233,101 @@ export default function monty(pi) {
   }
 
   function headLink(ctx) {
-    const entries = ctx.sessionManager.getEntries();
-    const task = lastOwned(entries, TASK);
+    const marker = headMarker(ctx);
     const file = ctx.sessionManager.getSessionFile();
-    if (task?.head) return task.head;
-    if (lastOwned(entries, HEAD) && file) return file;
-  }
-
-  function sessionCwd(sm, info) {
-    return sm.getHeader()?.cwd || info?.cwd || sm.getCwd();
+    if (file && typeof marker?.session === "string" && same(marker.session, file)) return file;
+    return lastOwned(ctx.sessionManager.getEntries(), TASK)?.head;
   }
 
   function validHead(path) {
     try {
-      const sm = SessionManager.open(path);
-      return !!lastOwned(sm.getEntries(), HEAD) && same(sm.getHeader()?.cwd, home);
+      const session = SessionManager.open(path);
+      const marker = lastOwned(session.getEntries(), HEAD);
+      return typeof marker?.session === "string" && same(marker.session, path)
+        && same(session.getHeader()?.cwd, home);
     } catch { return false; }
   }
 
+  function legacyHead(path) {
+    try {
+      const session = SessionManager.open(path);
+      const marker = lastOwned(session.getEntries(), HEAD);
+      return !!marker && marker.session === undefined && same(session.getHeader()?.cwd, home);
+    } catch { return false; }
+  }
+
+  function upgradeHead(path) {
+    SessionManager.open(path).appendCustomEntry(HEAD, { home, session: path });
+    return path;
+  }
+
   async function heads() {
-    const out = [];
-    for (const info of await SessionManager.listAll())
-      if (validHead(info.path)) out.push(info);
-    return out.sort((a, b) => b.modified - a.modified);
+    const result = [];
+    for (const info of await SessionManager.listAll()) if (validHead(info.path)) result.push(info);
+    return result.sort((left, right) => right.modified - left.modified);
   }
 
   async function getHead(ctx) {
     const direct = headLink(ctx);
-    if (direct && existsSync(direct) && validHead(direct)) return direct;
+    if (direct && existsSync(direct)) {
+      if (validHead(direct)) return direct;
+      if (legacyHead(direct)) return upgradeHead(direct);
+    }
     return (await heads())[0]?.path;
   }
 
-  function link(entry, head) {
+  function taskLink(entry, head) {
     return {
-      home, head, key: entry.task.key, title: entry.task.title,
+      home, head, selected: true, key: entry.task.key, title: entry.task.title,
       worker: entry.worker.id, cwd: entry.cwd, instructions: entry.instructions,
       context: entry.context, memory: entry.memory,
     };
   }
 
-  function context(entry) {
-    return ["[MONTY TASK]", readFileSync(entry.instructions, "utf8"),
-      readFileSync(entry.context, "utf8")].join("\n\n");
+  function activateTask(ctx, task) {
+    if (!ctx.sessionManager.getSessionName()) pi.setSessionName("Monty Head Butler");
+    startTaskWidget(ctx, task);
+    loc(ctx);
   }
 
-  async function taskSessions(key) {
-    const out = [];
-    for (const info of await SessionManager.listAll()) {
-      try {
-        const sm = SessionManager.open(info.path);
-        const data = last(sm.getBranch(), TASK);
-        if (data && owned(data) && !data.retired && data.key === key && !isRetired(sm, key))
-          out.push({ info, data, cwd: sessionCwd(sm, info) });
-      } catch {}
-    }
-    return out.sort((a, b) => b.info.modified - a.info.modified);
-  }
-
-  async function pickSession(items, ctx) {
-    if (items.length < 2) return { item: items[0] };
-    const opts = items.map(x => `${x.info.modified.toISOString()}  ${x.info.path}`);
-    const value = await ctx.ui.select("Choose task subsession", opts);
-    if (!value) return { cancelled: true };
-    return { item: items[opts.indexOf(value)] };
-  }
-
-  async function ensureSession(entry, ctx) {
+  async function selectEntry(entry, ctx) {
     const head = await getHead(ctx);
     if (!head) throw new Error("The persisted Monty head-butler session could not be found");
-    const picked = await pickSession(await taskSessions(entry.task.key), ctx);
-    if (picked.cancelled) return;
-    const old = picked.item;
-    const moved = old && !same(old.cwd, entry.cwd);
-    let sm;
-    if (!old) sm = SessionManager.create(entry.cwd, undefined, { parentSession: head });
-    else if (moved) sm = SessionManager.forkFrom(old.info.path, entry.cwd, undefined, { parentSession: head });
-    else sm = SessionManager.open(old.info.path);
-    sm.appendCustomEntry(TASK, link(entry, head));
-    if (!sm.getSessionName()) sm.appendSessionInfo(`Monty: ${entry.task.title}`);
-    if (!old || moved) sm.appendCustomMessageEntry("monty-task-context:v1", context(entry), false);
-    const file = materialize(sm, ctx.model);
-    if (moved) SessionManager.open(old.info.path).appendCustomEntry(RETIRED, {
-      home, key: old.data.key, successor: file,
+    const task = taskLink(entry, head);
+    const current = ctx.sessionManager.getSessionFile();
+    if (current && same(current, head)) {
+      pi.appendEntry(TASK, task);
+      activateTask(ctx, task);
+      return { ctx, task, session: head };
+    }
+    SessionManager.open(head).appendCustomEntry(TASK, task);
+    let nextContext;
+    const result = await switchMontySession(ctx, head, {
+      withSession: next => {
+        nextContext = next;
+        activateTask(next, task);
+      },
     });
-    return file;
+    if (result.cancelled) return;
+    return { ctx: nextContext, task, session: head };
   }
 
   async function enter(task, ctx) {
     if (task.action === "plan") return startPlan(task, ctx);
     if (task.action !== "open") throw new Error(`Task ${task.id} is ${task.action}`);
-    const entry = await cli(["task", "enter", task.key, "--json", "--home", home, "--wt-command", wt]);
-    const file = await ensureSession(entry, ctx);
-    if (!file) return;
-    await switchMontySession(ctx, file);
+    const entry = await withNavigationSpinner(ctx, `Opening ${task.title}...`, () =>
+      cli(["task", "enter", task.key, "--json", "--home", home, "--wt-command", wt]));
+    const selected = await selectEntry(entry, ctx);
+    if (selected) await showTaskWorker(selected.ctx, selected.task);
   }
 
   async function choose(ctx) {
-    const data = await snapshot();
+    const data = await withNavigationSpinner(ctx, "Loading Monty tasks...", snapshot);
     if (!data.tasks.length) return ctx.ui.notify("Monty has no open tasks", "info");
-    const opts = data.tasks.map(row);
-    const value = await ctx.ui.select("ID                 Project          Status   Title                                      Branch", opts);
-    if (value) await enter(data.tasks[opts.indexOf(value)], ctx);
+    const options = data.tasks.map(row);
+    const value = await ctx.ui.select(
+      "ID                 Project          Status   Title                                      Branch", options);
+    if (value) await enter(data.tasks[options.indexOf(value)], ctx);
   }
 
   function planPrompt(task) {
@@ -275,6 +335,7 @@ export default function monty(pi) {
   }
 
   function enablePlan(task, ctx) {
+    clearSelection(ctx);
     plan = {
       home, enabled: true, key: task.key, title: task.title,
       tools: plan?.tools || pi.getActiveTools(),
@@ -285,12 +346,13 @@ export default function monty(pi) {
   }
 
   async function startPlan(task, ctx) {
-    const head = await getHead(ctx);
+    const head = await withNavigationSpinner(ctx, `Opening plan for ${task.title}...`, () => getHead(ctx));
     if (!head) throw new Error("Start Monty from its head-butler session before planning a task");
     const current = ctx.sessionManager.getSessionFile();
     if (!current || !same(current, head)) {
-      const marker = { home, enabled: true, key: task.key, title: task.title };
-      SessionManager.open(head).appendCustomEntry(PLAN, marker);
+      const session = SessionManager.open(head);
+      session.appendCustomEntry(TASK, { home, selected: false });
+      session.appendCustomEntry(PLAN, { home, enabled: true, key: task.key, title: task.title });
       const result = await switchMontySession(ctx, head, {
         withSession: next => next.sendUserMessage(planPrompt(task)),
       });
@@ -305,139 +367,59 @@ export default function monty(pi) {
     try {
       if (!statSync(path).isFile()) throw new Error("not a regular file");
       const actual = readFileSync(path, "utf8").replaceAll("\r\n", "\n").trimEnd();
-      if (actual !== requiredAgents[name].trimEnd())
+      if (actual !== REQUIRED_AGENTS[name].trimEnd())
         throw new Error("definition does not match Monty's complete required fixed definition");
     } catch (error) {
       throw new Error(`Required project agent ${name} is invalid at ${path}: ${error.message}`);
     }
   }
 
-  function overrideArray(value, name, field, path) {
-    if (value === undefined || value === false) return;
-    if (!Array.isArray(value) || value.some(item => typeof item !== "string"))
-      throw new Error(`Invalid pi-subagents override ${name}.${field} at ${path}: expected strings or false`);
-  }
-
-  function parseOverride(name, value, path) {
-    if (!value || typeof value !== "object" || Array.isArray(value))
-      throw new Error(`Invalid pi-subagents override for ${name} at ${path}: expected an object`);
-    const parsed = {};
-    const oneOf = (field, values) => {
-      if (!(field in value)) return;
-      if (!values.includes(value[field]))
-        throw new Error(`Invalid pi-subagents override ${name}.${field} at ${path}`);
-      parsed[field] = value[field];
-    };
-    const typed = (field, type, alsoFalse = false) => {
-      if (!(field in value)) return;
-      if (typeof value[field] !== type && !(alsoFalse && value[field] === false))
-        throw new Error(`Invalid pi-subagents override ${name}.${field} at ${path}`);
-      parsed[field] = value[field];
-    };
-    typed("model", "string", true);
-    overrideArray(value.fallbackModels, name, "fallbackModels", path);
-    if (value.fallbackModels !== undefined) parsed.fallbackModels = value.fallbackModels;
-    typed("thinking", "string", true);
-    oneOf("systemPromptMode", ["append", "replace"]);
-    typed("inheritProjectContext", "boolean");
-    typed("inheritSkills", "boolean");
-    oneOf("defaultContext", ["fresh", "fork", false]);
-    oneOf("acceptanceRole", ["read-only", "writer", false]);
-    typed("disabled", "boolean");
-    typed("completionGuard", "boolean");
-    if ("toolBudget" in value) {
-      if (value.toolBudget !== false
-          && (!value.toolBudget || typeof value.toolBudget !== "object" || Array.isArray(value.toolBudget)))
-        throw new Error(`Invalid pi-subagents override ${name}.toolBudget at ${path}`);
-      parsed.toolBudget = value.toolBudget;
-    }
-    typed("systemPrompt", "string");
-    for (const field of ["skills", "tools", "subagentOnlyExtensions"]) {
-      overrideArray(value[field], name, field, path);
-      if (value[field] !== undefined) parsed[field] = value[field];
-    }
-    return Object.keys(parsed).length ? parsed : undefined;
-  }
-
-  function parseModelScope(value, path) {
-    if (value === undefined) return;
-    if (!value || typeof value !== "object" || Array.isArray(value))
-      throw new Error(`Invalid pi-subagents modelScope at ${path}: expected an object`);
-    if (value.enforce !== undefined && typeof value.enforce !== "boolean")
-      throw new Error(`Invalid pi-subagents modelScope.enforce at ${path}: expected a boolean`);
-    if (value.allow !== undefined
-        && (!Array.isArray(value.allow) || value.allow.some(item => typeof item !== "string")
-          || !value.allow.some(item => item.trim())))
-      throw new Error(`Invalid pi-subagents modelScope.allow at ${path}: expected an array of strings containing at least one non-empty pattern`);
-    if (value.enforce === true && value.allow === undefined)
-      throw new Error(`Invalid pi-subagents modelScope at ${path}: enforce requires allow`);
-  }
-
-  function agentSettings(path) {
-    if (!existsSync(path)) return { overrides: {} };
-    let settings;
-    try { settings = JSON.parse(readFileSync(path, "utf8")); }
-    catch (error) { throw new Error(`Invalid pi-subagents settings at ${path}: ${error.message}`); }
-    if (!settings || typeof settings !== "object" || Array.isArray(settings))
-      throw new Error(`Invalid pi-subagents settings at ${path}: expected a JSON object`);
-    const subagents = settings.subagents;
-    if (!subagents || typeof subagents !== "object" || Array.isArray(subagents))
-      return { overrides: {} };
-    for (const field of ["disableBuiltins", "disableThinking"])
-      if (subagents[field] !== undefined && typeof subagents[field] !== "boolean")
-        throw new Error(`Invalid pi-subagents ${field} at ${path}: expected a boolean`);
-    if (subagents.defaultModel !== undefined
-        && (typeof subagents.defaultModel !== "string" || !subagents.defaultModel.trim()))
-      throw new Error(`Invalid pi-subagents defaultModel at ${path}: expected a non-empty string`);
-    parseModelScope(subagents.modelScope, path);
-    const overrides = {};
-    if (!subagents.agentOverrides || typeof subagents.agentOverrides !== "object"
-        || Array.isArray(subagents.agentOverrides)) return { overrides };
-    for (const [name, value] of Object.entries(subagents.agentOverrides)) {
-      const parsed = parseOverride(name, value, path);
-      if (parsed) overrides[name] = parsed;
-    }
-    return { overrides };
-  }
-
-  function validateAgentOverride(project, projectPath, name) {
-    const override = project.overrides[name];
-    if (!override) return;
-    const fields = Object.keys(override);
-    if (fields.length === 1 && fields[0] === "disabled" && override.disabled === false) return;
-    if (override.disabled === true)
-      throw new Error(`Required project agent ${name} is disabled by pi-subagents settings at ${projectPath}`);
-    throw new Error(`Required project agent ${name} has a behavior-changing pi-subagents override at ${projectPath}`);
-  }
-
   async function headlessPreflight() {
-    const ping = await rpc("ping");
-    if (ping?.version !== 1 || !Array.isArray(ping.methods)
-        || !ping.methods.includes("spawn") || ping.capabilities?.asyncSpawn !== true)
-      throw new Error("pi-subagents ping does not advertise the required asynchronous spawn capability");
-    const projectPath = join(home, ".pi", "settings.json");
-    const project = agentSettings(projectPath);
-    for (const name of Object.keys(requiredAgents)) {
-      validateAgent(name);
-      validateAgentOverride(project, projectPath, name);
-    }
+    await pingSubagents(pi);
+    for (const name of Object.keys(REQUIRED_AGENTS)) validateAgent(name);
   }
 
-  async function dispatch(worker, resume = false) {
+  function chainTask(args, fallback) {
+    const worker = args?.worker;
+    return fallback || {
+      key: worker?.task_key || `worker:${worker?.id}`,
+      title: worker?.title || worker?.id,
+      worker: worker?.id,
+      cwd: worker?.worktree,
+      memory: worker?.worker_dir ? join(worker.worker_dir, "memory.md") : undefined,
+    };
+  }
+
+  async function launchChain(args, ctx, task, skipPing = false) {
+    if (!isHead(ctx)) throw new Error("Monty chains must start from the permanent head-butler session");
+    if (attemptExists(ctx, args?.workflow?.attempt_id))
+      throw new Error(`Monty chain ${args.workflow.attempt_id} was already requested from this session`);
+    materialize(ctx.sessionManager, ctx.model);
+    return chains.start(args, runPersister(chainTask(args, task)), { skipPing });
+  }
+
+  async function dispatch(worker, resume, ctx, task, fromTool = false) {
+    if (!isHead(ctx)) throw new Error("Monty chains must start from the exact permanent head-butler session");
     await headlessPreflight();
     const action = resume ? "resume" : "begin";
+    const definite = message => fromTool
+      ? `${message}. Worker ${worker} was not claimed; the same monty_headless_chain call can be retried.`
+      : definiteClaimFailure(action, worker, message);
+    const ambiguous = message => fromTool
+      ? `${message}. The ${action} request may have been accepted for worker ${worker}. Do not retry automatically; set resume to true only when a successor run is explicitly intentional.`
+      : ambiguousClaimFailure(action, worker, message);
     let data;
     try {
       data = await cli(["headless", action, worker, "--home", home,
         "--wt-command", wt, "--pi-command", piCmd, "--branch-prefix", prefix]);
     } catch (error) {
-      if (error instanceof CliRejected)
-        throw new Error(definiteClaimFailure(action, worker, error.message));
-      throw new Error(ambiguousClaimFailure(action, worker, error.message));
+      if (error instanceof CliRejected) throw new Error(definite(error.message));
+      throw new Error(ambiguous(error.message));
     }
-    try { return await rpc("spawn", data.harness_call.arguments, 15000); }
-    catch (error) {
-      throw new Error(ambiguousClaimFailure(action, worker, error.message));
+    try {
+      return await launchChain({ worker: data?.worker, workflow: data?.workflow }, ctx, task, true);
+    } catch (error) {
+      throw new Error(ambiguous(error.message));
     }
   }
 
@@ -449,93 +431,175 @@ export default function monty(pi) {
     try {
       writeFileSync(file, text.trim() + "\n", { mode: 0o600 });
       const entry = await cli(["task", "prepare", plan.key, "--plan", file, "--json",
-        "--home", home, "--wt-command", wt, "--pi-command", piCmd,
-        "--branch-prefix", prefix]);
-      const session = await ensureSession(entry, ctx);
-      if (!session) return;
+        "--home", home, "--wt-command", wt, "--pi-command", piCmd, "--branch-prefix", prefix]);
       clearPlan(ctx);
-      if (entry.worker.status === "prepared") await dispatch(entry.worker.id);
+      const selected = await selectEntry(entry, ctx);
+      if (!selected) return;
+      if (entry.worker.status === "prepared")
+        await dispatch(entry.worker.id, false, selected.ctx, selected.task);
+      startTaskWidget(selected.ctx, selected.task);
       const suffix = entry.worker.status === "prepared" ? "Agents are running." : `Worker is ${entry.worker.status}.`;
-      ctx.ui.notify(`Started ${entry.task.title}. ${suffix}`, "info");
+      selected.ctx.ui.notify(`Started ${entry.task.title}. ${suffix}`, "info");
     } finally { rmSync(dir, { recursive: true, force: true }); }
   }
 
   async function openArg(value, ctx) {
-    const data = await snapshot();
+    const data = await withNavigationSpinner(ctx, "Loading Monty tasks...", snapshot);
     return enter(find(data.tasks, value), ctx);
   }
 
+  pi.registerTool({
+    name: chainTool,
+    label: "Monty Headless Chain",
+    description: "Atomically claim a prepared Monty worker and start its fixed TintinWeb implementer, parallel review, and fixer workflow. Set resume only for an explicitly requested successor run.",
+    parameters: Type.Object({
+      worker: Type.String({ description: "Prepared Monty worker ID" }),
+      resume: Type.Optional(Type.Boolean({
+        description: "Start an intentional successor chain for an existing launch-requested worker.",
+      })),
+    }),
+    async execute(_toolCallId, args, _signal, _onUpdate, ctx) {
+      try {
+        if (!isHead(ctx)) throw new Error("Run Monty chains only from the permanent head-butler session");
+        const selected = activeTask(ctx);
+        const task = selected?.worker === args.worker ? selected : undefined;
+        const result = await dispatch(args.worker, args.resume === true, ctx, task, true);
+        return {
+          content: [{ type: "text", text: `Started Monty chain ${result.attemptId}.` }],
+          details: result,
+        };
+      } catch (error) {
+        return {
+          content: [{ type: "text", text: `Monty chain was not started: ${error.message}` }],
+          details: { error: error.message },
+          isError: true,
+        };
+      }
+    },
+  });
+
   pi.registerCommand("monty", { description: "Choose a Monty task", handler: async (_, ctx) => {
     try {
-      await cancelForeground(ctx);
+      await preserveForeground(ctx);
       await choose(ctx);
-    } catch (e) { ctx.ui.notify(e.message, "error"); }
+    } catch (error) { ctx.ui.notify(error.message, "error"); }
   }});
+
   pi.registerCommand("monty-open", { description: "Open or plan a Monty task", handler: async (args, ctx) => {
     try {
-      await cancelForeground(ctx);
+      await preserveForeground(ctx);
       args.trim() ? await openArg(args, ctx) : await choose(ctx);
-    } catch (e) { ctx.ui.notify(e.message, "error"); }
+    } catch (error) { ctx.ui.notify(error.message, "error"); }
   }});
-  pi.registerCommand("monty-head-butler", { description: "Go to the Monty head butler", handler: async (_, ctx) => {
+
+  pi.registerCommand("monty-head-butler", { description: "Return to the Monty head-butler prompt", handler: async (_, ctx) => {
     try {
-      await cancelForeground(ctx);
-      const head = await getHead(ctx);
+      const head = await withNavigationSpinner(ctx, "Finding the Monty head butler...", () => getHead(ctx));
       if (!head) throw new Error("The Monty head-butler session could not be found");
+      const current = ctx.sessionManager.getSessionFile();
+      if (current && same(current, head)) {
+        clearSelection(ctx);
+        clearPlan(ctx);
+        return;
+      }
       await switchMontySession(ctx, head);
-    } catch (e) { ctx.ui.notify(e.message, "error"); }
+    } catch (error) { ctx.ui.notify(error.message, "error"); }
   }});
+
   pi.registerCommand("monty-start", { description: "Start the task currently being planned", handler: async (_, ctx) => {
     try {
       const text = latestPlan(ctx.sessionManager.getBranch(), PLAN, owned);
       if (!text) throw new Error("No completed plan was found after the current plan-mode marker");
-      await startTask(ctx, text);
-    } catch (e) { ctx.ui.notify(e.message, "error"); }
+      await withNavigationSpinner(ctx, `Starting ${plan?.title || "Monty task"}...`, () => startTask(ctx, text));
+    } catch (error) { ctx.ui.notify(error.message, "error"); }
   }});
-  pi.registerCommand("monty-run", { description: "Run this task's asynchronous Monty chain", handler: async (args, ctx) => {
+
+  pi.registerCommand("monty-run", { description: "Run the selected task's asynchronous Monty chain", handler: async (args, ctx) => {
     try {
       const task = activeTask(ctx);
-      if (!task) throw new Error("This is not an active Monty task subsession for this Monty home");
-      await dispatch(task.worker, args.trim() === "resume");
+      if (!task) throw new Error("Select an active Monty task with /monty first");
+      await withNavigationSpinner(ctx, `Starting agents for ${task.title}...`, () =>
+        dispatch(task.worker, args.trim() === "resume", ctx, task));
+      startTaskWidget(ctx, task);
       ctx.ui.notify(`Started agents for ${task.title}`, "info");
-    } catch (e) { ctx.ui.notify(e.message, "error"); }
+      await showTaskWorker(ctx, task, true);
+    } catch (error) { ctx.ui.notify(error.message, "error"); }
   }});
+
+  pi.registerCommand("monty-worker", { description: "Open the selected task's live worker transcript", handler: async (_, ctx) => {
+    try {
+      const task = activeTask(ctx);
+      if (!task) throw new Error("Select an active Monty task with /monty first");
+      await showTaskWorker(ctx, task, true);
+    } catch (error) { ctx.ui.notify(error.message, "error"); }
+  }});
+
   pi.registerCommand("monty-plan-cancel", { description: "Leave Monty plan mode", handler: async (_, ctx) => {
     clearPlan(ctx);
   }});
 
-  pi.on("session_start", (_, ctx) => {
-    if (!home) return;
+  pi.on("input", (event, ctx) => {
     const task = activeTask(ctx);
-    const saved = lastOwned(ctx.sessionManager.getBranch(), PLAN);
+    if (!task || isHead(ctx) || event.source === "extension") return;
+    ctx.ui.notify(
+      `This legacy Monty task subsession is monitor-only. Use /monty-head-butler, then select the task again with /monty.`,
+      "info",
+    );
+    return { action: "handled" };
+  });
+
+  pi.on("session_start", (event, ctx) => {
+    if (!home) return;
+    let head = isHead(ctx);
+    if (!head && same(ctx.cwd, home) && event.reason === "startup") {
+      const file = materialize(ctx.sessionManager, ctx.model);
+      pi.appendEntry(HEAD, { home, session: file });
+      head = true;
+    }
+    const task = activeTask(ctx);
+    const saved = head ? lastOwned(ctx.sessionManager.getBranch(), PLAN) : undefined;
     plan = saved?.enabled ? saved : undefined;
     if (plan && !plan.tools) {
       plan = { ...plan, tools: pi.getActiveTools() };
       pi.appendEntry(PLAN, plan);
     }
-    if (task) {
-      if (!ctx.sessionManager.getSessionName()) pi.setSessionName(`Monty: ${task.title}`);
-    } else if (same(ctx.cwd, home)) {
-      if (!lastOwned(ctx.sessionManager.getEntries(), HEAD)) pi.appendEntry(HEAD, { home });
+    if (head) {
       if (!ctx.sessionManager.getSessionName()) pi.setSessionName("Monty Head Butler");
       materialize(ctx.sessionManager, ctx.model);
-    }
+      if (task) startTaskWidget(ctx, task);
+      else stopTaskWidget(ctx);
+    } else if (task) startTaskWidget(ctx, task);
+    else stopTaskWidget(ctx);
     usePlan(ctx);
     loc(ctx);
   });
 
-  pi.on("session_shutdown", () => {
+  pi.on("session_before_switch", (_event, ctx) => {
+    if (!chains.hasRunning()) return;
+    ctx.ui.notify(
+      "A Monty chain is running in this Pi session. Use /monty-head-butler to clear the task monitor without replacing the session.",
+      "warning",
+    );
+    return { cancel: true };
+  });
+
+  pi.on("session_shutdown", (_, ctx) => {
+    chains.interruptAll("Pi session ended");
+    chains.dispose();
+    stopTaskWidget(ctx);
     if (plan?.tools) pi.setActiveTools(plan.tools);
   });
 
   pi.on("before_agent_start", () => plan ? {
-    message: { customType: "monty-plan-context:v1", display: false,
-      content: `[MONTY PLAN MODE]\nPlan task ${plan.key}: ${plan.title}. Explore read-only and return a numbered Plan: section. Do not implement or mutate local or remote state.` }
+    message: {
+      customType: "monty-plan-context:v1", display: false,
+      content: `[MONTY PLAN MODE]\nPlan task ${plan.key}: ${plan.title}. Explore read-only and return a numbered Plan: section. Do not implement or mutate local or remote state.`,
+    },
   } : undefined);
 
   pi.on("agent_end", async (event, ctx) => {
     if (!plan || busy || !ctx.hasUI) return;
-    const text = msgText([...event.messages].reverse().find(x => x.role === "assistant"));
+    const text = msgText([...event.messages].reverse().find(message => message.role === "assistant"));
     if (!/\bPlan:\s*\n/i.test(text)) return;
     busy = true;
     try {
@@ -549,7 +613,7 @@ export default function monty(pi) {
           pi.sendUserMessage(note.trim());
         }
       }
-    } catch (e) { ctx.ui.notify(e.message, "error"); }
+    } catch (error) { ctx.ui.notify(error.message, "error"); }
     finally { busy = false; }
   });
 }

@@ -13,7 +13,7 @@ The head butler and worker agents decide what work should be done.
 Monty makes that work repeatable, inspectable, resumable, and safe.
 
 Monty owns operational mechanics such as repo-scoped worktree selection, durable job state, lifecycle commands, and versioned Pi-facing descriptors.
-Pi owns agent interaction, native session navigation, and subagent runtime orchestration.
+Pi owns agent interaction and child-session execution, while Monty owns the fixed chain's deterministic phase transitions.
 The model owns planning, judgment, and implementation choices.
 Monty must not duplicate Pi session or run state in its durable schema.
 
@@ -26,13 +26,16 @@ Workers execute focused tasks, keep durable notes, and report back through their
 A worker must be able to start from its context file and Monty instructions without reading the full planning conversation.
 The head butler must be able to inspect current work without entering every worker session.
 
-The bundled Pi extension keeps one head-butler session and cwd-bound task subsessions inside the same Pi process.
-It owns task selection, read-only plan mode, session links, minimal location UI, and reliable return navigation.
-Monty exposes versioned task and entry JSON, while Pi session paths remain in Pi custom entries rather than `job.json`.
+The bundled Pi extension keeps one permanent head-butler session and attaches task monitors to it without replacing the active Pi session.
+It owns task selection, read-only plan mode, monitor links, minimal location UI, and legacy task-session recovery.
+Every child receives the selected task's validated Monty-owned worktree as its explicit RPC cwd.
+TintinWeb agents run in process and are aborted by Pi session replacement, so Monty rejects unrelated session switches while one of its chains is active.
+TintinWeb FleetView and Monty's task overlay expose live conversations without transferring ownership of the parent session.
+Monty exposes versioned task and workflow JSON, while Pi runtime links remain in Pi custom entries rather than `job.json`.
 
 Headless execution supplies the extension's task chains and remains available as a direct CLI workflow.
-Monty generates complete arguments for the harness's existing subagent tool and RPC, and gives every child a Monty-owned repo-scoped worktree rather than requesting a Pi-managed worktree.
-The extension is an adapter over Pi and Monty, not a second agent runtime.
+`monty_headless_chain` atomically claims a prepared worker, consumes Monty's complete internal workflow descriptor, and sequences TintinWeb RPC protocol 2 calls without requesting package-managed worktrees.
+The extension is a deterministic workflow adapter over Pi, TintinWeb, and Monty, not a second child-agent runtime.
 Each task chain uses a fresh implementer, two mutually isolated fresh reviewers in parallel, and a fresh fixer.
 Separate task chains are independent and may run concurrently while the user plans in the head session.
 Reviewers can write their assigned reports outside the worktree but must otherwise remain read-only.
@@ -77,10 +80,10 @@ Launch-state updates must compare the expected durable source state under the ho
 No durable state claims process liveness.
 
 Headless dispatch uses only `prepared` and `launch-requested` in its normal path.
-Preparation reserves every batch identity before external worktree calls and leaves workers `prepared` until their exact subagent request is ready.
-The head butler must confirm that the harness exposes the subagent tool before preparation mutates Monty state.
+Preparation reserves every batch identity before external worktree calls and leaves workers `prepared` until their exact chain request is ready.
+The head butler must confirm that the harness exposes `monty_headless_chain` before preparation mutates Monty state.
 A pre-dispatch failure stays `prepared` and is safe to retry.
-Monty atomically claims one worker as `launch-requested` and emits the complete harness arguments immediately before the head butler invokes that tool.
+The tool invokes Monty's atomic claim immediately before TintinWeb spawn and consumes the resulting workflow descriptor internally.
 Any later ambiguity requires an explicit successor-chain resume and must never trigger automatic replay.
 A completed headless chain remains open and `launch-requested` until the user intentionally runs the existing completion lifecycle.
 Pi run IDs, backend choice, and runtime status remain ephemeral and never enter `job.json`.
@@ -140,8 +143,9 @@ monty done
 monty done --force
 ```
 
-The `monty headless prepare-many`, `begin`, and `resume` commands form a versioned harness protocol rather than a second public lifecycle.
-`begin` and `resume` emit complete arguments for the existing subagent tool, so the head butler does not reconstruct chain JSON by hand.
+The `monty headless prepare-many`, `begin`, and `resume` commands form a versioned adapter protocol rather than a second public lifecycle.
+The normal Pi flow calls `monty_headless_chain` with a worker ID, and the tool invokes `begin` or an explicitly requested `resume` itself.
+Low-level commands emit complete internal workflow descriptors, not replayable model tool calls.
 Ghostty remains the default behavior of the existing public commands.
 
 Lifecycle commands should be designed as stable product surfaces.
@@ -150,7 +154,9 @@ They are used by humans, the head butler, and worker sessions.
 ## Pi invocation is a product surface
 
 `monty start` loads the bundled process-wide Pi extension and records the exact head session through a Pi custom entry.
-The extension may switch among persisted task subsessions, but it must never persist Pi session paths, process IDs, run IDs, or fleet state in Monty's durable lifecycle schema.
+New native task flows keep that head session active and represent task selection plus chain progress through Pi custom entries.
+Legacy task subsessions may switch back to the recorded head only when no Monty chain is active.
+The extension must never persist Pi session paths, process IDs, run IDs, or fleet state in Monty's durable lifecycle schema.
 A task chain launched from the head stays asynchronous so it can continue while the user plans another task.
 
 Monty commands must be easy for pi to invoke from natural language instructions.
@@ -201,7 +207,7 @@ Complete preflight rejects any invalid or colliding batch before the first side 
 Required dependencies are configuration-aware.
 Doctor exits nonzero for FAIL and zero for PASS/WARN-only results.
 
-Tests should cover state transitions, parsing behavior, lifecycle commands, repo disambiguation, concurrent writers, atomic-write faults, deterministic reconciliation, whole-batch validation, partial launch recovery, headless claim boundaries, generated harness arguments, isolated reviewer construction, and CLI exit contracts.
+Tests should cover state transitions, parsing behavior, lifecycle commands, repo disambiguation, concurrent writers, atomic-write faults, deterministic reconciliation, whole-batch validation, partial launch recovery, headless claim boundaries, generated workflow descriptors, isolated reviewer construction, and CLI exit contracts.
 Checkout-binary E2E tests should use isolated homes, fake external tools, reliable cleanup, and real temporary Git repositories when identity matters.
 
 Monty controls sessions, files, worktrees, and branches.

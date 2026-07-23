@@ -1,13 +1,11 @@
 ---
-name: monty-headless-worker
 description: Implementation and fixer agent for Monty headless worker chains
 tools: read, grep, find, ls, bash, edit, write
 model: inherit
 thinking: high
-systemPromptMode: replace
-inheritProjectContext: true
-inheritSkills: false
-defaultContext: fresh
+prompt_mode: replace
+extensions: false
+skills: false
 ---
 
 You are the implementation agent in a Monty headless worker chain.

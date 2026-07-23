@@ -2587,26 +2587,34 @@ let test_headless_prepare_begin_and_resume () =
       in
       if not (List.mem begun_worktree worktrees) then
         failwith "headless begin returned an unexpected worktree";
-      let harness_call = Yojson.Safe.Util.(dispatch |> member "harness_call") in
-      if Yojson.Safe.Util.(harness_call |> member "tool" |> to_string) <> "subagent"
-      then failwith "headless begin did not target the harness subagent tool";
-      let chain =
-        Yojson.Safe.Util.(harness_call |> member "arguments" |> member "chain" |> to_list)
-      in
-      let reviewers =
-        Yojson.Safe.Util.(List.nth chain 1 |> member "parallel" |> to_list)
-      in
-      let children = List.nth chain 0 :: reviewers @ [ List.nth chain 2 ] in
+      if Yojson.Safe.Util.(dispatch |> member "harness_call") <> `Null then
+        failwith "headless begin exposed a replayable model tool call";
+      let workflow = Yojson.Safe.Util.(dispatch |> member "workflow") in
+      if
+        Yojson.Safe.Util.(workflow |> member "schema" |> to_string)
+        <> Headless.workflow_schema
+      then failwith "headless begin returned the wrong workflow schema";
+      if
+        Yojson.Safe.Util.(workflow |> member "backend" |> to_string)
+        <> "@tintinweb/pi-subagents"
+      then failwith "headless begin returned the wrong subagent backend";
+      let reviewers = Yojson.Safe.Util.(workflow |> member "reviews" |> to_list) in
+      if List.length reviewers <> 2 then
+        failwith "headless workflow did not contain two parallel reviewers";
+      let implementation = Yojson.Safe.Util.member "implementation" workflow in
+      let fixer = Yojson.Safe.Util.member "fixer" workflow in
+      if Yojson.Safe.Util.(implementation |> member "agent" |> to_string)
+         <> "monty-headless-worker"
+      then failwith "headless workflow used the wrong implementation agent";
+      if Yojson.Safe.Util.(fixer |> member "agent" |> to_string)
+         <> "monty-headless-worker"
+      then failwith "headless workflow used the wrong fixer agent";
       List.iter
-        (fun child ->
-          let acceptance = Yojson.Safe.Util.member "acceptance" child in
-          if Yojson.Safe.Util.(acceptance |> member "level" |> to_string) <> "none"
-          then failwith "headless child did not explicitly disable inferred acceptance";
-          if
-            Yojson.Safe.Util.(acceptance |> member "reason" |> to_string)
-            <> Headless.acceptance_reason
-          then failwith "headless child acceptance reason did not identify the review gate")
-        children;
+        (fun reviewer ->
+          if Yojson.Safe.Util.(reviewer |> member "agent" |> to_string)
+             <> "monty-headless-reviewer"
+          then failwith "headless workflow used the wrong reviewer agent")
+        reviewers;
       if job_status (job_file "headless-one") <> "launch-requested" then
         failwith "headless begin did not claim its worker";
       if job_status (job_file "headless-two") <> "prepared" then
