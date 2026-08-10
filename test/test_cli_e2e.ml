@@ -2548,10 +2548,19 @@ let test_headless_prepare_begin_and_resume () =
       let chain =
         Yojson.Safe.Util.(harness_call |> member "arguments" |> member "chain" |> to_list)
       in
+      let implementation = List.nth chain 0 in
+      let implementation_task =
+        Yojson.Safe.Util.(implementation |> member "task" |> to_string)
+      in
+      let worktree_setup =
+        "You are in a new worktree. Install the project in this worktree before starting the task. Do not create or use symlinks into the main repository."
+      in
+      if not (String.starts_with ~prefix:worktree_setup implementation_task) then
+        failwith "headless implementation task did not start with worktree setup";
       let reviewers =
         Yojson.Safe.Util.(List.nth chain 1 |> member "parallel" |> to_list)
       in
-      let children = List.nth chain 0 :: reviewers @ [ List.nth chain 2 ] in
+      let children = implementation :: reviewers @ [ List.nth chain 2 ] in
       List.iter
         (fun child ->
           let acceptance = Yojson.Safe.Util.member "acceptance" child in

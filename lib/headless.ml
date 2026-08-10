@@ -51,7 +51,8 @@ let mutation_prohibitions =
 
 let implementation_task (dispatch : dispatch) =
   String.concat "\n\n"
-    [ Printf.sprintf "Implement Monty worker %s: %s." dispatch.id dispatch.title;
+    [ "You are in a new worktree. Install the project in this worktree before starting the task. Do not create or use symlinks into the main repository.";
+      Printf.sprintf "Implement Monty worker %s: %s." dispatch.id dispatch.title;
       "Read only the supplied Monty instructions and task context before inspecting the repository.";
       "You are the only writer in this phase.";
       "Implement the requested scope completely and follow repository-local instructions.";
