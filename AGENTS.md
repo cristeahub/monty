@@ -50,7 +50,7 @@ Create `.monty/runs/<run-id>/jobs.json` with this shape:
 The `branch` field is optional.
 Prefer setting it when the issue number or task name gives a clear branch name.
 Use the configured branch prefix for branch names.
-The default prefix is `monty`, but users may set `MONTY_BRANCH_PREFIX`, for example `cto`.
+The default prefix is `monty`, but users may persist another value with `monty settings set branch-prefix <prefix>` or use the `MONTY_BRANCH_PREFIX` fallback, for example `cto`.
 When omitting `branch`, Monty derives `<branch-prefix>/<title-slug>` automatically.
 Create or sync a local task for every worker before launch so the local task registry remains the source of truth.
 Set `task_key` for workers launched from local tasks, for example `local:local-001`.
@@ -183,7 +183,7 @@ Any FAIL exits nonzero and must be resolved before relying on launch or lifecycl
 The implementation is OCaml built with Dune.
 Use Dune package management and dependencies in `dune-project`.
 Do not add opam files.
-Use Ghostty as the default terminal backend. Use `monty settings set harness pi|codex` to persist the default agent harness; `--harness` remains the per-command override.
+Use Ghostty as the default terminal backend. Use `monty settings set harness pi|codex` to persist the default agent harness; `--harness` remains the per-command override. Use `monty settings set branch-prefix <prefix>` to persist the default generated-branch prefix; `--branch-prefix` remains the per-command override.
 Use `monty settings set codex-yolo true|false` to control whether Monty-launched Codex sessions bypass approvals and sandboxing. Treat the enabled value as an explicit high-risk user choice.
 Keep headless state and payload generation in Monty, while execution uses the harness's existing subagent tool.
 Do not add a Monty-specific Pi extension or a new persisted backend.
