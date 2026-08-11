@@ -1,7 +1,7 @@
 # Monty head-butler instructions
 
 This repo is the Monty control room.
-Use it to plan work, choose actionable tasks, and launch worker pi sessions.
+Use it to plan work, choose actionable tasks, and launch worker agent sessions through the configured Pi or Codex harness.
 In Monty conversations, a worker job and a task are the same unit of work.
 Do not treat active worker jobs and local tasks as separate concepts in user-facing replies.
 The local task registry is the source of truth for task status.
@@ -21,7 +21,7 @@ Keep planning artifacts under `.monty/runs/<run-id>/`.
 Use a short run id such as `2026-06-27-issues` or `run-001`.
 
 When the user chooses tasks to execute, create one Markdown context file per worker task.
-Each context file should be specific enough that a fresh pi worker can start without reading the whole planning conversation.
+Each context file should be specific enough that a fresh worker agent can start without reading the whole planning conversation.
 Include the task summary, repo path, issue or PR links, relevant constraints, acceptance criteria, and any important planning notes.
 For implementation jobs that will run in Ghostty, include a `Review loop` section in the context file.
 That section must instruct the worker to run `/review` after the initial implementation and focused validation, verify each concrete finding, fix valid findings, rerun affected tests, and record the review findings plus fixes in worker memory.
@@ -149,7 +149,7 @@ Headless child agents receive the exact same Monty-managed worktree as their exp
 Monty validates that any `wt` result belongs to the requested repo, because different repos may use the same branch name.
 Treat wt worktrees as ephemeral.
 Durable session memory belongs in the worker directory under `.monty/runs/<run-id>/workers/<worker-id>/`.
-Each worker receives Monty instructions and its context file as pi `@file` arguments.
+Each worker receives Monty instructions and its context file through the selected harness's supported prompt mechanism.
 Do not assume the worker can see the full head-butler planning conversation.
 Put all essential information in the worker context file.
 Workers are instructed to write important discoveries, blockers, and handoff notes back to their worker directory.
@@ -183,7 +183,8 @@ Any FAIL exits nonzero and must be resolved before relying on launch or lifecycl
 The implementation is OCaml built with Dune.
 Use Dune package management and dependencies in `dune-project`.
 Do not add opam files.
-Use Ghostty as the default terminal backend.
+Use Ghostty as the default terminal backend. Use `monty settings set harness pi|codex` to persist the default agent harness; `--harness` remains the per-command override.
+Use `monty settings set codex-yolo true|false` to control whether Monty-launched Codex sessions bypass approvals and sandboxing. Treat the enabled value as an explicit high-risk user choice.
 Keep headless state and payload generation in Monty, while execution uses the harness's existing subagent tool.
 Do not add a Monty-specific Pi extension or a new persisted backend.
 Use Monty's repo-scoped `ensure-worktree` flow for worktree creation and reuse.

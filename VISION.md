@@ -1,7 +1,7 @@
 # Monty development vision
 
 Monty is the control room for AI-directed development work.
-Pi and the model decide what should happen, while Monty provides deterministic lifecycle commands, durable state, repo-scoped worktree handling, and session launch plumbing.
+The selected agent harness and model decide what should happen, while Monty provides deterministic lifecycle commands, durable state, repo-scoped worktree handling, and session launch plumbing.
 The goal is to make AI development work parallel, resumable, inspectable, and safe.
 This document records the ground truths we follow when extending Monty, including when Monty is used to extend itself.
 
@@ -13,7 +13,7 @@ The head butler and worker agents decide what work should be done.
 Monty makes that work repeatable, inspectable, resumable, and safe.
 
 Monty owns operational mechanics such as terminal launch, repo-scoped worktree selection, durable job state, and lifecycle commands.
-Pi owns agent interaction, natural language execution, and subagent runtime orchestration.
+Pi or Codex owns agent interaction and natural language execution. Harness-specific adapters own runtime invocation and orchestration syntax.
 The model owns planning, judgment, and implementation choices.
 Monty must not duplicate Pi run state in its durable schema.
 
@@ -140,9 +140,9 @@ Ghostty remains the default behavior of the existing public commands.
 Lifecycle commands should be designed as stable product surfaces.
 They are used by humans, the head butler, and worker sessions.
 
-## Pi invocation is a product surface
+## Agent harness invocation is a product surface
 
-Monty commands must be easy for pi to invoke from natural language instructions.
+Monty commands must be easy for Pi and Codex to invoke from natural language instructions.
 Generated worker `MONTY.md` files are part of the product.
 They tell worker sessions what Monty commands mean and when to run them.
 
@@ -199,7 +199,8 @@ We need confidence before automation expands.
 ## Configuration should be explicit and environment-friendly
 
 Monty should support both flags and environment variables.
-Important settings include `MONTY_HOME`, `MONTY_BRANCH_PREFIX`, `MONTY_WT_COMMAND`, `MONTY_PI_COMMAND`, and terminal backend options.
+Important settings include `MONTY_HOME`, `MONTY_BRANCH_PREFIX`, `MONTY_HARNESS`, `MONTY_WT_COMMAND`, `MONTY_PI_COMMAND`, `MONTY_CODEX_COMMAND`, `MONTY_CODEX_YOLO`, and terminal backend options.
+Persisted user defaults belong in `.monty/settings.json` and are managed through `monty settings`; their mutations use the same one-home lock and atomic replacement path as other Monty JSON state.
 
 Monty is used from development checkouts and installed wrappers.
 Its behavior must be predictable in both contexts.
