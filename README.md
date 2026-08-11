@@ -1,17 +1,17 @@
 # monty, the head butler
 
-Monty is a small OCaml launcher for running a head pi session that plans work and spins out worker pi sessions.
+Monty is a small OCaml launcher for running a head agent session that plans work and spins out Pi or Codex worker sessions.
 Ghostty tabs, windows, and splits remain the default execution surface.
 An optional head-butler workflow can instead run workers through the harness's existing Pi subagent tool without opening Ghostty.
 The model does the planning.
-Monty handles the glue around Ghostty, `wt`, worktrees, manifests, Pi subagents, and `pi` startup commands.
+Monty handles the glue around Ghostty, `wt`, worktrees, manifests, agent harnesses, and startup commands.
 
 ## Requirements
 
 - OCaml with Dune 3.20 or newer.
 - Dune package management, with dependencies declared in `dune-project`.
 - No opam files are used by this repo.
-- `pi` on `PATH`.
+- `pi` or `codex` on `PATH`, matching the selected harness.
 - The `pi-subagents` package enabled when using headless chains.
 - `wt` on `PATH`.
 - Ghostty on macOS for normal launching.
@@ -46,7 +46,7 @@ Existing unversioned state is adopted as version `1` without deleting it.
 If an existing version does not match, the installer warns that it will delete the current `.monty` folder and requires interactive confirmation or the explicit `--replace-state` option.
 It also writes `MONTY_HOME=~/.local/share/monty` and `MONTY_BRANCH_PREFIX=monty` to your shell startup file, such as `~/.zshrc`.
 If that file already has a non-Monty-managed `MONTY_HOME` setting, the installer asks before overriding it.
-The wrapper pins `MONTY_HOME` and `MONTY_BRANCH_PREFIX` on every invocation, so running `monty` from any directory starts pi in the installed Monty control room and uses the configured worker branch prefix.
+The wrapper pins `MONTY_HOME` and `MONTY_BRANCH_PREFIX` on every invocation, so running `monty` from any directory uses the installed Monty control room and configured worker branch prefix.
 Use another prefix with:
 
 ```sh
@@ -91,11 +91,21 @@ After installation, run:
 monty
 ```
 
-This changes to the Monty control-room directory and runs:
+With the default Pi harness, this changes to the Monty control-room directory and runs:
 
 ```sh
 pi --name "Monty Head Butler"
 ```
+
+Select Codex for one invocation with `monty --harness codex`, or persist it as
+the Monty default with:
+
+```sh
+monty settings set harness codex
+```
+
+Inspect settings with `monty settings` or read just this value with
+`monty settings get harness`.
 
 ## Launch one worker
 
@@ -110,7 +120,7 @@ By default Monty creates or reuses a repo-scoped worktree for the requested bran
 Monty asks `wt`, validates that the returned worktree belongs to the requested repo, and automatically answers `wt`'s repo-selection prompt when multiple repos have the same branch name.
 The generated worker launch script reruns `monty ensure-worktree --repo <repo> --branch <branch>` when the terminal starts, so the correct worktree can be recreated if it was deleted after launch.
 Durable worker memory lives under Monty home, not in the wt worktree.
-The worker receives both Monty instructions and the context file as pi `@file` arguments.
+The worker receives both Monty instructions and the context file through the selected harness. Pi uses `@file` arguments; Codex receives a prompt containing the absolute input and durable-memory paths.
 
 ## Launch many workers
 
@@ -238,7 +248,7 @@ Resume a worker by id, branch leaf, branch, or title slug:
 dune exec -- monty resume issue-123
 ```
 
-`resume` reads `job.json`, recreates or reuses the repo-scoped worktree, and opens a new pi session with the same durable worker memory.
+`resume` reads `job.json`, recreates or reuses the repo-scoped worktree, and opens a new session in the selected harness with the same durable worker memory.
 Resume always derives worktree mode from the durable record rather than a current CLI default, so a `never` worker cannot accidentally create an unmanaged worktree.
 Open jobs are found from worker `job.json` files.
 The original `jobs.json` manifest is launch input and a safe batch-retry contract.
@@ -395,7 +405,9 @@ The most important options are available as CLI flags.
 --target tab|window|split
 --worktree always|never
 --branch-prefix PREFIX
+--harness pi|codex
 --pi-command COMMAND
+--codex-command COMMAND
 --wt-command COMMAND
 --fork SESSION
 --home DIR
@@ -408,7 +420,10 @@ MONTY_TERMINAL=ghostty
 MONTY_TARGET=tab
 MONTY_WORKTREE=always
 MONTY_BRANCH_PREFIX=cto
+MONTY_HARNESS=codex
 MONTY_PI_COMMAND=pi
+MONTY_CODEX_COMMAND=codex
+MONTY_CODEX_YOLO=false
 MONTY_WT_COMMAND=wt
 MONTY_HOME=/path/to/monty
 ```
@@ -420,12 +435,62 @@ dune exec -- monty doctor
 ```
 
 Doctor prints a stable table with `PASS`, `WARN`, and `FAIL` levels plus exact recovery commands.
-The configured pi command is required.
+The configured command for the selected Pi or Codex harness is required.
 The configured wt command is required only when worktree mode is `always`.
 Ghostty and `osascript` are required only for the Ghostty backend.
 Optional integrations such as `gh` and `sdef` produce warnings when unavailable.
 Doctor also inspects durable worker state for corruption, incomplete lifecycle transitions, and pending launch states.
 It exits zero when checks contain only PASS and WARN, and exits nonzero when any FAIL is present.
+
+## Settings
+
+Monty stores user-controlled defaults in `.monty/settings.json` under
+`MONTY_HOME`. Show the effective persisted settings with:
+
+```sh
+monty settings
+```
+
+Read or change the default harness with:
+
+```sh
+monty settings get harness
+monty settings set harness codex
+monty settings set harness pi
+```
+
+Enable Codex YOLO mode for Monty-launched Codex sessions with:
+
+```sh
+monty settings set codex-yolo true
+```
+
+Disable it again with:
+
+```sh
+monty settings set codex-yolo false
+```
+
+When enabled, Monty adds
+`--dangerously-bypass-approvals-and-sandbox` to Codex head-butler and worker
+commands. This disables both approval prompts and the Codex sandbox, so only
+enable it when the surrounding environment provides the isolation you need.
+
+Monty also pins `model_reasoning_effort="xhigh"` with a Codex `-c` override for
+every Codex head-butler, launch, and resume command. This takes precedence over
+a lower effort configured in the user's global Codex configuration.
+
+Harness selection uses this precedence:
+
+1. `--harness pi|codex`
+2. `MONTY_HARNESS`
+3. The persisted `harness` setting
+4. The Pi compatibility default
+
+For Codex YOLO mode, `--codex-yolo` overrides `MONTY_CODEX_YOLO`, which
+overrides the persisted `codex-yolo` setting. It defaults to `false`.
+
+Settings mutations use Monty's state lock and atomic JSON replacement.
 
 ## Durable state safety
 

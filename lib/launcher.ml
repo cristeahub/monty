@@ -3,7 +3,9 @@ type worktree_mode = Always | Never
 type options = {
   backend : Terminal.backend;
   target : Terminal.target;
-  pi_command : string;
+  harness : Harness.t;
+  harness_command : string;
+  codex_yolo : bool;
   wt_command : string;
   worktree_mode : worktree_mode;
   branch_prefix : string;
@@ -93,7 +95,17 @@ let check_worktree_dependency options =
   | Always -> check_dependency "wt" options.wt_command
 
 let check_dependencies options =
-  let* () = check_dependency "pi" options.pi_command in
+  let* () =
+    match (Harness.supports_fork options.harness, options.fork) with
+    | false, Some _ ->
+        Error
+          (Printf.sprintf "the %s harness does not support --fork"
+             (Harness.to_string options.harness))
+    | _ -> Ok ()
+  in
+  let* () =
+    check_dependency (Harness.to_string options.harness) options.harness_command
+  in
   let* () = check_worktree_dependency options in
   match options.backend with
   | Terminal.Dry_run -> Ok ()
@@ -199,16 +211,18 @@ let same_record prepared (record : Job_store.record) =
 
 let script_has_owner_marker (options : options) (prepared : prepared) path =
   try
-    let pi_options =
-      Pi_command.
-        { pi_command = options.pi_command;
+    let harness_options =
+      Harness_command.
+        { harness = options.harness;
+          command = options.harness_command;
+          codex_yolo = options.codex_yolo;
           fork = options.fork;
           script_dir = options.script_dir;
           branch_prefix = options.branch_prefix;
           monty_command = options.monty_command }
     in
     let expected =
-      Pi_command.launch_script_contents ~options:pi_options
+      Harness_command.launch_script_contents ~options:harness_options
         ~job:prepared.job ~id:prepared.id ~branch:prepared.branch
         ~source_repo:prepared.repo ~initial_workdir:prepared.repo
         ~context:prepared.context ~instructions:prepared.instructions
@@ -840,16 +854,19 @@ let dry_run options (prepared : prepared) =
   Fmt.pr "[dry-run] terminal: %s %s\n"
     (Terminal.backend_to_string options.backend)
     (Terminal.target_to_string options.target);
-  let pi_options =
-    Pi_command.
-      { pi_command = options.pi_command;
+  let harness_options =
+    Harness_command.
+      { harness = options.harness;
+        command = options.harness_command;
+        codex_yolo = options.codex_yolo;
         fork = options.fork;
         script_dir = options.script_dir;
         branch_prefix = options.branch_prefix;
         monty_command = options.monty_command }
   in
-  Fmt.pr "[dry-run] pi: %s\n"
-    (Pi_command.build_command ~options:pi_options
+  Fmt.pr "[dry-run] harness: %s\n" (Harness.to_string options.harness);
+  Fmt.pr "[dry-run] command: %s\n"
+    (Harness_command.build_command ~options:harness_options
        ~instructions:(Some prepared.instructions) ~job:prepared.job
        ~context:prepared.context)
 
@@ -916,9 +933,11 @@ let mark_failed options (prepared : prepared) ~expected_statuses message =
       Printf.sprintf "%s; additionally failed to persist launch-failed: %s" message
         persist_error
 
-let pi_options (options : options) =
-  Pi_command.
-    { pi_command = options.pi_command;
+let harness_options (options : options) =
+  Harness_command.
+    { harness = options.harness;
+      command = options.harness_command;
+      codex_yolo = options.codex_yolo;
       fork = options.fork;
       script_dir = options.script_dir;
       branch_prefix = options.branch_prefix;
@@ -953,8 +972,8 @@ let begin_request ?(persist_failure = true) ?(write_script = true) options
         else
           try
             ignore
-              (Pi_command.write_launch_script ~path:prepared.script_path
-                 ~options:(pi_options options) ~job:prepared.job ~id:prepared.id
+              (Harness_command.write_launch_script ~path:prepared.script_path
+                 ~options:(harness_options options) ~job:prepared.job ~id:prepared.id
                  ~branch:prepared.branch ~source_repo:prepared.repo
                  ~initial_workdir ~context:prepared.context
                  ~instructions:prepared.instructions
@@ -1007,9 +1026,14 @@ let common_retry_options options =
        "--target"; Terminal.target_to_string options.target;
        "--worktree"; worktree_mode_string options;
        "--branch-prefix"; Shell.quote options.branch_prefix;
-       "--pi-command"; Shell.quote options.pi_command;
+       "--harness"; Harness.to_string options.harness;
+       (match options.harness with Harness.Pi -> "--pi-command" | Harness.Codex -> "--codex-command");
+       Shell.quote options.harness_command;
        "--wt-command"; Shell.quote options.wt_command;
        "--script-dir"; Shell.quote options.script_dir ]
+    @ (if options.harness = Harness.Codex && options.codex_yolo then
+         [ "--codex-yolo" ]
+       else [])
     @
     match options.fork with
     | None -> []

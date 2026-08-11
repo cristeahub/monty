@@ -164,13 +164,16 @@ let state_checks ~home ~wt_command =
         [ { name = "worker state"; level = Pass; message = "records are readable and no recovery is pending"; recovery = [] } ]
       else warning_checks @ identity_checks @ record_checks
 
-let checks ?(operations = default_operations) ~home ~pi_command ~wt_command ~backend
+let checks ?(operations = default_operations) ~home ~harness ~harness_command ~wt_command ~backend
     ~worktree_mode () =
   let home = Shell.normalize (Shell.abs_path home) in
   let required =
     [
-      check_command operations ~required:true ~name:"pi" ~command:pi_command
-        ~recovery:[ "Install the configured pi executable or pass --pi-command COMMAND." ];
+      check_command operations ~required:true ~name:(Harness.to_string harness)
+        ~command:harness_command
+        ~recovery:
+          [ Printf.sprintf "Install the configured %s executable or pass --%s-command COMMAND."
+              (Harness.to_string harness) (Harness.to_string harness) ];
     ]
   in
   let required =
@@ -227,7 +230,9 @@ let render checks =
 let exit_code checks =
   if List.exists (fun check -> check.level = Fail) checks then 1 else 0
 
-let run ~home ~pi_command ~wt_command ~backend ~worktree_mode =
-  let checks = checks ~home ~pi_command ~wt_command ~backend ~worktree_mode () in
+let run ~home ~harness ~harness_command ~wt_command ~backend ~worktree_mode =
+  let checks =
+    checks ~home ~harness ~harness_command ~wt_command ~backend ~worktree_mode ()
+  in
   Fmt.pr "%s" (render checks);
   if exit_code checks = 0 then Ok () else Error "doctor found failing checks"
