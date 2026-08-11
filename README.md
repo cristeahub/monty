@@ -46,7 +46,7 @@ Existing unversioned state is adopted as version `1` without deleting it.
 If an existing version does not match, the installer warns that it will delete the current `.monty` folder and requires interactive confirmation or the explicit `--replace-state` option.
 It also writes `MONTY_HOME=~/.local/share/monty` and `MONTY_BRANCH_PREFIX=monty` to your shell startup file, such as `~/.zshrc`.
 If that file already has a non-Monty-managed `MONTY_HOME` setting, the installer asks before overriding it.
-The wrapper pins `MONTY_HOME` and `MONTY_BRANCH_PREFIX` on every invocation, so running `monty` from any directory uses the installed Monty control room and configured worker branch prefix.
+The wrapper pins `MONTY_HOME` and provides `MONTY_BRANCH_PREFIX` as an install-time fallback on every invocation, so running `monty` from any directory uses the installed Monty control room. A persisted `branch-prefix` setting takes precedence over that fallback.
 Use another prefix with:
 
 ```sh
@@ -149,7 +149,7 @@ Example manifest:
 The manifest can also omit `branch`.
 Monty then derives a safe branch name from the title using the branch prefix.
 The default is `monty`, so `Fix issue 123` becomes `monty/fix-issue-123` for one launch or `monty/01-fix-issue-123` in `launch-many`.
-With `--branch-prefix cto` or `MONTY_BRANCH_PREFIX=cto`, the same task becomes `cto/fix-issue-123` or `cto/01-fix-issue-123`.
+With `monty settings set branch-prefix cto`, `--branch-prefix cto`, or `MONTY_BRANCH_PREFIX=cto`, the same task becomes `cto/fix-issue-123` or `cto/01-fix-issue-123`.
 A manifest entry can include `task_key` to link a worker to a Monty-owned local task.
 When `monty done` archives that worker, it also marks the linked local task done.
 Ordinary launch and reconciliation use only explicit task keys and stable repo, branch, and worker identities.
@@ -459,6 +459,13 @@ monty settings set harness codex
 monty settings set harness pi
 ```
 
+Set the prefix for automatically generated worker branches with:
+
+```sh
+monty settings get branch-prefix
+monty settings set branch-prefix cto
+```
+
 Enable Codex YOLO mode for Monty-launched Codex sessions with:
 
 ```sh
@@ -489,6 +496,16 @@ Harness selection uses this precedence:
 
 For Codex YOLO mode, `--codex-yolo` overrides `MONTY_CODEX_YOLO`, which
 overrides the persisted `codex-yolo` setting. It defaults to `false`.
+
+Branch-prefix selection uses this precedence:
+
+1. `--branch-prefix PREFIX`
+2. The persisted `branch-prefix` setting
+3. `MONTY_BRANCH_PREFIX`
+4. The `monty` default
+
+The persisted setting precedes the environment fallback because installed
+wrappers export their install-time branch prefix on every invocation.
 
 Settings mutations use Monty's state lock and atomic JSON replacement.
 

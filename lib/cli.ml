@@ -111,8 +111,8 @@ let worktree_arg =
   Cmdliner.Arg.(value & opt worktree_conv (worktree_default getenv) & info [ "worktree" ] ~docv:"MODE" ~doc)
  in
 let branch_prefix_arg =
-  let doc = "Prefix for automatically generated worktree branches. Defaults to MONTY_BRANCH_PREFIX or monty." in
-  Cmdliner.Arg.(value & opt string (env_default getenv "MONTY_BRANCH_PREFIX" "monty") & info [ "branch-prefix" ] ~docv:"PREFIX" ~doc)
+  let doc = "Prefix for automatically generated worktree branches. Overrides the persisted setting, MONTY_BRANCH_PREFIX fallback, and monty default." in
+  Cmdliner.Arg.(value & opt (some string) None & info [ "branch-prefix" ] ~docv:"PREFIX" ~doc)
  in
 let fork_arg =
   let doc = "Optional Pi session id or path to fork. Unsupported by Codex." in
@@ -130,13 +130,16 @@ let monty_command () =
     | None -> Shell.normalize (Shell.abs_path executable)
   else Shell.normalize (Shell.abs_path executable)
  in
-let options backend target harness_override codex_yolo_override pi_command codex_command wt_command worktree_mode branch_prefix fork home script_dir =
+let options backend target harness_override codex_yolo_override pi_command codex_command wt_command worktree_mode branch_prefix_override fork home script_dir =
   let ( let* ) = Result.bind in
   let* harness =
     Settings.effective_harness ~getenv ~home harness_override
   in
   let* codex_yolo =
     Settings.effective_codex_yolo ~getenv ~home codex_yolo_override
+  in
+  let* branch_prefix =
+    Settings.effective_branch_prefix ~getenv ~home branch_prefix_override
   in
   let script_dir =
     match script_dir with
@@ -165,8 +168,12 @@ let options_term =
     $ codex_command_arg $ wt_command_arg $ worktree_arg
     $ branch_prefix_arg $ fork_arg $ home_arg $ script_dir_arg)
  in
-let headless_options pi_command wt_command branch_prefix fork home script_dir =
-  Launcher.
+let headless_options pi_command wt_command branch_prefix_override fork home script_dir =
+  let ( let* ) = Result.bind in
+  let* branch_prefix =
+    Settings.effective_branch_prefix ~getenv ~home branch_prefix_override
+  in
+  Ok Launcher.
     { backend = Terminal.Dry_run;
       target = Terminal.Tab;
       harness = Harness.Pi;
@@ -256,15 +263,18 @@ let launch_many_term =
   Cmdliner.Term.(const launch_many $ manifest $ options_term)
  in
 let headless_prepare_many manifest dry_run options =
-  let manifest = Shell.abs_path manifest |> Shell.normalize in
-  match Manifest.load ~home:options.Launcher.home manifest with
-  | Error msg -> exit_code (Error msg)
-  | Ok jobs -> (
-      match Headless.prepare_many ~dry_run options jobs with
+  match options with
+  | Error message -> exit_code (Error message)
+  | Ok options ->
+      let manifest = Shell.abs_path manifest |> Shell.normalize in
+      (match Manifest.load ~home:options.Launcher.home manifest with
       | Error msg -> exit_code (Error msg)
-      | Ok json ->
-          Headless.print_json json;
-          0)
+      | Ok jobs -> (
+          match Headless.prepare_many ~dry_run options jobs with
+          | Error msg -> exit_code (Error msg)
+          | Ok json ->
+              Headless.print_json json;
+              0))
  in
 let headless_prepare_many_term =
   let manifest =
@@ -278,11 +288,14 @@ let headless_prepare_many_term =
   Cmdliner.Term.(const headless_prepare_many $ manifest $ dry_run $ headless_options_term)
  in
 let headless_begin explicit_resume worker options =
-  match Headless.begin_worker ~explicit_resume options worker with
-  | Error msg -> exit_code (Error msg)
-  | Ok json ->
-      Headless.print_json json;
-      0
+  match options with
+  | Error message -> exit_code (Error message)
+  | Ok options -> (
+      match Headless.begin_worker ~explicit_resume options worker with
+      | Error msg -> exit_code (Error msg)
+      | Ok json ->
+          Headless.print_json json;
+          0)
  in
 let headless_worker_term explicit_resume =
   let worker =
@@ -575,6 +588,11 @@ let settings_get key home =
       | "codex-yolo" ->
           Fmt.pr "%s\n" (if settings.Settings.codex_yolo then "true" else "false");
           0
+      | "branch-prefix" ->
+          Fmt.pr "%s\n"
+            (settings.Settings.branch_prefix
+            |> Option.value ~default:"monty");
+          0
       | _ -> exit_code (Error (Printf.sprintf "unknown setting %S" key)))
  in
 let settings_get_term =
@@ -602,6 +620,10 @@ let settings_set key value home =
                  Fmt.pr "codex-yolo = %s\n"
                    (if enabled then "true" else "false"))
           |> exit_code)
+  | "branch-prefix" ->
+      Settings.set_branch_prefix ~home value
+      |> Result.map (fun () -> Fmt.pr "branch-prefix = %s\n" value)
+      |> exit_code
   | _ -> exit_code (Error (Printf.sprintf "unknown setting %S" key))
  in
 let settings_set_term =

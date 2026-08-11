@@ -2640,9 +2640,11 @@ let test_settings_commands_and_effective_harness () =
       let home, _log, env = setup_environment root in
       let initial = run ~root ~env 1950 [ "settings"; "--home"; home ] in
       require_code 0 initial;
-      require_contains "initial harness setting" initial.stdout "harness    pi";
+      require_contains "initial harness setting" initial.stdout "harness       pi";
       require_contains "initial Codex YOLO setting" initial.stdout
-        "codex-yolo false";
+        "codex-yolo    false";
+      require_contains "initial branch prefix setting" initial.stdout
+        "branch-prefix monty";
       let set =
         run ~root ~env 1951
           [ "settings"; "set"; "harness"; "codex"; "--home"; home ]
@@ -2668,6 +2670,19 @@ let test_settings_commands_and_effective_harness () =
       in
       require_code 0 get_yolo;
       require_contains "get Codex YOLO result" get_yolo.stdout "true";
+      let set_branch_prefix =
+        run ~root ~env 19523
+          [ "settings"; "set"; "branch-prefix"; "cto"; "--home"; home ]
+      in
+      require_code 0 set_branch_prefix;
+      require_contains "set branch prefix result" set_branch_prefix.stdout
+        "branch-prefix = cto";
+      let get_branch_prefix =
+        run ~root ~env 19524
+          [ "settings"; "get"; "branch-prefix"; "--home"; home ]
+      in
+      require_code 0 get_branch_prefix;
+      require_contains "get branch prefix result" get_branch_prefix.stdout "cto";
       let settings_path = Filename.concat home ".monty/settings.json" in
       if
         Yojson.Safe.Util.(
@@ -2680,6 +2695,12 @@ let test_settings_commands_and_effective_harness () =
             Yojson.Safe.from_file settings_path |> member "codex_yolo"
             |> to_bool)
       then failwith "settings command did not persist Codex YOLO";
+      if
+        Yojson.Safe.Util.(
+          Yojson.Safe.from_file settings_path |> member "branch_prefix"
+          |> to_string)
+        <> "cto"
+      then failwith "settings command did not persist branch prefix";
       let repo = Filename.concat root "repo" in
       let context = Filename.concat root "context.md" in
       let manifest = Filename.concat home ".monty/runs/settings/jobs.json" in

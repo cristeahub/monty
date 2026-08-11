@@ -1,9 +1,10 @@
 type t = {
   harness : Harness.t option;
   codex_yolo : bool;
+  branch_prefix : string option;
 }
 
-let empty = { harness = None; codex_yolo = false }
+let empty = { harness = None; codex_yolo = false; branch_prefix = None }
 let path ~home = Filename.concat (Filename.concat home ".monty") "settings.json"
 
 let parse json =
@@ -24,7 +25,13 @@ let parse json =
     | `Bool value -> Ok value
     | _ -> Error "settings field \"codex_yolo\" must be a boolean"
   in
-  Ok { harness; codex_yolo }
+  let* branch_prefix =
+    match member "branch_prefix" json with
+    | `Null -> Ok None
+    | `String value -> Ok (Some value)
+    | _ -> Error "settings field \"branch_prefix\" must be a string"
+  in
+  Ok { harness; codex_yolo; branch_prefix }
 
 let load ~home =
   let settings_path = path ~home in
@@ -57,7 +64,11 @@ let to_json settings =
         match settings.harness with
         | None -> `Null
         | Some harness -> `String (Harness.to_string harness) );
-      ("codex_yolo", `Bool settings.codex_yolo) ]
+      ("codex_yolo", `Bool settings.codex_yolo);
+      ( "branch_prefix",
+        match settings.branch_prefix with
+        | None -> `Null
+        | Some branch_prefix -> `String branch_prefix ) ]
 
 let set_harness ~home harness =
   State_store.with_lock ~home (fun () ->
@@ -72,6 +83,13 @@ let set_codex_yolo ~home codex_yolo =
       let* settings = load ~home in
       State_store.write_json_atomic ~path:(path ~home)
         (to_json { settings with codex_yolo }))
+
+let set_branch_prefix ~home branch_prefix =
+  State_store.with_lock ~home (fun () ->
+      let ( let* ) = Result.bind in
+      let* settings = load ~home in
+      State_store.write_json_atomic ~path:(path ~home)
+        (to_json { settings with branch_prefix = Some branch_prefix }))
 
 let effective_harness ~getenv ~home override =
   match override with
@@ -99,13 +117,28 @@ let effective_codex_yolo ~getenv ~home override =
     | Some value when String.trim value <> "" -> bool_of_string value
     | _ -> load ~home |> Result.map (fun settings -> settings.codex_yolo)
 
+let effective_branch_prefix ~getenv ~home override =
+  match override with
+  | Some branch_prefix -> Ok branch_prefix
+  | None ->
+      load ~home
+      |> Result.map (fun settings ->
+             match settings.branch_prefix with
+             | Some branch_prefix -> branch_prefix
+             | None -> (
+                 match getenv "MONTY_BRANCH_PREFIX" with
+                 | Some value when String.trim value <> "" -> value
+                 | _ -> "monty"))
+
 let render settings =
   let harness =
     settings.harness |> Option.value ~default:Harness.Pi |> Harness.to_string
   in
   String.concat "\n"
-    [ "SETTING    VALUE";
-      "---------  -----";
-      "harness    " ^ harness;
-      "codex-yolo " ^ if settings.codex_yolo then "true" else "false" ]
+    [ "SETTING        VALUE";
+      "-------------  -----";
+      "harness       " ^ harness;
+      "codex-yolo    " ^ if settings.codex_yolo then "true" else "false";
+      "branch-prefix "
+      ^ Option.value ~default:"monty" settings.branch_prefix ]
   ^ "\n"

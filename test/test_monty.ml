@@ -725,8 +725,25 @@ let test_cli_factory_injects_environment_and_dispatch () =
   in
   run "one" "dry-run" "split" "never";
   run ~harness:"codex" ~codex_yolo:"true" "two" "ghostty" "window" "always";
+  let settings_home = temp_root "cli-factory-settings" in
+  must (Settings.set_branch_prefix ~home:settings_home "saved-prefix");
+  let settings_values =
+    [ ("MONTY_HOME", settings_home); ("MONTY_TERMINAL", "dry-run") ]
+  in
+  let settings_argv extra =
+    Array.of_list
+      ([ "monty"; "launch"; "--repo"; "/tmp/repo"; "--title";
+         "Settings task"; "--context"; "/tmp/context.md" ]
+      @ extra)
+  in
+  assert_bool "persisted prefix CLI dispatch"
+    (Cli.eval ~getenv:(getenv settings_values) ~operations (settings_argv []) = 0);
+  assert_bool "explicit prefix CLI dispatch"
+    (Cli.eval ~getenv:(getenv settings_values) ~operations
+       (settings_argv [ "--branch-prefix"; "explicit-prefix" ])
+    = 0);
   match List.rev !captured with
-  | [ (one, _); (two, _) ] ->
+  | [ (one, _); (two, _); (saved, _); (explicit, _) ] ->
       assert_contains "factory first home" one.Launcher.home "monty-cli-factory-one";
       assert_contains "factory second home" two.Launcher.home "monty-cli-factory-two";
       assert_bool "factory first harness" (one.harness = Harness.Pi);
@@ -739,13 +756,16 @@ let test_cli_factory_injects_environment_and_dispatch () =
       assert_equal "factory second wt" "wt-two --fixed" two.wt_command;
       assert_equal "factory first prefix" "branch-one" one.branch_prefix;
       assert_equal "factory second prefix" "branch-two" two.branch_prefix;
+      assert_equal "factory persisted prefix" "saved-prefix" saved.branch_prefix;
+      assert_equal "factory explicit prefix" "explicit-prefix"
+        explicit.branch_prefix;
       assert_bool "factory first backend" (one.backend = Terminal.Dry_run);
       assert_bool "factory second backend" (two.backend = Terminal.Ghostty);
       assert_bool "factory first target" (one.target = Terminal.Split);
       assert_bool "factory second target" (two.target = Terminal.Window);
       assert_bool "factory first worktree" (one.worktree_mode = Launcher.Never);
       assert_bool "factory second worktree" (two.worktree_mode = Launcher.Always)
-  | _ -> failwith "injected CLI launch operation was not called twice"
+  | _ -> failwith "injected CLI launch operation was not called four times"
 
 let test_codex_harness_command () =
   let job =
@@ -819,11 +839,16 @@ let test_settings_harness_roundtrip_and_precedence () =
   assert_bool "persisted Codex harness"
     (settings.Settings.harness = Some Harness.Codex);
   assert_bool "Codex YOLO defaults off" (not settings.codex_yolo);
+  assert_bool "branch prefix defaults to absent"
+    (settings.branch_prefix = None);
   must (Settings.set_codex_yolo ~home true);
+  must (Settings.set_branch_prefix ~home "cto");
   let settings = must (Settings.load ~home) in
   assert_bool "persisted Codex YOLO" settings.codex_yolo;
   assert_bool "setting Codex YOLO preserves harness"
     (settings.harness = Some Harness.Codex);
+  assert_bool "persisted branch prefix"
+    (settings.branch_prefix = Some "cto");
   let no_env _ = None in
   assert_bool "persisted harness is effective"
     (must (Settings.effective_harness ~getenv:no_env ~home None)
@@ -838,10 +863,30 @@ let test_settings_harness_roundtrip_and_precedence () =
        (Settings.effective_harness ~getenv:pi_env ~home
           (Some Harness.Codex))
     = Harness.Codex);
+  let branch_env name =
+    if String.equal name "MONTY_BRANCH_PREFIX" then Some "environment" else None
+  in
+  assert_equal "persisted prefix overrides environment default" "cto"
+    (must (Settings.effective_branch_prefix ~getenv:branch_env ~home None));
+  assert_equal "CLI overrides persisted branch prefix" "explicit"
+    (must
+       (Settings.effective_branch_prefix ~getenv:branch_env ~home
+          (Some "explicit")));
+  let fallback_home = temp_root "settings-branch-fallback" in
+  assert_equal "environment branch prefix fallback" "environment"
+    (must
+       (Settings.effective_branch_prefix ~getenv:branch_env
+          ~home:fallback_home None));
+  assert_equal "default branch prefix" "monty"
+    (must
+       (Settings.effective_branch_prefix ~getenv:no_env ~home:fallback_home
+          None));
   assert_contains "settings rendering" (Settings.render settings)
-    "harness    codex";
+    "harness       codex";
   assert_contains "YOLO settings rendering" (Settings.render settings)
-    "codex-yolo true"
+    "codex-yolo    true";
+  assert_contains "branch-prefix settings rendering" (Settings.render settings)
+    "branch-prefix cto"
 
 let test_headless_json_contract () =
   let dispatch =
