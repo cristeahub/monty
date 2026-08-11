@@ -5,11 +5,18 @@ let exit_code = function
       1
 
 type operations = {
-  start : name:string -> home:string -> pi_command:string -> (unit, string) result;
+  start :
+    name:string ->
+    home:string ->
+    harness:Harness.t ->
+    harness_command:string ->
+    codex_yolo:bool ->
+    (unit, string) result;
   launch_one : Launcher.options -> Job.t -> (unit, string) result;
   doctor :
     home:string ->
-    pi_command:string ->
+    harness:Harness.t ->
+    harness_command:string ->
     wt_command:string ->
     backend:Terminal.backend ->
     worktree_mode:Launcher.worktree_mode ->
@@ -18,11 +25,14 @@ type operations = {
 
 let default_operations =
   {
-    start = (fun ~name ~home ~pi_command -> Head_butler.start ~home ~pi_command ~name);
+    start =
+      (fun ~name ~home ~harness ~harness_command ~codex_yolo ->
+        Head_butler.start ~home ~harness ~harness_command ~codex_yolo ~name);
     launch_one = Launcher.launch_one;
     doctor =
-      (fun ~home ~pi_command ~wt_command ~backend ~worktree_mode ->
-        Doctor.run ~home ~pi_command ~wt_command ~backend ~worktree_mode);
+      (fun ~home ~harness ~harness_command ~wt_command ~backend ~worktree_mode ->
+        Doctor.run ~home ~harness ~harness_command ~wt_command ~backend
+          ~worktree_mode);
   }
 
 let env_default getenv name default =
@@ -42,6 +52,11 @@ let worktree_conv =
   Cmdliner.Arg.conv
     ( Launcher.worktree_mode_of_string,
       fun ppf value -> Fmt.pf ppf "%s" (Launcher.worktree_mode_to_string value) )
+
+let harness_conv =
+  Cmdliner.Arg.conv
+    ( Harness.of_string,
+      fun ppf value -> Fmt.pf ppf "%s" (Harness.to_string value) )
 
 let backend_default getenv =
   match Terminal.backend_of_string (env_default getenv "MONTY_TERMINAL" "ghostty") with
@@ -67,6 +82,18 @@ let pi_command_arg =
   let doc = "Shell command used to start pi. May include fixed arguments." in
   Cmdliner.Arg.(value & opt string (env_default getenv "MONTY_PI_COMMAND" "pi") & info [ "pi-command" ] ~docv:"COMMAND" ~doc)
  in
+let codex_command_arg =
+  let doc = "Shell command used to start Codex. May include fixed arguments." in
+  Cmdliner.Arg.(value & opt string (env_default getenv "MONTY_CODEX_COMMAND" "codex") & info [ "codex-command" ] ~docv:"COMMAND" ~doc)
+ in
+let harness_arg =
+  let doc = "Agent harness: pi or codex. Overrides MONTY_HARNESS and persisted Monty settings." in
+  Cmdliner.Arg.(value & opt (some harness_conv) None & info [ "harness" ] ~docv:"HARNESS" ~doc)
+ in
+let codex_yolo_arg =
+  let doc = "Run Codex without approvals or sandboxing. This is dangerous." in
+  Cmdliner.Arg.(value & flag & info [ "codex-yolo" ] ~doc)
+ in
 let wt_command_arg =
   let doc = "Shell command used to invoke the wt CLI." in
   Cmdliner.Arg.(value & opt string (env_default getenv "MONTY_WT_COMMAND" "wt") & info [ "wt-command" ] ~docv:"COMMAND" ~doc)
@@ -88,7 +115,7 @@ let branch_prefix_arg =
   Cmdliner.Arg.(value & opt string (env_default getenv "MONTY_BRANCH_PREFIX" "monty") & info [ "branch-prefix" ] ~docv:"PREFIX" ~doc)
  in
 let fork_arg =
-  let doc = "Optional pi session id or path to fork for worker sessions." in
+  let doc = "Optional Pi session id or path to fork. Unsupported by Codex." in
   Cmdliner.Arg.(value & opt (some string) None & info [ "fork" ] ~docv:"SESSION" ~doc)
  in
 let script_dir_arg =
@@ -103,16 +130,26 @@ let monty_command () =
     | None -> Shell.normalize (Shell.abs_path executable)
   else Shell.normalize (Shell.abs_path executable)
  in
-let options backend target pi_command wt_command worktree_mode branch_prefix fork home script_dir =
+let options backend target harness_override codex_yolo_override pi_command codex_command wt_command worktree_mode branch_prefix fork home script_dir =
+  let ( let* ) = Result.bind in
+  let* harness =
+    Settings.effective_harness ~getenv ~home harness_override
+  in
+  let* codex_yolo =
+    Settings.effective_codex_yolo ~getenv ~home codex_yolo_override
+  in
   let script_dir =
     match script_dir with
     | Some dir -> Shell.normalize (Shell.abs_path dir)
     | None -> Home.runtime_script_dir ~home () |> Shell.normalize
   in
-  Launcher.{
+  Ok Launcher.{
     backend;
     target;
-    pi_command;
+    harness;
+    harness_command =
+      (match harness with Harness.Pi -> pi_command | Harness.Codex -> codex_command);
+    codex_yolo;
     wt_command;
     worktree_mode;
     branch_prefix;
@@ -124,33 +161,62 @@ let options backend target pi_command wt_command worktree_mode branch_prefix for
  in
 let options_term =
   Cmdliner.Term.(
-    const options $ backend_arg $ target_arg $ pi_command_arg $ wt_command_arg $ worktree_arg
+    const options $ backend_arg $ target_arg $ harness_arg $ codex_yolo_arg $ pi_command_arg
+    $ codex_command_arg $ wt_command_arg $ worktree_arg
     $ branch_prefix_arg $ fork_arg $ home_arg $ script_dir_arg)
  in
 let headless_options pi_command wt_command branch_prefix fork home script_dir =
-  options Terminal.Dry_run Terminal.Tab pi_command wt_command Launcher.Always
-    branch_prefix fork home script_dir
+  Launcher.
+    { backend = Terminal.Dry_run;
+      target = Terminal.Tab;
+      harness = Harness.Pi;
+      harness_command = pi_command;
+      codex_yolo = false;
+      wt_command;
+      worktree_mode = Always;
+      branch_prefix;
+      fork;
+      home;
+      script_dir =
+        (match script_dir with
+        | Some dir -> Shell.normalize (Shell.abs_path dir)
+        | None -> Home.runtime_script_dir ~home () |> Shell.normalize);
+      monty_command = monty_command () }
  in
 let headless_options_term =
   Cmdliner.Term.(
     const headless_options $ pi_command_arg $ wt_command_arg $ branch_prefix_arg
     $ fork_arg $ home_arg $ script_dir_arg)
  in
-let start name home pi_command = operations.start ~name ~home ~pi_command |> exit_code
+let start name home harness_override codex_yolo_override pi_command codex_command =
+  match
+    ( Settings.effective_harness ~getenv ~home harness_override,
+      Settings.effective_codex_yolo ~getenv ~home codex_yolo_override )
+  with
+  | Error message, _ | _, Error message -> exit_code (Error message)
+  | Ok harness, Ok codex_yolo ->
+      let harness_command =
+        match harness with Harness.Pi -> pi_command | Harness.Codex -> codex_command
+      in
+      operations.start ~name ~home ~harness ~harness_command ~codex_yolo
+      |> exit_code
  in
 let start_term =
   let name_arg =
-    let doc = "Session name for the head-butler pi session." in
+    let doc = "Session name for the head-butler session when supported by the harness." in
     Cmdliner.Arg.(value & opt string "Monty Head Butler" & info [ "name"; "n" ] ~docv:"NAME" ~doc)
   in
-  Cmdliner.Term.(const start $ name_arg $ home_arg $ pi_command_arg)
+  Cmdliner.Term.(const start $ name_arg $ home_arg $ harness_arg $ codex_yolo_arg $ pi_command_arg $ codex_command_arg)
  in
 let launch repo title context branch options =
-  let cwd = Sys.getcwd () in
-  let repo = Shell.normalize (Shell.abs_path ~base:cwd repo) in
-  let context = Shell.normalize (Shell.abs_path ~base:cwd context) in
-  let job = Job.make ?branch ~title ~repo ~context () in
-  operations.launch_one options job |> exit_code
+  match options with
+  | Error message -> exit_code (Error message)
+  | Ok options ->
+      let cwd = Sys.getcwd () in
+      let repo = Shell.normalize (Shell.abs_path ~base:cwd repo) in
+      let context = Shell.normalize (Shell.abs_path ~base:cwd context) in
+      let job = Job.make ?branch ~title ~repo ~context () in
+      operations.launch_one options job |> exit_code
  in
 let launch_term =
   let repo =
@@ -162,7 +228,7 @@ let launch_term =
     Cmdliner.Arg.(required & opt (some string) None & info [ "title" ] ~docv:"TITLE" ~doc)
   in
   let context =
-    let doc = "Markdown context file to pass to pi as an @file." in
+    let doc = "Markdown task context file supplied to the selected harness." in
     Cmdliner.Arg.(required & opt (some string) None & info [ "context" ] ~docv:"FILE" ~doc)
   in
   let branch =
@@ -172,12 +238,15 @@ let launch_term =
   Cmdliner.Term.(const launch $ repo $ title $ context $ branch $ options_term)
  in
 let launch_many manifest options =
-  let manifest = Shell.abs_path manifest |> Shell.normalize in
-  match Manifest.load ~home:options.Launcher.home manifest with
-  | Error msg -> exit_code (Error msg)
-  | Ok jobs ->
-      let retry_command = Launcher.retry_launch_many_command options manifest in
-      Launcher.launch_many ~retry_command options jobs |> exit_code
+  match options with
+  | Error message -> exit_code (Error message)
+  | Ok options ->
+      let manifest = Shell.abs_path manifest |> Shell.normalize in
+      (match Manifest.load ~home:options.Launcher.home manifest with
+      | Error msg -> exit_code (Error msg)
+      | Ok jobs ->
+          let retry_command = Launcher.retry_launch_many_command options manifest in
+          Launcher.launch_many ~retry_command options jobs |> exit_code)
  in
 let launch_many_term =
   let manifest =
@@ -223,6 +292,9 @@ let headless_worker_term explicit_resume =
   Cmdliner.Term.(const (headless_begin explicit_resume) $ worker $ headless_options_term)
  in
 let resume archived worker options =
+  match options with
+  | Error message -> exit_code (Error message)
+  | Ok options ->
   let record =
     if archived then Resume.find_reactivatable ~home:options.Launcher.home worker
     else Resume.find_resumable ~home:options.Launcher.home worker
@@ -465,32 +537,122 @@ let task_done_term =
   in
   Cmdliner.Term.(const task_done $ id $ home_arg)
  in
-let doctor home pi_command wt_command backend worktree_mode =
-  operations.doctor ~home ~pi_command ~wt_command ~backend ~worktree_mode |> exit_code
+let doctor home harness_override pi_command codex_command wt_command backend worktree_mode =
+  match Settings.effective_harness ~getenv ~home harness_override with
+  | Error message -> exit_code (Error message)
+  | Ok harness ->
+      let harness_command =
+        match harness with Harness.Pi -> pi_command | Harness.Codex -> codex_command
+      in
+      operations.doctor ~home ~harness ~harness_command ~wt_command ~backend
+        ~worktree_mode |> exit_code
  in
 let doctor_term =
   Cmdliner.Term.(
-    const doctor $ home_arg $ pi_command_arg $ wt_command_arg $ backend_arg
+    const doctor $ home_arg $ harness_arg $ pi_command_arg $ codex_command_arg
+    $ wt_command_arg $ backend_arg
     $ worktree_arg)
  in
+let settings_show home =
+  match Settings.load ~home with
+  | Error message -> exit_code (Error message)
+  | Ok settings ->
+      Fmt.pr "%s" (Settings.render settings);
+      0
+ in
+let settings_show_term = Cmdliner.Term.(const settings_show $ home_arg)
+ in
+let settings_get key home =
+  match Settings.load ~home with
+  | Error message -> exit_code (Error message)
+  | Ok settings -> (
+      match String.lowercase_ascii key with
+      | "harness" ->
+          Fmt.pr "%s\n"
+            (settings.Settings.harness
+            |> Option.value ~default:Harness.Pi |> Harness.to_string);
+          0
+      | "codex-yolo" ->
+          Fmt.pr "%s\n" (if settings.Settings.codex_yolo then "true" else "false");
+          0
+      | _ -> exit_code (Error (Printf.sprintf "unknown setting %S" key)))
+ in
+let settings_get_term =
+  let key =
+    let doc = "Setting name." in
+    Cmdliner.Arg.(required & pos 0 (some string) None & info [] ~docv:"SETTING" ~doc)
+  in
+  Cmdliner.Term.(const settings_get $ key $ home_arg)
+ in
+let settings_set key value home =
+  match String.lowercase_ascii key with
+  | "harness" -> (
+      match Harness.of_string value with
+      | Error (`Msg message) -> exit_code (Error message)
+      | Ok harness ->
+          Settings.set_harness ~home harness
+          |> Result.map (fun () -> Fmt.pr "harness = %s\n" (Harness.to_string harness))
+          |> exit_code)
+  | "codex-yolo" -> (
+      match Settings.bool_of_string value with
+      | Error message -> exit_code (Error message)
+      | Ok enabled ->
+          Settings.set_codex_yolo ~home enabled
+          |> Result.map (fun () ->
+                 Fmt.pr "codex-yolo = %s\n"
+                   (if enabled then "true" else "false"))
+          |> exit_code)
+  | _ -> exit_code (Error (Printf.sprintf "unknown setting %S" key))
+ in
+let settings_set_term =
+  let key =
+    let doc = "Setting name." in
+    Cmdliner.Arg.(required & pos 0 (some string) None & info [] ~docv:"SETTING" ~doc)
+  in
+  let value =
+    let doc = "New setting value." in
+    Cmdliner.Arg.(required & pos 1 (some string) None & info [] ~docv:"VALUE" ~doc)
+  in
+  Cmdliner.Term.(const settings_set $ key $ value $ home_arg)
+ in
+let settings_cmd =
+  let show_cmd =
+    Cmdliner.Cmd.v
+      (Cmdliner.Cmd.info "show" ~doc:"Show all persisted Monty settings.")
+      settings_show_term
+  in
+  let get_cmd =
+    Cmdliner.Cmd.v
+      (Cmdliner.Cmd.info "get" ~doc:"Print one persisted Monty setting.")
+      settings_get_term
+  in
+  let set_cmd =
+    Cmdliner.Cmd.v
+      (Cmdliner.Cmd.info "set" ~doc:"Set one persisted Monty setting.")
+      settings_set_term
+  in
+  Cmdliner.Cmd.group ~default:settings_show_term
+    (Cmdliner.Cmd.info "settings" ~doc:"Show and change persisted Monty settings.")
+    [ show_cmd; get_cmd; set_cmd ]
+ in
 let start_cmd =
-  let doc = "Start the head-butler pi session in the Monty control room." in
+  let doc = "Start the head-butler agent session in the Monty control room." in
   Cmdliner.Cmd.v (Cmdliner.Cmd.info "start" ~doc) start_term
  in
 let launch_cmd =
-  let doc = "Launch one worker pi session." in
+  let doc = "Launch one worker agent session." in
   Cmdliner.Cmd.v (Cmdliner.Cmd.info "launch" ~doc) launch_term
  in
 let launch_many_cmd =
-  let doc = "Launch multiple worker pi sessions from a JSON manifest." in
+  let doc = "Launch multiple worker agent sessions from a JSON manifest." in
   Cmdliner.Cmd.v (Cmdliner.Cmd.info "launch-many" ~doc) launch_many_term
  in
 let resume_cmd =
-  let doc = "Resume a worker pi session from durable Monty memory." in
+  let doc = "Resume a worker agent session from durable Monty memory." in
   Cmdliner.Cmd.v (Cmdliner.Cmd.info "resume" ~doc) resume_term
  in
 let open_cmd =
-  let doc = "Open a worker pi session from durable Monty memory. Alias for resume." in
+  let doc = "Open a worker agent session from durable Monty memory. Alias for resume." in
   Cmdliner.Cmd.v (Cmdliner.Cmd.info "open" ~doc) resume_term
  in
 let done_cmd =
@@ -575,10 +737,10 @@ let doctor_cmd =
   Cmdliner.Cmd.v (Cmdliner.Cmd.info "doctor" ~doc) doctor_term
  in
 let main_cmd =
-  let doc = "Monty, the head butler for pi worker sessions." in
+  let doc = "Monty, the head butler for Pi and Codex worker sessions." in
   let man =
     [ `S Cmdliner.Manpage.s_description;
-      `P "Run monty with no subcommand to start the head-butler pi session in this repo.";
+      `P "Run monty with no subcommand to start the head-butler agent session in this repo.";
       `P "Use launch or launch-many when the head-butler needs to spin out worker sessions.";
       `P "Use open or resume to reopen an existing worker from durable Monty memory." ]
   in
@@ -594,6 +756,7 @@ let main_cmd =
       list_cmd;
       overview_cmd;
       projects_cmd;
+      settings_cmd;
       tasks_cmd;
       task_cmd;
       headless_cmd;

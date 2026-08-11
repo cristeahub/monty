@@ -1,32 +1,62 @@
 type options = {
-  pi_command : string;
+  harness : Harness.t;
+  command : string;
+  codex_yolo : bool;
   fork : string option;
   script_dir : string;
   branch_prefix : string;
   monty_command : string;
 }
 
+let codex_effort_arg = " -c " ^ Shell.quote "model_reasoning_effort=\"xhigh\""
+
 let script_filename ~script_dir ~title =
   let slug = Slug.of_title title in
   let stamp = Unix.gettimeofday () |> Int64.of_float |> Int64.to_string in
   Filename.concat script_dir (Printf.sprintf "%s-%d-%s.sh" stamp (Unix.getpid ()) slug)
 
+let codex_prompt ~instructions ~context job =
+  let inputs =
+    [ Option.map (Printf.sprintf "Monty instructions: %s") instructions;
+      Some (Printf.sprintf "Task context: %s" context);
+      Option.map
+        (fun worker_dir ->
+          Printf.sprintf "Durable worker memory: %s"
+            (Filename.concat worker_dir "memory.md"))
+        job.Job.worker_dir ]
+    |> List.filter_map Fun.id |> String.concat "\n"
+  in
+  String.concat "\n\n"
+    [ Job.prompt job;
+      "Read the files below before acting. Treat the Monty instructions and task context as authoritative, and preserve important discoveries in durable worker memory.";
+      inputs ]
+
 let build_command ~options ~instructions ~job ~context =
-  let name = Shell.quote job.Job.title in
-  let instruction_arg =
-    match instructions with
-    | None -> ""
-    | Some path -> " " ^ Shell.quote ("@" ^ path)
-  in
-  let context_arg = Shell.quote ("@" ^ context) in
-  let prompt = Shell.quote (Job.prompt job) in
-  let fork =
-    match options.fork with
-    | None -> ""
-    | Some id -> " --fork " ^ Shell.quote id
-  in
-  Printf.sprintf "exec %s --name %s%s%s %s %s" options.pi_command name fork
-    instruction_arg context_arg prompt
+  match options.harness with
+  | Harness.Pi ->
+      let name = Shell.quote job.Job.title in
+      let instruction_arg =
+        match instructions with
+        | None -> ""
+        | Some path -> " " ^ Shell.quote ("@" ^ path)
+      in
+      let context_arg = Shell.quote ("@" ^ context) in
+      let prompt = Shell.quote (Job.prompt job) in
+      let fork =
+        match options.fork with
+        | None -> ""
+        | Some id -> " --fork " ^ Shell.quote id
+      in
+      Printf.sprintf "exec %s --name %s%s%s %s %s" options.command name fork
+        instruction_arg context_arg prompt
+  | Harness.Codex ->
+      let yolo =
+        if options.codex_yolo then
+          " --dangerously-bypass-approvals-and-sandbox"
+        else ""
+      in
+      Printf.sprintf "exec %s%s%s -C . %s" options.command codex_effort_arg yolo
+        (Shell.quote (codex_prompt ~instructions ~context job))
 
 let rehydrate_lines ~monty_command ~wt_command ~branch ~source_repo =
   [ "MONTY_JOB_WORKTREE=$("

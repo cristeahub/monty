@@ -137,7 +137,7 @@ let setup_environment root =
              "exit 97";
              "" ]);
       Shell.chmod_executable path)
-    [ "wt"; "gh"; "pi"; "osascript"; "sdef"; "ghostty" ];
+    [ "wt"; "gh"; "pi"; "codex"; "osascript"; "sdef"; "ghostty" ];
   let env =
     env_with
       [ ("MONTY_HOME", home);
@@ -1521,11 +1521,14 @@ let test_launch_batch_preflight_is_all_or_nothing () =
       let workers = Filename.concat (Filename.dirname manifest) "workers" in
       add_project ~root ~home ~env repo;
       Shell.write_file context "# Launch preflight\n";
-      let launch ?(terminal = "ghostty") ?(pi_command = "pi --fixed value") index =
+      let launch ?(terminal = "ghostty") ?(harness = "pi")
+          ?(pi_command = "pi --fixed value")
+          ?(codex_command = "codex --fixed value") index =
         run ~root ~env index
           [ "launch-many"; "--manifest"; manifest; "--home"; home;
-            "--terminal"; terminal; "--worktree"; "never"; "--pi-command";
-            pi_command ]
+            "--terminal"; terminal; "--worktree"; "never"; "--harness";
+            harness; "--pi-command"; pi_command; "--codex-command";
+            codex_command ]
       in
       write_manifest manifest
         [ manifest_job ~id:"valid-first" ~branch:"cto/valid-first"
@@ -1593,6 +1596,17 @@ let test_launch_batch_preflight_is_all_or_nothing () =
       if Shell.read_file tasks_path <> tasks_before then
         failwith "valid dry-run created planned tasks";
       if Sys.file_exists workers then failwith "valid dry-run reserved worker memory";
+      require_empty_log log;
+      let codex_dry = launch ~terminal:"dry-run" ~harness:"codex" 10051 in
+      require_code 0 codex_dry;
+      require_contains "Codex dry-run harness" codex_dry.stdout
+        "[dry-run] harness: codex";
+      require_contains "Codex dry-run command" codex_dry.stdout
+        "model_reasoning_effort=\"xhigh\"";
+      if Shell.read_file tasks_path <> tasks_before then
+        failwith "Codex dry-run created planned tasks";
+      if Sys.file_exists workers then
+        failwith "Codex dry-run reserved worker memory";
       require_empty_log log;
       let missing_dependency =
         launch ~pi_command:"monty-missing-pi --fixed value" 1006
@@ -2492,7 +2506,9 @@ let test_headless_prepare_begin_and_resume () =
         Launcher.
           { backend = Terminal.Dry_run;
             target = Terminal.Tab;
-            pi_command = "pi";
+            harness = Harness.Pi;
+            harness_command = "pi";
+            codex_yolo = false;
             wt_command = Filename.concat root "fake-bin/wt";
             worktree_mode = Always;
             branch_prefix = "monty";
@@ -2618,6 +2634,86 @@ let test_headless_prepare_begin_and_resume () =
       then failwith "headless execution completed a local task automatically";
       if string_contains (read_file log) "osascript" then
         failwith "headless begin or resume opened Ghostty")
+
+let test_settings_commands_and_effective_harness () =
+  with_temp_root "settings" (fun root ->
+      let home, _log, env = setup_environment root in
+      let initial = run ~root ~env 1950 [ "settings"; "--home"; home ] in
+      require_code 0 initial;
+      require_contains "initial harness setting" initial.stdout "harness    pi";
+      require_contains "initial Codex YOLO setting" initial.stdout
+        "codex-yolo false";
+      let set =
+        run ~root ~env 1951
+          [ "settings"; "set"; "harness"; "codex"; "--home"; home ]
+      in
+      require_code 0 set;
+      require_contains "set harness result" set.stdout "harness = codex";
+      let get =
+        run ~root ~env 1952
+          [ "settings"; "get"; "harness"; "--home"; home ]
+      in
+      require_code 0 get;
+      require_contains "get harness result" get.stdout "codex";
+      let set_yolo =
+        run ~root ~env 19521
+          [ "settings"; "set"; "codex-yolo"; "true"; "--home"; home ]
+      in
+      require_code 0 set_yolo;
+      require_contains "set Codex YOLO result" set_yolo.stdout
+        "codex-yolo = true";
+      let get_yolo =
+        run ~root ~env 19522
+          [ "settings"; "get"; "codex-yolo"; "--home"; home ]
+      in
+      require_code 0 get_yolo;
+      require_contains "get Codex YOLO result" get_yolo.stdout "true";
+      let settings_path = Filename.concat home ".monty/settings.json" in
+      if
+        Yojson.Safe.Util.(
+          Yojson.Safe.from_file settings_path |> member "harness" |> to_string)
+        <> "codex"
+      then failwith "settings command did not persist Codex harness";
+      if
+        not
+          Yojson.Safe.Util.(
+            Yojson.Safe.from_file settings_path |> member "codex_yolo"
+            |> to_bool)
+      then failwith "settings command did not persist Codex YOLO";
+      let repo = Filename.concat root "repo" in
+      let context = Filename.concat root "context.md" in
+      let manifest = Filename.concat home ".monty/runs/settings/jobs.json" in
+      add_project ~root ~home ~env repo;
+      Shell.write_file context "# Settings harness task\n";
+      write_manifest manifest
+        [ manifest_job ~id:"settings-worker" ~branch:"cto/settings-worker"
+            ~title:"Settings worker" ~repo ~context () ];
+      let dry_run =
+        run ~root ~env 19523
+          [ "launch-many"; "--manifest"; manifest; "--home"; home;
+            "--terminal"; "dry-run"; "--worktree"; "never" ]
+      in
+      require_code 0 dry_run;
+      require_contains "persisted Codex harness command" dry_run.stdout
+        "[dry-run] harness: codex";
+      require_contains "persisted Codex YOLO command" dry_run.stdout
+        "--dangerously-bypass-approvals-and-sandbox";
+      require_contains "persisted Codex xhigh command" dry_run.stdout
+        "model_reasoning_effort=\"xhigh\"";
+      let doctor =
+        run ~root ~env 1953
+          [ "doctor"; "--home"; home; "--terminal"; "dry-run";
+            "--worktree"; "never" ]
+      in
+      require_code 0 doctor;
+      require_contains "doctor uses persisted harness" doctor.stdout "codex";
+      let override =
+        run ~root ~env 1954
+          [ "doctor"; "--home"; home; "--terminal"; "dry-run";
+            "--worktree"; "never"; "--harness"; "pi" ]
+      in
+      require_code 0 override;
+      require_contains "CLI harness override" override.stdout "pi")
 
 let test_cli_parser_and_doctor_contracts () =
   with_temp_root "parser-doctor" (fun root ->
@@ -2784,5 +2880,7 @@ let () =
       test_forged_launch_script_and_resume_mode_are_safe );
     ( "cli_headless_prepare_begin_and_resume",
       test_headless_prepare_begin_and_resume );
+    ( "cli_settings_commands_and_effective_harness",
+      test_settings_commands_and_effective_harness );
     ( "cli_parser_and_doctor_contracts", test_cli_parser_and_doctor_contracts ) ]
   |> List.iter (fun (name, test) -> run_named name test)

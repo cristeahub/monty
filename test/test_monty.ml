@@ -354,7 +354,9 @@ let test_launch_many_single_job_uses_single_job_defaults () =
     Launcher.{
       backend = Terminal.Dry_run;
       target = Terminal.Tab;
-      pi_command = "/usr/bin/true --pi-test";
+      harness = Harness.Pi;
+      harness_command = "/usr/bin/true --pi-test";
+      codex_yolo = false;
       wt_command = "/usr/bin/true --wt-test";
       worktree_mode = Always;
       branch_prefix = "cto";
@@ -380,7 +382,9 @@ let test_launch_many_multiple_jobs_keeps_numbered_defaults () =
     Launcher.{
       backend = Terminal.Dry_run;
       target = Terminal.Tab;
-      pi_command = "/usr/bin/true --pi-test";
+      harness = Harness.Pi;
+      harness_command = "/usr/bin/true --pi-test";
+      codex_yolo = false;
       wt_command = "/usr/bin/true --wt-test";
       worktree_mode = Always;
       branch_prefix = "cto";
@@ -648,12 +652,13 @@ let test_doctor_typed_checks_and_configuration () =
       {
         find_command =
           (fun command ->
-            if List.mem command [ "pi --fixed"; "gh" ] then Ok ("/fake/" ^ command)
+            if List.mem command [ "pi --fixed"; "codex --fixed"; "gh" ] then Ok ("/fake/" ^ command)
             else Error ("missing " ^ command));
       }
   in
   let dry_checks =
-    Doctor.checks ~operations ~home ~pi_command:"pi --fixed" ~wt_command:"missing-wt"
+    Doctor.checks ~operations ~home ~harness:Harness.Pi
+      ~harness_command:"pi --fixed" ~wt_command:"missing-wt"
       ~backend:Terminal.Dry_run ~worktree_mode:Launcher.Never ()
   in
   assert_bool "dry-run doctor has no required failure"
@@ -662,8 +667,19 @@ let test_doctor_typed_checks_and_configuration () =
   assert_contains "doctor pass" dry_output "PASS";
   assert_contains "doctor warn" dry_output "WARN";
   assert_not_contains "doctor dry-run ignores wt" dry_output "missing-wt";
+  let codex_checks =
+    Doctor.checks ~operations ~home ~harness:Harness.Codex
+      ~harness_command:"codex --fixed" ~wt_command:"missing-wt"
+      ~backend:Terminal.Dry_run ~worktree_mode:Launcher.Never ()
+  in
+  let codex_output = Doctor.render codex_checks in
+  assert_bool "Codex doctor has no required failure"
+    (Doctor.exit_code codex_checks = 0);
+  assert_contains "Codex doctor names selected harness" codex_output "codex";
+  assert_not_contains "Codex doctor does not require Pi" codex_output "pi --fixed";
   let real_checks =
-    Doctor.checks ~operations ~home ~pi_command:"pi --fixed" ~wt_command:"missing-wt"
+    Doctor.checks ~operations ~home ~harness:Harness.Pi
+      ~harness_command:"pi --fixed" ~wt_command:"missing-wt"
       ~backend:Terminal.Ghostty ~worktree_mode:Launcher.Always ()
   in
   assert_bool "real doctor fails required dependencies"
@@ -686,14 +702,17 @@ let test_cli_factory_injects_environment_and_dispatch () =
       }
   in
   let getenv values name = List.assoc_opt name values in
-  let run suffix backend target worktree =
+  let run ?(harness = "pi") ?(codex_yolo = "false") suffix backend target worktree =
     let home = temp_root ("cli-factory-" ^ suffix) in
     let values =
       [ ("MONTY_HOME", home);
         ("MONTY_TERMINAL", backend);
         ("MONTY_TARGET", target);
         ("MONTY_WORKTREE", worktree);
+        ("MONTY_HARNESS", harness);
         ("MONTY_PI_COMMAND", "pi-" ^ suffix ^ " --fixed");
+        ("MONTY_CODEX_COMMAND", "codex-" ^ suffix ^ " --fixed");
+        ("MONTY_CODEX_YOLO", codex_yolo);
         ("MONTY_WT_COMMAND", "wt-" ^ suffix ^ " --fixed");
         ("MONTY_BRANCH_PREFIX", "branch-" ^ suffix) ]
     in
@@ -705,13 +724,17 @@ let test_cli_factory_injects_environment_and_dispatch () =
       (Cli.eval ~getenv:(getenv values) ~operations argv = 0)
   in
   run "one" "dry-run" "split" "never";
-  run "two" "ghostty" "window" "always";
+  run ~harness:"codex" ~codex_yolo:"true" "two" "ghostty" "window" "always";
   match List.rev !captured with
   | [ (one, _); (two, _) ] ->
       assert_contains "factory first home" one.Launcher.home "monty-cli-factory-one";
       assert_contains "factory second home" two.Launcher.home "monty-cli-factory-two";
-      assert_equal "factory first pi" "pi-one --fixed" one.pi_command;
-      assert_equal "factory second pi" "pi-two --fixed" two.pi_command;
+      assert_bool "factory first harness" (one.harness = Harness.Pi);
+      assert_bool "factory second harness" (two.harness = Harness.Codex);
+      assert_equal "factory first pi" "pi-one --fixed" one.harness_command;
+      assert_equal "factory second codex" "codex-two --fixed" two.harness_command;
+      assert_bool "factory first Codex YOLO off" (not one.codex_yolo);
+      assert_bool "factory second Codex YOLO on" two.codex_yolo;
       assert_equal "factory first wt" "wt-one --fixed" one.wt_command;
       assert_equal "factory second wt" "wt-two --fixed" two.wt_command;
       assert_equal "factory first prefix" "branch-one" one.branch_prefix;
@@ -723,6 +746,102 @@ let test_cli_factory_injects_environment_and_dispatch () =
       assert_bool "factory first worktree" (one.worktree_mode = Launcher.Never);
       assert_bool "factory second worktree" (two.worktree_mode = Launcher.Always)
   | _ -> failwith "injected CLI launch operation was not called twice"
+
+let test_codex_harness_command () =
+  let job =
+    Job.make ~worker_dir:"/monty/workers/task-1" ~title:"Codex task"
+      ~repo:"/repo" ~context:"/monty/context.md" ()
+  in
+  let options =
+    Harness_command.
+      { harness = Harness.Codex;
+        command = "codex --model fixed";
+        codex_yolo = false;
+        fork = None;
+        script_dir = "/tmp";
+        branch_prefix = "monty";
+        monty_command = "monty" }
+  in
+  let command =
+    Harness_command.build_command ~options
+      ~instructions:(Some "/monty/MONTY.md") ~job ~context:job.context
+  in
+  assert_contains "codex executable and fixed args" command
+    "exec codex --model fixed";
+  assert_contains "Codex xhigh reasoning effort" command
+    "model_reasoning_effort=\"xhigh\"";
+  assert_contains "codex instruction path" command "/monty/MONTY.md";
+  assert_contains "codex context path" command "/monty/context.md";
+  assert_contains "codex worker memory" command "/monty/workers/task-1/memory.md";
+  assert_not_contains "codex does not use pi file syntax" command "@/monty";
+  assert_not_contains "Codex YOLO defaults off" command
+    "--dangerously-bypass-approvals-and-sandbox";
+  let yolo_command =
+    Harness_command.build_command
+      ~options:{ options with codex_yolo = true }
+      ~instructions:(Some "/monty/MONTY.md") ~job ~context:job.context
+  in
+  assert_contains "Codex YOLO flag" yolo_command
+    "--dangerously-bypass-approvals-and-sandbox";
+  let head_butler =
+    Head_butler.command ~home:"/monty" ~harness:Harness.Codex
+      ~harness_command:"codex" ~codex_yolo:true ~name:"Monty Head Butler"
+  in
+  assert_contains "head-butler Codex YOLO flag" head_butler
+    "--dangerously-bypass-approvals-and-sandbox";
+  assert_contains "head-butler Codex xhigh reasoning effort" head_butler
+    "model_reasoning_effort=\"xhigh\""
+
+let test_codex_harness_rejects_fork () =
+  let options =
+    Launcher.
+      { backend = Terminal.Dry_run;
+        target = Terminal.Tab;
+        harness = Harness.Codex;
+        harness_command = "/usr/bin/true";
+        codex_yolo = false;
+        wt_command = "/usr/bin/true";
+        worktree_mode = Never;
+        branch_prefix = "monty";
+        fork = Some "pi-session";
+        home = "/tmp";
+        script_dir = "/tmp";
+        monty_command = "monty" }
+  in
+  match Launcher.check_dependencies options with
+  | Ok () -> failwith "Codex unexpectedly accepted Pi fork semantics"
+  | Error message -> assert_contains "Codex fork diagnostic" message "does not support --fork"
+
+let test_settings_harness_roundtrip_and_precedence () =
+  let home = temp_root "settings" in
+  must (Settings.set_harness ~home Harness.Codex);
+  let settings = must (Settings.load ~home) in
+  assert_bool "persisted Codex harness"
+    (settings.Settings.harness = Some Harness.Codex);
+  assert_bool "Codex YOLO defaults off" (not settings.codex_yolo);
+  must (Settings.set_codex_yolo ~home true);
+  let settings = must (Settings.load ~home) in
+  assert_bool "persisted Codex YOLO" settings.codex_yolo;
+  assert_bool "setting Codex YOLO preserves harness"
+    (settings.harness = Some Harness.Codex);
+  let no_env _ = None in
+  assert_bool "persisted harness is effective"
+    (must (Settings.effective_harness ~getenv:no_env ~home None)
+    = Harness.Codex);
+  let pi_env name =
+    if String.equal name "MONTY_HARNESS" then Some "pi" else None
+  in
+  assert_bool "environment overrides persisted harness"
+    (must (Settings.effective_harness ~getenv:pi_env ~home None) = Harness.Pi);
+  assert_bool "CLI overrides environment harness"
+    (must
+       (Settings.effective_harness ~getenv:pi_env ~home
+          (Some Harness.Codex))
+    = Harness.Codex);
+  assert_contains "settings rendering" (Settings.render settings)
+    "harness    codex";
+  assert_contains "YOLO settings rendering" (Settings.render settings)
+    "codex-yolo true"
 
 let test_headless_json_contract () =
   let dispatch =
@@ -838,5 +957,9 @@ let () =
     ("job_symlink_escape", test_job_store_rejects_symlink_escape);
     ("doctor_typed_configuration", test_doctor_typed_checks_and_configuration);
     ("cli_factory_injection", test_cli_factory_injects_environment_and_dispatch);
+    ("codex_harness_command", test_codex_harness_command);
+    ("codex_harness_rejects_fork", test_codex_harness_rejects_fork);
+    ( "settings_harness_roundtrip_and_precedence",
+      test_settings_harness_roundtrip_and_precedence );
     ("headless_json_contract", test_headless_json_contract) ]
   |> List.iter (fun (name, test) -> run_named name test)
