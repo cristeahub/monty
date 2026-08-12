@@ -715,7 +715,7 @@ let reserve_batch ?(reject_requested = false) options prepared =
           | Some item ->
               Error
                 (Printf.sprintf
-                   "worker %s became launch-requested during headless preparation; use the explicit headless resume action when another subagent run is intentional"
+                   "worker %s became launch-requested during headless preparation; use the explicit headless resume action when another headless run is intentional"
                    item.id)
       in
       let rec stage acc = function

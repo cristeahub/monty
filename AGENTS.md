@@ -79,11 +79,13 @@ Use the printed `monty resume <worker-id>` command only when the user intentiona
 
 Ghostty remains the default execution surface.
 Use the headless harness flow only when the user explicitly requests headless or Pi-subagent execution.
-Monty does not provide a custom Pi extension.
-It emits complete JSON arguments for the harness's existing `subagent` tool.
+Headless commands must resolve the effective harness through the normal CLI, environment, and persisted-settings precedence.
+When `codex` is persisted as the selected harness, do not add a redundant `--harness codex` flag.
+Monty does not provide a custom Pi extension; for Pi it emits complete JSON arguments for the harness's existing `subagent` tool.
 
-Before any mutating headless command, call the harness `subagent` tool with `action: "list"` and confirm that the tool and required agents are available.
+Before any mutating Pi headless command, call the harness `subagent` tool with `action: "list"` and confirm that the tool and required agents are available.
 If they are unavailable, stop without mutating Monty state.
+For Codex headless execution, Monty's preflight must confirm that the configured Codex command is available before state mutation.
 Run headless dry-run first when checking a new batch or when the user asks for a preview:
 
 ```sh
@@ -97,10 +99,11 @@ monty headless prepare-many --manifest .monty/runs/<run-id>/jobs.json
 ```
 
 Headless preparation reserves every job and materializes its Monty-managed `wt` worktree while leaving the job `prepared`.
-For each prepared worker, run `monty headless begin <worker-id>` immediately before the harness call.
-Read the returned `harness_call.tool` and pass `harness_call.arguments` unchanged to that exposed harness tool.
-Do not manually reconstruct, simplify, or enrich the generated chain JSON.
-The generated asynchronous chains can run concurrently without waiting for earlier jobs to finish.
+With Pi selected, run `monty headless begin <worker-id>` immediately before the harness call.
+Read the returned `harness_call.tool` and pass `harness_call.arguments` unchanged to that exposed harness tool; do not manually reconstruct, simplify, or enrich the generated chain JSON.
+With Codex selected, run `monty headless run <worker-id>` or `monty headless run-many --manifest <manifest>`.
+Codex headless execution uses non-interactive `codex exec` processes and must not open Ghostty.
+Independent Pi or Codex chains can run concurrently without waiting for earlier jobs to finish.
 
 Each chain gets fresh minimal context and runs one implementer, two mutually isolated reviewers in parallel, and one fixer.
 Reviewers may write only their separate reports outside the worktree.
@@ -108,9 +111,10 @@ No child may create worktrees, stage, commit, push, open a PR, post remotely, or
 A successful chain leaves the task open and its worktree intact.
 Never infer completion from Pi runtime status.
 
-If a harness call fails after `begin`, leave the worker `launch-requested`.
-Run `monty headless resume <worker-id>` only when the user intentionally requests a fresh successor chain, then pass its generated `harness_call.arguments` unchanged to the harness tool.
-Never persist a backend, Pi run ID, async status, or runtime state in `job.json`.
+If a Pi harness call fails after `begin`, or a Codex process fails after the worker is claimed, leave the worker `launch-requested`.
+Run `monty headless resume <worker-id>` only when the user intentionally requests a fresh successor chain.
+With Pi selected, pass the resumed `harness_call.arguments` unchanged to the harness tool; with Codex selected, `resume` directly runs the successor chain.
+Never persist a backend, Pi run ID, Codex session ID, async status, or runtime state in `job.json`.
 Never automatically run `monty done` after a headless chain.
 
 At the start of a day or planning session, review active jobs with:
@@ -185,7 +189,8 @@ Use Dune package management and dependencies in `dune-project`.
 Do not add opam files.
 Use Ghostty as the default terminal backend. Use `monty settings set harness pi|codex` to persist the default agent harness; `--harness` remains the per-command override. Use `monty settings set branch-prefix <prefix>` to persist the default generated-branch prefix; `--branch-prefix` remains the per-command override.
 Use `monty settings set codex-yolo true|false` to control whether Monty-launched Codex sessions bypass approvals and sandboxing. Treat the enabled value as an explicit high-risk user choice.
-Keep headless state and payload generation in Monty, while execution uses the harness's existing subagent tool.
+Keep headless state and payload generation in Monty.
+Pi execution uses the harness's existing subagent tool, while Codex headless execution uses the configured non-interactive Codex command.
 Do not add a Monty-specific Pi extension or a new persisted backend.
 Use Monty's repo-scoped `ensure-worktree` flow for worktree creation and reuse.
 It must use the existing `wt` CLI, validate the selected repo, and automatically answer `wt` repo-selection prompts when branch names collide across repos.

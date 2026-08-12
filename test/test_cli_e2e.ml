@@ -738,6 +738,48 @@ let install_create_wt ~root ~log =
          "" ]);
   Shell.chmod_executable wt
 
+let install_codex_exec ~root ~log =
+  let codex = Filename.concat root "fake-bin/codex" in
+  Shell.write_file codex
+    (String.concat "\n"
+       [ "#!/bin/sh";
+         "set -eu";
+         "printf '%s\\n' \"$0 $*\" >> " ^ Shell.quote log;
+         "output=";
+         "while [ \"$#\" -gt 0 ]; do";
+         "  case \"$1\" in";
+         "    --output-last-message|-o) output=$2; shift 2 ;;";
+         "    --sandbox|-C|--cd|--add-dir|-c|--config|--color) shift 2 ;;";
+         "    *) shift ;;";
+         "  esac";
+         "done";
+         "cat >/dev/null";
+         "if [ -z \"$output\" ]; then exit 86; fi";
+         "phase=$(basename \"$output\" .md)";
+         "touch \"$output.started\"";
+         "if [ \"${MONTY_TEST_CODEX_FAIL_PHASE:-}\" = \"$phase\" ]; then exit 73; fi";
+         "case \"$phase\" in";
+         "  correctness)";
+         "    peer=$(dirname \"$output\")/quality.md.started";
+         "    count=0";
+         "    while [ ! -f \"$peer\" ] && [ \"$count\" -lt 100 ]; do";
+         "      count=$((count + 1))";
+         "      sleep 0.01";
+         "    done";
+         "    if [ ! -f \"$peer\" ]; then exit 74; fi";
+         "    ;;";
+         "  final)";
+         "    root=$(dirname \"$output\")";
+         "    test -f \"$root/implementation.md\"";
+         "    test -f \"$root/reviews/correctness.md\"";
+         "    test -f \"$root/reviews/quality.md\"";
+         "    ;;";
+         "esac";
+         "printf 'fake Codex %s handoff\\n' \"$phase\" > \"$output\"";
+         "printf '%s\\n' '{\"type\":\"turn.completed\"}'";
+         "" ]);
+  Shell.chmod_executable codex
+
 let install_remove_only_wt ~root ~repo ~branch ~present =
   let log = Filename.concat root "remove-wt.log" in
   let wt = Filename.concat root "fake-bin/wt" in
@@ -2687,6 +2729,229 @@ let test_headless_prepare_begin_and_resume () =
       if string_contains (read_file log) "osascript" then
         failwith "headless begin or resume opened Ghostty")
 
+let test_codex_headless_uses_effective_settings_without_ghostty () =
+  with_temp_root "headless-codex" (fun root ->
+      let home, log, env = setup_environment root in
+      let repo = Filename.concat root "repo" in
+      let context = Filename.concat root "context.md" in
+      let manifest_one =
+        Filename.concat home ".monty/runs/run-codex-one/jobs.json"
+      in
+      let manifest_many =
+        Filename.concat home ".monty/runs/run-codex-many/jobs.json"
+      in
+      let manifest_failure =
+        Filename.concat home ".monty/runs/run-codex-failure/jobs.json"
+      in
+      init_git_repo repo;
+      add_project ~root ~home ~env repo;
+      install_create_wt ~root ~log;
+      install_codex_exec ~root ~log;
+      Shell.write_file context
+        "# Codex headless task\n\nImplement and validate the requested change.\n";
+      let set_harness =
+        run ~root ~env 1960
+          [ "settings"; "set"; "harness"; "codex"; "--home"; home ]
+      in
+      require_code 0 set_harness;
+      write_manifest manifest_one
+        [ manifest_job ~id:"codex-one" ~branch:"cto/codex-one"
+            ~title:"Codex one" ~repo ~context () ];
+      let dry =
+        run ~root ~env 1961
+          [ "headless"; "prepare-many"; "--manifest"; manifest_one;
+            "--home"; home; "--dry-run" ]
+      in
+      require_code 0 dry;
+      let dry_json = Yojson.Safe.from_string dry.stdout in
+      if Yojson.Safe.Util.(dry_json |> member "harness" |> to_string) <> "codex"
+      then failwith "headless dry-run ignored the persisted Codex harness";
+      if Yojson.Safe.Util.(dry_json |> member "codex_yolo" |> to_bool) then
+        failwith "headless dry-run unexpectedly enabled Codex YOLO";
+      let prepared_one =
+        run ~root ~env 1962
+          [ "headless"; "prepare-many"; "--manifest"; manifest_one;
+            "--home"; home ]
+      in
+      require_code 0 prepared_one;
+      if count_lines_containing log "/codex exec" <> 0 then
+        failwith "headless preparation executed Codex";
+      let job_file run id =
+        Filename.concat home
+          (Printf.sprintf ".monty/runs/%s/workers/%s/job.json" run id)
+      in
+      let rejected_begin =
+        run ~root ~env 1963
+          [ "headless"; "begin"; "codex-one"; "--home"; home ]
+      in
+      if rejected_begin.code = 0 then
+        failwith "Codex-selected headless begin emitted a Pi subagent call";
+      require_contains "Codex begin routing" rejected_begin.stderr
+        "monty headless run";
+      if job_status (job_file "run-codex-one" "codex-one") <> "prepared" then
+        failwith "rejected Pi begin claimed the Codex worker";
+      let first_run =
+        run ~root ~env 1964
+          [ "headless"; "run"; "codex-one"; "--home"; home ]
+      in
+      require_code 0 first_run;
+      let first_json = Yojson.Safe.from_string first_run.stdout in
+      if
+        Yojson.Safe.Util.(first_json |> member "schema" |> to_string)
+        <> Headless.codex_run_schema
+      then failwith "Codex headless run returned the wrong schema";
+      let first_artifacts =
+        Yojson.Safe.Util.(first_json |> member "artifact_dir" |> to_string)
+      in
+      List.iter
+        (fun relative ->
+          let path = Filename.concat first_artifacts relative in
+          if not (Sys.file_exists path) then
+            failf "Codex headless run did not create %s" path)
+        [ "implementation.md"; "reviews/correctness.md";
+          "reviews/quality.md"; "final.md";
+          "events/implementation.jsonl"; "logs/implementation.log" ];
+      let implementation_prompt =
+        Shell.read_file
+          (Filename.concat first_artifacts "prompts/implementation.md")
+      in
+      require_contains "Codex prompt context" implementation_prompt
+        "Implement and validate the requested change.";
+      require_contains "Codex prompt instructions" implementation_prompt
+        "Monty instructions";
+      require_contains "Codex direct memory handling" implementation_prompt
+        "Monty will append the captured handoff";
+      if string_contains implementation_prompt
+           "Append important implementation discoveries"
+      then failwith "Codex direct prompt asked the agent to write worker memory";
+      let memory =
+        Shell.read_file
+          (Filename.concat
+             (Filename.dirname (job_file "run-codex-one" "codex-one"))
+             "memory.md")
+      in
+      require_contains "Codex implementation memory" memory
+        "fake Codex implementation handoff";
+      require_contains "Codex final memory" memory "fake Codex final handoff";
+      if count_lines_containing log "/codex exec" <> 4 then
+        failwith "single Codex headless chain did not run four Codex phases";
+      if count_lines_containing log "--sandbox workspace-write" <> 2 then
+        failwith "Codex writers did not use workspace-write";
+      if count_lines_containing log "--sandbox read-only" <> 2 then
+        failwith "Codex reviewers did not use read-only";
+      if count_lines_containing log "--add-dir" <> 0 then
+        failwith "Codex headless phases received write access outside the worktree";
+      if
+        count_lines_containing log
+          "--dangerously-bypass-approvals-and-sandbox"
+        <> 0
+      then failwith "Codex YOLO was used while disabled";
+      if job_status (job_file "run-codex-one" "codex-one") <> "launch-requested"
+      then failwith "Codex run did not preserve the launch-requested lifecycle";
+      let duplicate_run =
+        run ~root ~env 1965
+          [ "headless"; "run"; "codex-one"; "--home"; home ]
+      in
+      if duplicate_run.code = 0 then
+        failwith "Codex headless run replayed a launch-requested worker";
+      require_contains "Codex replay guard" duplicate_run.stderr
+        "headless resume";
+      let enable_yolo =
+        run ~root ~env 1966
+          [ "settings"; "set"; "codex-yolo"; "true"; "--home"; home ]
+      in
+      require_code 0 enable_yolo;
+      write_manifest manifest_many
+        [ manifest_job ~id:"codex-two" ~branch:"cto/codex-two"
+            ~title:"Codex two" ~repo ~context ();
+          manifest_job ~id:"codex-three" ~branch:"cto/codex-three"
+            ~title:"Codex three" ~repo ~context () ];
+      let prepared_many =
+        run ~root ~env 1967
+          [ "headless"; "prepare-many"; "--manifest"; manifest_many;
+            "--home"; home ]
+      in
+      require_code 0 prepared_many;
+      let many =
+        run ~root ~env 1968
+          [ "headless"; "run-many"; "--manifest"; manifest_many;
+            "--home"; home ]
+      in
+      require_code 0 many;
+      let many_json = Yojson.Safe.from_string many.stdout in
+      if
+        Yojson.Safe.Util.(many_json |> member "schema" |> to_string)
+        <> Headless.codex_run_many_schema
+      then failwith "Codex run-many returned the wrong schema";
+      if not Yojson.Safe.Util.(many_json |> member "success" |> to_bool) then
+        failwith "Codex run-many did not report success";
+      if
+        Yojson.Safe.Util.(many_json |> member "results" |> to_list |> List.length)
+        <> 2
+      then failwith "Codex run-many did not return both workers";
+      List.iter
+        (fun id ->
+          if job_status (job_file "run-codex-many" id) <> "launch-requested"
+          then failf "Codex run-many did not claim %s" id)
+        [ "codex-two"; "codex-three" ];
+      let successor =
+        run ~root ~env 1969
+          [ "headless"; "resume"; "codex-one"; "--home"; home ]
+      in
+      require_code 0 successor;
+      if
+        Yojson.Safe.Util.(
+          Yojson.Safe.from_string successor.stdout |> member "harness" |> to_string)
+        <> "codex"
+      then failwith "headless resume ignored the effective Codex harness";
+      write_manifest manifest_failure
+        [ manifest_job ~id:"codex-failure" ~branch:"cto/codex-failure"
+            ~title:"Codex failure" ~repo ~context () ];
+      let prepared_failure =
+        run ~root ~env 1970
+          [ "headless"; "prepare-many"; "--manifest"; manifest_failure;
+            "--home"; home ]
+      in
+      require_code 0 prepared_failure;
+      let failure_env =
+        replace_env env [ ("MONTY_TEST_CODEX_FAIL_PHASE", "implementation") ]
+      in
+      let failed =
+        run ~root ~env:failure_env 1971
+          [ "headless"; "run"; "codex-failure"; "--home"; home ]
+      in
+      if failed.code = 0 then failwith "failing Codex phase reported success";
+      require_contains "Codex phase failure" failed.stderr
+        "Codex implementation phase failed";
+      if
+        job_status (job_file "run-codex-failure" "codex-failure")
+        <> "launch-requested"
+      then failwith "failed Codex dispatch did not remain launch-requested";
+      let recovered =
+        run ~root ~env 1972
+          [ "headless"; "resume"; "codex-failure"; "--home"; home ]
+      in
+      require_code 0 recovered;
+      if count_lines_containing log "/codex exec" <> 21 then
+        failwith "Codex headless execution ran an unexpected number of phases";
+      if
+        count_lines_containing log
+          "--dangerously-bypass-approvals-and-sandbox"
+        <> 17
+      then failwith "Codex headless execution did not honor persisted YOLO";
+      if string_contains (read_file log) "osascript"
+         || string_contains (read_file log) "/ghostty "
+      then failwith "Codex headless execution opened Ghostty";
+      let tasks = local_tasks_json home in
+      if List.length tasks <> 4 then
+        failf "expected four Codex headless tasks, got %d" (List.length tasks);
+      if
+        List.exists
+          (fun task ->
+            Yojson.Safe.Util.(task |> member "status" |> to_string) <> "open")
+          tasks
+      then failwith "Codex headless execution closed a task automatically")
+
 let test_settings_commands_and_effective_harness () =
   with_temp_root "settings" (fun root ->
       let home, _log, env = setup_environment root in
@@ -2957,6 +3222,8 @@ let () =
       test_forged_launch_script_and_resume_mode_are_safe );
     ( "cli_headless_prepare_begin_and_resume",
       test_headless_prepare_begin_and_resume );
+    ( "cli_codex_headless_uses_effective_settings_without_ghostty",
+      test_codex_headless_uses_effective_settings_without_ghostty );
     ( "cli_settings_commands_and_effective_harness",
       test_settings_commands_and_effective_harness );
     ( "cli_parser_and_doctor_contracts", test_cli_parser_and_doctor_contracts ) ]

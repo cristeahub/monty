@@ -168,17 +168,25 @@ let options_term =
     $ codex_command_arg $ wt_command_arg $ worktree_arg
     $ branch_prefix_arg $ fork_arg $ home_arg $ script_dir_arg)
  in
-let headless_options pi_command wt_command branch_prefix_override fork home script_dir =
+let headless_options harness_override codex_yolo_override pi_command codex_command
+    wt_command branch_prefix_override fork home script_dir =
   let ( let* ) = Result.bind in
+  let* harness =
+    Settings.effective_harness ~getenv ~home harness_override
+  in
+  let* codex_yolo =
+    Settings.effective_codex_yolo ~getenv ~home codex_yolo_override
+  in
   let* branch_prefix =
     Settings.effective_branch_prefix ~getenv ~home branch_prefix_override
   in
   Ok Launcher.
     { backend = Terminal.Dry_run;
       target = Terminal.Tab;
-      harness = Harness.Pi;
-      harness_command = pi_command;
-      codex_yolo = false;
+      harness;
+      harness_command =
+        (match harness with Harness.Pi -> pi_command | Harness.Codex -> codex_command);
+      codex_yolo;
       wt_command;
       worktree_mode = Always;
       branch_prefix;
@@ -192,8 +200,9 @@ let headless_options pi_command wt_command branch_prefix_override fork home scri
  in
 let headless_options_term =
   Cmdliner.Term.(
-    const headless_options $ pi_command_arg $ wt_command_arg $ branch_prefix_arg
-    $ fork_arg $ home_arg $ script_dir_arg)
+    const headless_options $ harness_arg $ codex_yolo_arg $ pi_command_arg
+    $ codex_command_arg $ wt_command_arg $ branch_prefix_arg $ fork_arg
+    $ home_arg $ script_dir_arg)
  in
 let start name home harness_override codex_yolo_override pi_command codex_command =
   match
@@ -287,22 +296,68 @@ let headless_prepare_many_term =
   in
   Cmdliner.Term.(const headless_prepare_many $ manifest $ dry_run $ headless_options_term)
  in
-let headless_begin explicit_resume worker options =
+let print_headless_result = function
+  | Error msg -> exit_code (Error msg)
+  | Ok json ->
+      Headless.print_json json;
+      0
+ in
+
+let headless_begin worker options =
+  match options with
+  | Error message -> exit_code (Error message)
+  | Ok options ->
+      Headless.begin_worker ~explicit_resume:false options worker
+      |> print_headless_result
+ in
+
+let headless_run worker options =
+  match options with
+  | Error message -> exit_code (Error message)
+  | Ok options ->
+      Headless.run_codex_worker ~explicit_resume:false options worker
+      |> print_headless_result
+ in
+
+let headless_resume worker options =
   match options with
   | Error message -> exit_code (Error message)
   | Ok options -> (
-      match Headless.begin_worker ~explicit_resume options worker with
-      | Error msg -> exit_code (Error msg)
-      | Ok json ->
-          Headless.print_json json;
-          0)
+      match options.Launcher.harness with
+      | Harness.Pi ->
+          Headless.begin_worker ~explicit_resume:true options worker
+          |> print_headless_result
+      | Harness.Codex ->
+          Headless.run_codex_worker ~explicit_resume:true options worker
+          |> print_headless_result)
  in
-let headless_worker_term explicit_resume =
+let headless_worker_term command =
   let worker =
     let doc = "Worker id, branch leaf, branch, or title slug." in
     Cmdliner.Arg.(required & pos 0 (some string) None & info [] ~docv:"WORKER" ~doc)
   in
-  Cmdliner.Term.(const (headless_begin explicit_resume) $ worker $ headless_options_term)
+  Cmdliner.Term.(const command $ worker $ headless_options_term)
+ in
+let headless_run_many manifest options =
+  match options with
+  | Error message -> exit_code (Error message)
+  | Ok options ->
+      let manifest = Shell.abs_path manifest |> Shell.normalize in
+      (match Manifest.load ~home:options.Launcher.home manifest with
+      | Error msg -> exit_code (Error msg)
+      | Ok jobs -> (
+          match Headless.run_codex_many options jobs with
+          | Error msg -> exit_code (Error msg)
+          | Ok (json, success) ->
+              Headless.print_json json;
+              if success then 0 else 1))
+ in
+let headless_run_many_term =
+  let manifest =
+    let doc = "JSON manifest containing prepared Monty jobs to run with Codex." in
+    Cmdliner.Arg.(required & opt (some string) None & info [ "manifest" ] ~docv:"FILE" ~doc)
+  in
+  Cmdliner.Term.(const headless_run_many $ manifest $ headless_options_term)
  in
 let resume archived worker options =
   match options with
@@ -744,15 +799,26 @@ let headless_cmd =
   in
   let begin_cmd =
     let doc = "Claim one prepared worker and emit its harness subagent call." in
-    Cmdliner.Cmd.v (Cmdliner.Cmd.info "begin" ~doc) (headless_worker_term false)
+    Cmdliner.Cmd.v (Cmdliner.Cmd.info "begin" ~doc)
+      (headless_worker_term headless_begin)
+  in
+  let run_cmd =
+    let doc = "Run one prepared worker through the non-interactive Codex review chain." in
+    Cmdliner.Cmd.v (Cmdliner.Cmd.info "run" ~doc)
+      (headless_worker_term headless_run)
+  in
+  let run_many_cmd =
+    let doc = "Run prepared manifest workers concurrently through Codex review chains." in
+    Cmdliner.Cmd.v (Cmdliner.Cmd.info "run-many" ~doc) headless_run_many_term
   in
   let resume_cmd =
-    let doc = "Intentionally emit a successor harness call for an open worker." in
-    Cmdliner.Cmd.v (Cmdliner.Cmd.info "resume" ~doc) (headless_worker_term true)
+    let doc = "Intentionally start or emit a successor headless chain for an open worker." in
+    Cmdliner.Cmd.v (Cmdliner.Cmd.info "resume" ~doc)
+      (headless_worker_term headless_resume)
   in
-  let doc = "Generate headless calls for the harness subagent tool." in
+  let doc = "Prepare and run headless Pi or Codex worker chains." in
   Cmdliner.Cmd.group (Cmdliner.Cmd.info "headless" ~doc)
-    [ prepare_cmd; begin_cmd; resume_cmd ]
+    [ prepare_cmd; begin_cmd; run_cmd; run_many_cmd; resume_cmd ]
  in
 let doctor_cmd =
   let doc = "Check Monty launch dependencies." in

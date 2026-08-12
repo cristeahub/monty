@@ -1011,9 +1011,15 @@ let test_headless_json_contract () =
         worker_dir = dispatch.worker_dir;
         status = "prepared" }
   in
-  let prepared_json = Headless.prepare_json [ prepared ] in
+  let prepared_json =
+    Headless.prepare_json ~harness:Harness.Codex ~codex_yolo:true [ prepared ]
+  in
   assert_equal "headless prepare schema" Headless.prepare_schema
     Yojson.Safe.Util.(prepared_json |> member "schema" |> to_string);
+  assert_equal "headless prepare harness" "codex"
+    Yojson.Safe.Util.(prepared_json |> member "harness" |> to_string);
+  assert_bool "headless prepare YOLO"
+    Yojson.Safe.Util.(prepared_json |> member "codex_yolo" |> to_bool);
   assert_equal "headless prepare status" "prepared"
     Yojson.Safe.Util.(
       prepared_json |> member "jobs" |> index 0 |> member "status" |> to_string)
