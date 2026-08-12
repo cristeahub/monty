@@ -141,6 +141,7 @@ let setup_environment root =
   let env =
     env_with
       [ ("MONTY_HOME", home);
+        ("CODEX_HOME", Filename.concat root "codex-home");
         ("PATH", fake_bin ^ ":/usr/bin:/bin");
         ("MONTY_WT_COMMAND", "wt");
         ("MONTY_PI_COMMAND", "pi") ]
@@ -524,6 +525,55 @@ let test_external_terminal_request_runs_without_state_lock () =
       match tasks with
       | `List [ _; _ ] -> ()
       | _ -> failwith "nested terminal task mutation did not complete outside the state lock")
+
+let test_codex_launch_trusts_project_before_terminal_request () =
+  with_temp_root "codex-trust" (fun root ->
+      let home, log, env = setup_environment root in
+      let repo = Filename.concat root "repo" in
+      let context = Filename.concat root "context.md" in
+      let codex_config = Filename.concat root "codex-home/config.toml" in
+      add_project ~root ~home ~env repo;
+      Shell.write_file context "# Codex trust context\n";
+      let osascript = Filename.concat root "fake-bin/osascript" in
+      Shell.write_file osascript
+        (String.concat "\n"
+           [ "#!/bin/sh";
+             "printf '%s\\n' \"$0 $*\" >> " ^ Shell.quote log;
+             "exit 0";
+             "" ]);
+      Shell.chmod_executable osascript;
+      let common =
+        [ "launch";
+          "--home";
+          home;
+          "--repo";
+          repo;
+          "--title";
+          "Codex trusted worker";
+          "--context";
+          context;
+          "--branch";
+          "cto/codex-trusted-worker";
+          "--worktree";
+          "never";
+          "--harness";
+          "codex" ]
+      in
+      let dry = run ~root ~env 410 (common @ [ "--terminal"; "dry-run" ]) in
+      require_code 0 dry;
+      if Sys.file_exists codex_config then
+        failwith "Codex dry-run changed the Codex config";
+      let launched =
+        run ~root ~env 411 (common @ [ "--terminal"; "ghostty" ])
+      in
+      require_code 0 launched;
+      let config = Shell.read_file codex_config in
+      require_contains "Codex trusted project table" config
+        (Codex_trust.project_header (Unix.realpath repo));
+      require_contains "Codex trusted project value" config
+        "trust_level = \"trusted\"";
+      require_contains "Codex terminal requested after trust" (Shell.read_file log)
+        "osascript")
 
 let local_task_status home =
   match
@@ -2857,6 +2907,8 @@ let () =
     ("cli_rejects_state_parent_and_lock_symlinks", test_cli_rejects_state_parent_and_lock_symlinks);
     ( "cli_external_terminal_request_runs_without_state_lock",
       test_external_terminal_request_runs_without_state_lock );
+    ( "cli_codex_launch_trusts_project_before_terminal_request",
+      test_codex_launch_trusts_project_before_terminal_request );
     ( "cli_lifecycle_faults_recover_from_both_locations",
       test_lifecycle_faults_recover_from_both_locations );
     ( "cli_completion_persists_force_and_never_creates_worktree",

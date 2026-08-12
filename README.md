@@ -121,6 +121,10 @@ Monty asks `wt`, validates that the returned worktree belongs to the requested r
 The generated worker launch script reruns `monty ensure-worktree --repo <repo> --branch <branch>` when the terminal starts, so the correct worktree can be recreated if it was deleted after launch.
 Durable worker memory lives under Monty home, not in the wt worktree.
 The worker receives both Monty instructions and the context file through the selected harness. Pi uses `@file` arguments; Codex receives a prompt containing the absolute input and durable-memory paths.
+Before starting Codex, Monty records the exact worker worktree as trusted in
+`$CODEX_HOME/config.toml` (or `~/.codex/config.toml`). This answers Codex's
+directory-trust question for Monty-launched sessions without changing command
+approval or sandbox settings.
 
 ## Launch many workers
 
@@ -477,6 +481,10 @@ Disable it again with:
 ```sh
 monty settings set codex-yolo false
 ```
+
+Monty also trusts the exact head-butler directory or worker worktree before
+starting Codex. This only suppresses Codex's initial directory-trust question;
+it does not enable YOLO mode.
 
 When enabled, Monty adds
 `--dangerously-bypass-approvals-and-sandbox` to Codex head-butler and worker

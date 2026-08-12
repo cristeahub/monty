@@ -964,42 +964,54 @@ let begin_request ?(persist_failure = true) ?(write_script = true) options
   match workdir_result with
   | Error message -> `Failed (fail message)
   | Ok workdir ->
-      let initial_workdir =
-        match options.worktree_mode with Always -> prepared.repo | Never -> workdir
+      let trust_result =
+        match options.harness with
+        | Harness.Pi -> Ok ()
+        | Harness.Codex -> Codex_trust.ensure ~home:options.home ~path:workdir
       in
-      let script_result =
-        if not write_script then Ok ()
-        else
-          try
-            ignore
-              (Harness_command.write_launch_script ~path:prepared.script_path
-                 ~options:(harness_options options) ~job:prepared.job ~id:prepared.id
-                 ~branch:prepared.branch ~source_repo:prepared.repo
-                 ~initial_workdir ~context:prepared.context
-                 ~instructions:prepared.instructions
-                 ~worker_dir:prepared.worker_dir
-                 ~worktree_mode:(worktree_mode_string options)
-                 ~wt_command:options.wt_command ());
-            Ok ()
-          with
-          | Sys_error msg -> Error msg
-          | Unix.Unix_error (err, fn, arg) ->
-              Error
-                (Printf.sprintf "failed to write launch script via %s(%s): %s" fn
-                   arg (Unix.error_message err))
-      in
-      (match script_result with
+      (match trust_result with
       | Error message -> `Failed (fail message)
-      | Ok () -> (
-          match fault "launch-before-request-state" with
+      | Ok () ->
+          let initial_workdir =
+            match options.worktree_mode with
+            | Always -> prepared.repo
+            | Never -> workdir
+          in
+          let script_result =
+            if not write_script then Ok ()
+            else
+              try
+                ignore
+                  (Harness_command.write_launch_script ~path:prepared.script_path
+                     ~options:(harness_options options) ~job:prepared.job
+                     ~id:prepared.id ~branch:prepared.branch
+                     ~source_repo:prepared.repo ~initial_workdir
+                     ~context:prepared.context
+                     ~instructions:prepared.instructions
+                     ~worker_dir:prepared.worker_dir
+                     ~worktree_mode:(worktree_mode_string options)
+                     ~wt_command:options.wt_command ());
+                Ok ()
+              with
+              | Sys_error msg -> Error msg
+              | Unix.Unix_error (err, fn, arg) ->
+                  Error
+                    (Printf.sprintf
+                       "failed to write launch script via %s(%s): %s" fn arg
+                       (Unix.error_message err))
+          in
+          (match script_result with
           | Error message -> `Failed (fail message)
           | Ok () -> (
-              match
-                update_launch_state options prepared ~expected_statuses
-                  ~status:"launch-requested" ~worktree:workdir ()
-              with
-              | Error message -> `Failed message
-              | Ok () -> `Ready { workdir; initial_workdir })))
+              match fault "launch-before-request-state" with
+              | Error message -> `Failed (fail message)
+              | Ok () -> (
+                  match
+                    update_launch_state options prepared ~expected_statuses
+                      ~status:"launch-requested" ~worktree:workdir ()
+                  with
+                  | Error message -> `Failed message
+                  | Ok () -> `Ready { workdir; initial_workdir }))))
 
 let request_one options (prepared : prepared) ~expected_statuses =
   match begin_request options prepared ~expected_statuses with

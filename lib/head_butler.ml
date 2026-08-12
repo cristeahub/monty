@@ -1,3 +1,5 @@
+let ( let* ) = Result.bind
+
 let command ~home ~harness ~harness_command ~codex_yolo ~name =
   match harness with
   | Harness.Pi ->
@@ -14,6 +16,11 @@ let start ~home ~harness ~harness_command ~codex_yolo ~name =
   if not (Sys.file_exists home && Sys.is_directory home) then
     Error (Printf.sprintf "Monty home is not an existing directory: %s" home)
   else
+    let* () =
+      match harness with
+      | Harness.Pi -> Ok ()
+      | Harness.Codex -> Codex_trust.ensure ~home ~path:home
+    in
     let command = command ~home ~harness ~harness_command ~codex_yolo ~name in
     match Unix.execv "/bin/sh" [| "/bin/sh"; "-c"; command |] with
     | () -> assert false

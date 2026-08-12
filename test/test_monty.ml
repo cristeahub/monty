@@ -76,6 +76,52 @@ let test_shell_quote () =
   assert_equal "quote simple" "'hello'" (Shell.quote "hello");
   assert_equal "quote apostrophe" "'it'\\''s'" (Shell.quote "it's")
 
+let test_codex_trust_config () =
+  let root = temp_root "codex-trust" in
+  let project = Filename.concat root "repo.with-\"quote" in
+  let other_project = Filename.concat root "other-repo" in
+  let config_dir = Filename.concat root "codex-home" in
+  let config = Filename.concat config_dir "config.toml" in
+  Shell.ensure_dir project;
+  Shell.ensure_dir other_project;
+  Shell.ensure_dir config_dir;
+  let project = Unix.realpath project in
+  Shell.write_file config
+    (String.concat "\n"
+       [ "model = \"fixed\"";
+         Codex_trust.project_header project;
+         "trust_level = \"untrusted\"";
+         "" ]);
+  Unix.chmod config 0o640;
+  must (Codex_trust.ensure_file ~config_path:config ~path:project);
+  let trusted = Shell.read_file config in
+  assert_contains "Codex project is trusted" trusted
+    (Codex_trust.project_header project ^ "\ntrust_level = \"trusted\"");
+  assert_not_contains "Codex untrusted value is replaced" trusted
+    "trust_level = \"untrusted\"";
+  assert_bool "Codex config permissions are preserved"
+    ((Unix.stat config).Unix.st_perm land 0o777 = 0o640);
+  must (Codex_trust.ensure_file ~config_path:config ~path:project);
+  assert_equal "Codex trust update is idempotent" trusted (Shell.read_file config);
+  must (Codex_trust.ensure_file ~config_path:config ~path:other_project);
+  assert_contains "second Codex project is appended" (Shell.read_file config)
+    (Codex_trust.project_header (Unix.realpath other_project)
+    ^ "\ntrust_level = \"trusted\"");
+  let symlink = Filename.concat config_dir "linked-config.toml" in
+  Unix.symlink config symlink;
+  must (Codex_trust.ensure_file ~config_path:symlink ~path:project);
+  assert_bool "Codex config symlink is preserved"
+    ((Unix.lstat symlink).Unix.st_kind = Unix.S_LNK);
+  let dangling = Filename.concat config_dir "dangling-config.toml" in
+  Unix.symlink (Filename.concat config_dir "missing.toml") dangling;
+  (match Codex_trust.ensure_file ~config_path:dangling ~path:project with
+  | Ok () -> failwith "dangling Codex config symlink was replaced"
+  | Error message ->
+      assert_contains "dangling Codex config diagnostic" message
+        "resolve Codex config symlink");
+  assert_bool "dangling Codex config symlink remains untouched"
+    ((Unix.lstat dangling).Unix.st_kind = Unix.S_LNK)
+
 let test_manifest () =
   let root = temp_root "manifest" in
   let run_dir = Filename.concat root ".monty/runs/test" in
@@ -978,6 +1024,7 @@ let run_named name test =
 let () =
   [ ("slug", test_slug);
     ("shell_quote", test_shell_quote);
+    ("codex_trust_config", test_codex_trust_config);
     ("manifest", test_manifest);
     ("worker_memory_and_resume", test_worker_memory_and_resume);
     ("wt_repo_disambiguation", test_wt_disambiguates_repo_when_branch_name_collides);
