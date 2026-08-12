@@ -1,5 +1,7 @@
 # monty, the head butler
 
+![Monty, the head butler](monty.png)
+
 Monty is a small OCaml launcher for running a head agent session that plans work and spins out Pi or Codex worker sessions.
 Ghostty tabs, windows, and splits remain the default execution surface.
 An optional head-butler workflow can instead run workers through the harness's existing Pi subagent tool without opening Ghostty.
