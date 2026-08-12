@@ -1653,6 +1653,8 @@ let test_launch_batch_preflight_is_all_or_nothing () =
         "[dry-run] harness: codex";
       require_contains "Codex dry-run command" codex_dry.stdout
         "model_reasoning_effort=\"xhigh\"";
+      require_contains "Codex dry-run Vim mode" codex_dry.stdout
+        "tui.vim_mode_default=true";
       if Shell.read_file tasks_path <> tasks_before then
         failwith "Codex dry-run created planned tasks";
       if Sys.file_exists workers then
@@ -2771,6 +2773,8 @@ let test_settings_commands_and_effective_harness () =
         "--dangerously-bypass-approvals-and-sandbox";
       require_contains "persisted Codex xhigh command" dry_run.stdout
         "model_reasoning_effort=\"xhigh\"";
+      require_contains "persisted Codex Vim mode" dry_run.stdout
+        "tui.vim_mode_default=true";
       let doctor =
         run ~root ~env 1953
           [ "doctor"; "--home"; home; "--terminal"; "dry-run";

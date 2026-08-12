@@ -836,6 +836,7 @@ let test_codex_harness_command () =
     "exec codex --model fixed";
   assert_contains "Codex xhigh reasoning effort" command
     "model_reasoning_effort=\"xhigh\"";
+  assert_contains "Codex Vim mode default" command "tui.vim_mode_default=true";
   assert_contains "codex instruction path" command "/monty/MONTY.md";
   assert_contains "codex context path" command "/monty/context.md";
   assert_contains "codex worker memory" command "/monty/workers/task-1/memory.md";
@@ -856,7 +857,9 @@ let test_codex_harness_command () =
   assert_contains "head-butler Codex YOLO flag" head_butler
     "--dangerously-bypass-approvals-and-sandbox";
   assert_contains "head-butler Codex xhigh reasoning effort" head_butler
-    "model_reasoning_effort=\"xhigh\""
+    "model_reasoning_effort=\"xhigh\"";
+  assert_contains "head-butler Codex Vim mode default" head_butler
+    "tui.vim_mode_default=true"
 
 let test_codex_harness_rejects_fork () =
   let options =

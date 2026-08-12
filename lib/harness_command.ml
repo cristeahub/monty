@@ -9,6 +9,7 @@ type options = {
 }
 
 let codex_effort_arg = " -c " ^ Shell.quote "model_reasoning_effort=\"xhigh\""
+let codex_vim_arg = " -c " ^ Shell.quote "tui.vim_mode_default=true"
 
 let script_filename ~script_dir ~title =
   let slug = Slug.of_title title in
@@ -55,7 +56,8 @@ let build_command ~options ~instructions ~job ~context =
           " --dangerously-bypass-approvals-and-sandbox"
         else ""
       in
-      Printf.sprintf "exec %s%s%s -C . %s" options.command codex_effort_arg yolo
+      Printf.sprintf "exec %s%s%s%s -C . %s" options.command codex_effort_arg
+        codex_vim_arg yolo
         (Shell.quote (codex_prompt ~instructions ~context job))
 
 let rehydrate_lines ~monty_command ~wt_command ~branch ~source_repo =

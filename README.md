@@ -494,6 +494,9 @@ enable it when the surrounding environment provides the isolation you need.
 Monty also pins `model_reasoning_effort="xhigh"` with a Codex `-c` override for
 every Codex head-butler, launch, and resume command. This takes precedence over
 a lower effort configured in the user's global Codex configuration.
+Monty likewise sets `tui.vim_mode_default=true`, so each Codex composer starts
+in Vim normal mode. Use `/vim` inside Codex to toggle it for the current
+session.
 
 Harness selection uses this precedence:
 

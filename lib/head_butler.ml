@@ -6,8 +6,9 @@ let command ~home ~harness ~harness_command ~codex_yolo ~name =
       Printf.sprintf "cd %s && exec %s --name %s" (Shell.quote home)
         harness_command (Shell.quote name)
   | Harness.Codex ->
-      Printf.sprintf "cd %s && exec %s%s%s -C ." (Shell.quote home)
+      Printf.sprintf "cd %s && exec %s%s%s%s -C ." (Shell.quote home)
         harness_command Harness_command.codex_effort_arg
+        Harness_command.codex_vim_arg
         (if codex_yolo then " --dangerously-bypass-approvals-and-sandbox"
          else "")
 
