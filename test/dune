@@ -13,4 +13,8 @@
  (alias runtest)
  (deps test_install.sh ../install.sh ../.monty/version)
  (action
-  (run sh %{dep:test_install.sh} %{dep:../install.sh} %{dep:../.monty/version})))
+  (run
+   sh
+   %{dep:test_install.sh}
+   %{dep:../install.sh}
+   %{dep:../.monty/version})))
