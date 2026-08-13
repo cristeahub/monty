@@ -2206,6 +2206,54 @@ let test_retry_uses_recorded_script_and_absolute_commands () =
         failwith "retry changed recorded script ownership";
       require_empty_log log)
 
+let test_ghostty_launch_script_matches_ensure_worktree_cli () =
+  with_temp_root "ghostty-ensure-worktree-contract" (fun root ->
+      let home, log, env = setup_environment root in
+      let repo = Filename.concat root "repo" in
+      let context = Filename.concat root "context.md" in
+      let manifest =
+        Filename.concat home ".monty/runs/run-ghostty-contract/jobs.json"
+      in
+      let osascript = Filename.concat root "fake-bin/osascript" in
+      init_git_repo repo;
+      add_project ~root ~home ~env repo;
+      install_create_wt ~root ~log;
+      Shell.write_file context "# Ghostty ensure-worktree contract\n";
+      Shell.write_file osascript "#!/bin/sh\nexit 0\n";
+      Shell.chmod_executable osascript;
+      write_manifest manifest
+        [ manifest_job ~id:"ghostty-contract"
+            ~branch:"cto/ghostty-contract" ~title:"Ghostty contract" ~repo
+            ~context () ];
+      let launched =
+        run ~root ~env 1322
+          [ "launch-many"; "--manifest"; manifest; "--home"; home;
+            "--terminal"; "ghostty"; "--worktree"; "always";
+            "--pi-command"; "/usr/bin/true"; "--wt-command"; "wt" ]
+      in
+      require_code 0 launched;
+      let job_file =
+        Filename.concat home
+          ".monty/runs/run-ghostty-contract/workers/ghostty-contract/job.json"
+      in
+      let launch_script =
+        Yojson.Safe.from_file job_file |> json_string "launch_script"
+      in
+      let script_contents = Shell.read_file launch_script in
+      require_contains "Ghostty script raw ensure-worktree invocation"
+        script_contents "ensure-worktree --repo";
+      if string_contains script_contents "--branch 'cto/ghostty-contract' --home"
+      then
+        failf "Ghostty script passed unsupported --home to ensure-worktree:\n%s"
+          script_contents;
+      match Process.run_capture (Shell.quote launch_script) with
+      | Error message ->
+          failf "generated Ghostty launch script could not run: %s" message
+      | Ok { status = `Exited 0; _ } -> ()
+      | Ok { stdout; status } ->
+          failf "generated Ghostty launch script failed with %s:\n%s"
+            (Process.status_to_string status) stdout)
+
 let test_lifecycle_rejects_cross_project_and_owned_task_links () =
   with_temp_root "lifecycle-task-ownership" (fun root ->
       let home, log, env = setup_environment root in
@@ -3608,6 +3656,8 @@ let () =
       test_launch_rejects_global_identity_conflicts_and_races );
     ( "cli_retry_uses_recorded_script_and_absolute_commands",
       test_retry_uses_recorded_script_and_absolute_commands );
+    ( "cli_ghostty_launch_script_matches_ensure_worktree_cli",
+      test_ghostty_launch_script_matches_ensure_worktree_cli );
     ( "cli_lifecycle_rejects_cross_project_and_owned_task_links",
       test_lifecycle_rejects_cross_project_and_owned_task_links );
     ( "cli_launch_state_race_preserves_completion_transition",

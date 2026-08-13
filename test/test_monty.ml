@@ -897,6 +897,19 @@ let test_codex_harness_command () =
   assert_not_contains "codex does not use pi file syntax" command "@/monty";
   assert_not_contains "Codex YOLO defaults off" command
     "--dangerously-bypass-approvals-and-sandbox";
+  let single_always_script =
+    Harness_command.launch_script_contents ~options ~job ~id:"task-1"
+      ~branch:"cto/task-1" ~source_repo:"/repo" ~initial_workdir:"/repo"
+      ~home:"/monty" ~context:job.context ~instructions:"/monty/MONTY.md"
+      ~worker_dir:"/monty/workers/task-1" ~worktree_mode:"always"
+      ~wt_command:"wt"
+  in
+  assert_contains "single workspace uses raw ensure-worktree"
+    single_always_script
+    "ensure-worktree --repo '/repo' --branch 'cto/task-1' --wt-command 'wt'";
+  assert_not_contains "raw ensure-worktree rejects global home option"
+    single_always_script
+    "ensure-worktree --repo '/repo' --branch 'cto/task-1' --home";
   let multi_job =
     Job.make_with_workspaces ~worker_dir:"/monty/workers/task-1"
       ~title:"Codex multi task"
@@ -933,6 +946,28 @@ let test_codex_harness_command () =
   assert_contains "multi workspace rehydration uses explicit Monty home"
     always_script
     "task workspace ensure 'local:local-005' --repo '/repo' --home '/monty'";
+  let unlinked_multi_job =
+    Job.make_with_workspaces ~worker_dir:"/monty/workers/task-1"
+      ~title:"Unlinked Codex multi task"
+      ~workspaces:
+        [ Job.{ repo = "/repo"; branch = Some "cto/task-1" };
+          Job.{ repo = "/admin"; branch = Some "cto/admin-task-1" } ]
+      ~context:"/monty/context.md" ()
+  in
+  let unlinked_always_script =
+    Harness_command.launch_script_contents ~options ~job:unlinked_multi_job
+      ~id:"task-1" ~branch:"cto/task-1" ~source_repo:"/repo"
+      ~initial_workdir:"/repo" ~home:"/monty"
+      ~context:unlinked_multi_job.context ~instructions:"/monty/MONTY.md"
+      ~worker_dir:"/monty/workers/task-1" ~worktree_mode:"always"
+      ~wt_command:"wt"
+  in
+  assert_contains "unlinked multi workspace uses raw ensure-worktree"
+    unlinked_always_script
+    "ensure-worktree --repo '/admin' --branch 'cto/admin-task-1' --wt-command 'wt'";
+  assert_not_contains "unlinked raw ensure-worktree rejects global home option"
+    unlinked_always_script
+    "ensure-worktree --repo '/admin' --branch 'cto/admin-task-1' --home";
   let yolo_command =
     Harness_command.build_command
       ~options:{ options with codex_yolo = true }
