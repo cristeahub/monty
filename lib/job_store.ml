@@ -13,6 +13,12 @@ type transition = {
   started_at : string;
 }
 
+type workspace_state = {
+  repo : string;
+  branch : string option;
+  worktree : string option;
+}
+
 type record = {
   path : string;
   id : string;
@@ -22,6 +28,7 @@ type record = {
   run_dir : string;
   worktree_mode : string;
   last_known_worktree : string option;
+  workspaces : workspace_state list;
   launch_script : string option;
   updated_at : string option;
   completed_at : string option;
@@ -44,6 +51,51 @@ let optional_string json name =
   | `String value when String.trim value = "" -> Ok None
   | `String value -> Ok (Some value)
   | _ -> Error (Printf.sprintf "job.json field %S must be a string when present" name)
+
+let parse_workspace json =
+  let* repo = member_string json "repo" in
+  let* branch = optional_string json "branch" in
+  let* worktree = optional_string json "worktree" in
+  if Filename.is_relative repo then
+    Error (Printf.sprintf "job workspace repo must be absolute: %s" repo)
+  else
+    let* worktree =
+      match worktree with
+      | Some path when Filename.is_relative path ->
+          Error (Printf.sprintf "job workspace worktree must be absolute: %s" path)
+      | value -> Ok value
+    in
+    let repo = Shell.normalize repo in
+    let worktree = Option.map Shell.normalize worktree in
+    Ok { repo; branch; worktree }
+
+let parse_workspaces json ~repo ~branch ~last_known_worktree =
+  match Util.member "workspaces" json with
+  | `Null -> Ok [ { repo; branch; worktree = last_known_worktree } ]
+  | `List [] -> Error "job.json field \"workspaces\" must not be empty"
+  | `List values ->
+      values
+      |> List.fold_left
+           (fun result json ->
+             let* workspaces = result in
+             let* workspace = parse_workspace json in
+             Ok (workspace :: workspaces))
+           (Ok [])
+      |> Result.map List.rev
+  | _ -> Error "job.json field \"workspaces\" must be an array when present"
+
+let json_of_workspace (workspace : workspace_state) =
+  `Assoc
+    ([ ("repo", `String workspace.repo) ]
+    @ (match workspace.branch with
+      | None -> []
+      | Some branch -> [ ("branch", `String branch) ])
+    @ (match workspace.worktree with
+      | None -> []
+      | Some worktree -> [ ("worktree", `String worktree) ]))
+
+let workspaces_update workspaces =
+  ("workspaces", `List (List.map json_of_workspace workspaces))
 
 let transition_operation_of_string = function
   | "complete" -> Ok Complete
@@ -197,6 +249,30 @@ let parse_job_file ?home path =
     let* persisted_run_dir = optional_string json "run_dir" in
     let* worktree_mode = optional_string json "worktree_mode" in
     let* last_known_worktree = optional_string json "last_known_worktree" in
+    let* workspaces =
+      parse_workspaces json ~repo ~branch ~last_known_worktree
+    in
+    let* () =
+      let repos =
+        workspaces
+        |> List.map (fun (workspace : workspace_state) -> workspace.repo)
+      in
+      if List.length repos <> List.length (List.sort_uniq String.compare repos) then
+        Error "job.json contains duplicate workspace repos"
+      else
+        match workspaces with
+        | [] -> assert false
+        | first :: _ ->
+            let repo = Shell.normalize (Shell.abs_path repo) in
+            if not (String.equal first.repo repo) then
+              Error "job.json first workspace repo does not match top-level repo"
+            else if first.branch <> branch then
+              Error "job.json first workspace branch does not match top-level branch"
+            else if first.worktree <> last_known_worktree then
+              Error
+                "job.json first workspace worktree does not match top-level last_known_worktree"
+            else Ok ()
+    in
     let* launch_script = optional_string json "launch_script" in
     let* updated_at = optional_string json "updated_at" in
     let* completed_at = optional_string json "completed_at" in
@@ -296,7 +372,16 @@ let parse_job_file ?home path =
       | None, None -> default_status path
     in
     let worktree_mode = Option.value ~default:"always" worktree_mode in
-    let job = Job.make ~id ?branch ~worker_dir ?prompt ?task_key ~title ~repo ~context () in
+    let job_workspaces =
+      List.map
+        (fun (workspace : workspace_state) ->
+          ({ repo = workspace.repo; branch = workspace.branch } : Job.workspace))
+        workspaces
+    in
+    let job =
+      Job.make ~id ?branch ~workspaces:job_workspaces ~worker_dir ?prompt
+        ?task_key ~title ~repo ~context ()
+    in
     Ok
       {
         path = Shell.normalize path;
@@ -307,6 +392,7 @@ let parse_job_file ?home path =
         run_dir;
         worktree_mode;
         last_known_worktree;
+        workspaces;
         launch_script;
         updated_at;
         completed_at;
@@ -343,15 +429,30 @@ let branch_leaf branch = Job.branch_leaf branch
 let matches needle record =
   let job = record.job in
   let needle_slug = Slug.of_title needle in
+  let task_needle =
+    if String.starts_with ~prefix:"local:" needle then needle
+    else if String.starts_with ~prefix:"local-" needle then "local:" ^ needle
+    else needle
+  in
   let id = Option.value ~default:record.id job.Job.id in
   let branch = Option.value ~default:"" job.Job.branch in
   let title_slug = Slug.of_title job.Job.title in
+  let workspace_branch_match =
+    job.Job.workspaces
+    |> List.exists (fun (workspace : Job.workspace) ->
+           let branch = Option.value ~default:"" workspace.branch in
+           String.equal needle branch
+           || String.equal needle (branch_leaf branch)
+           || String.equal needle_slug (branch_leaf branch))
+  in
   String.equal needle id
   || String.equal needle branch
   || String.equal needle (branch_leaf branch)
   || String.equal needle_slug id
   || String.equal needle_slug (branch_leaf branch)
   || String.equal needle_slug title_slug
+  || job.Job.task_key = Some task_needle
+  || workspace_branch_match
 
 let load_all ~home =
   let* canonical_home = State_path.canonicalize home in
@@ -465,7 +566,25 @@ let find ~home ?(scope = Active) needle =
   match load ~home ~scope with
   | Error msg -> Error msg
   | Ok records -> (
-      let matches = List.filter (matches needle) records in
+      let exact_task_key =
+        if String.starts_with ~prefix:"local:" needle then Some needle
+        else if String.starts_with ~prefix:"local-" needle then
+          Some ("local:" ^ needle)
+        else None
+      in
+      let exact_task_matches =
+        match exact_task_key with
+        | None -> []
+        | Some task_key ->
+            List.filter
+              (fun record -> record.job.Job.task_key = Some task_key)
+              records
+      in
+      let matches =
+        match exact_task_matches with
+        | _ :: _ -> exact_task_matches
+        | [] -> List.filter (matches needle) records
+      in
       match matches with
       | [] ->
           Error

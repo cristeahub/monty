@@ -50,7 +50,23 @@ let render_tasks tasks =
   let projects = List.map (fun task -> task.project) tasks in
   let statuses = List.map (fun task -> task.status) tasks in
   let titles = List.map (fun task -> task.title) tasks in
-  let branches = List.map (fun task -> Option.value ~default:"" task.branch) tasks in
+  let branch_label task =
+    match task.workspaces with
+    | [] -> Option.value ~default:"" task.branch
+    | [ workspace ] -> workspace.branch
+    | workspaces ->
+        let project_labels = String.split_on_char ',' task.project in
+        workspaces
+        |> List.mapi (fun index (workspace : task_workspace) ->
+               let label =
+                 match List.nth_opt project_labels index with
+                 | Some value -> value
+                 | None -> Filename.basename workspace.repo
+               in
+               label ^ "=" ^ workspace.branch)
+        |> String.concat "; "
+  in
+  let branches = List.map branch_label tasks in
   let id_width = width 2 ("ID" :: ids) in
   let project_width = width 7 ("PROJECT" :: projects) in
   let status_width = width 6 ("STATUS" :: statuses) in

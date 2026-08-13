@@ -11,7 +11,7 @@ replace_state=0
 write_shell_rc=${MONTY_WRITE_SHELL_RC:-1}
 shell_rc=${MONTY_SHELL_RC:-}
 branch_prefix=${MONTY_BRANCH_PREFIX:-monty}
-monty_state_version=1
+monty_state_version=2
 
 prefix_lock=
 home_lock=
@@ -27,6 +27,7 @@ binary_backup=
 wrapper_backup=
 shell_rc_tmp=
 version_tmp=
+version_previous=
 transaction_active=0
 home_backup_present=0
 home_activated=0
@@ -34,6 +35,7 @@ state_moved=0
 dev_state_reset=0
 dev_state_created=0
 version_created=0
+version_migrated=0
 binary_had_previous=0
 binary_activated=0
 wrapper_had_previous=0
@@ -377,6 +379,8 @@ inspect_state() {
   installed_state_version=$(cat "$version_file") || return 1
   if [ "$installed_state_version" = "$monty_state_version" ]; then
     state_kind=matching
+  elif [ "$installed_state_version" = 1 ] && [ "$monty_state_version" = 2 ]; then
+    state_kind=migratable
   else
     state_kind=mismatch
   fi
@@ -420,10 +424,11 @@ authorize_state() {
   esac
 }
 
-write_state_version() {
+write_state_version_value() {
+  version_value=$1
   ensure_directory "$state_dir" "Monty state directory" || return 1
   version_tmp=$(mktemp "$state_dir/.version-install.XXXXXX") || return 1
-  if ! (umask 077; printf '%s\n' "$monty_state_version" > "$version_tmp"); then
+  if ! (umask 077; printf '%s\n' "$version_value" > "$version_tmp"); then
     rm -f "$version_tmp"
     return 1
   fi
@@ -433,6 +438,17 @@ write_state_version() {
     return 1
   fi
   version_tmp=
+}
+
+write_state_version() {
+  write_state_version_value "$monty_state_version"
+}
+
+restore_previous_state_version() {
+  if [ "$version_migrated" -eq 1 ]; then
+    write_state_version_value "$version_previous"
+    version_migrated=0
+  fi
 }
 
 lock_pid() {
@@ -553,6 +569,8 @@ rollback_home() {
       rm -rf "$state_dir" || failed=1
     elif [ "$version_created" -eq 1 ]; then
       rm -f "$version_file" || failed=1
+    elif [ "$version_migrated" -eq 1 ]; then
+      restore_previous_state_version || failed=1
     fi
     return "$failed"
   fi
@@ -561,6 +579,8 @@ rollback_home() {
     if [ "$state_moved" -eq 1 ] && ! path_exists "$backup_home/.monty"; then
       if [ "$version_created" -eq 1 ]; then
         rm -f "$version_file" || failed=1
+      elif [ "$version_migrated" -eq 1 ]; then
+        restore_previous_state_version || failed=1
       fi
       if [ "$failed" -eq 0 ] && path_exists "$state_dir"; then
         mv "$state_dir" "$backup_home/.monty" || failed=1
@@ -685,6 +705,11 @@ activate_control_room() {
         version_created=1
         write_state_version
         ;;
+      migratable)
+        version_previous=$installed_state_version
+        version_migrated=1
+        write_state_version
+        ;;
       matching) ;;
       mismatch)
         dev_state_reset=1
@@ -708,9 +733,14 @@ activate_control_room() {
   stage_dir=
 
   case "$state_kind" in
-    matching)
+    matching|migratable)
       state_moved=1
       mv "$backup_home/.monty" "$state_dir"
+      if [ "$state_kind" = migratable ]; then
+        version_previous=$installed_state_version
+        version_migrated=1
+        write_state_version
+      fi
       ;;
     legacy)
       state_moved=1
@@ -923,6 +953,9 @@ run_in_repo dune build bin/main.exe
 if [ "$dry_run" -eq 1 ]; then
   if [ "$state_kind" = legacy ]; then
     printf '+ adopt existing unversioned .monty state as version %s\n' "$monty_state_version"
+  elif [ "$state_kind" = migratable ]; then
+    printf '+ migrate compatible .monty state from version %s to %s without replacing it\n' \
+      "$installed_state_version" "$monty_state_version"
   elif [ "$state_kind" = none ] || [ "$state_kind" = mismatch ]; then
     printf '+ initialize .monty state version %s\n' "$monty_state_version"
   else

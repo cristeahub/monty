@@ -738,6 +738,57 @@ let install_create_wt ~root ~log =
          "" ]);
   Shell.chmod_executable wt
 
+let install_repo_scoped_wt ~root ~log =
+  let worktrees = Filename.concat root "multi-worktrees" in
+  let state = Filename.concat root "multi-wt-state" in
+  let wt = Filename.concat root "fake-bin/wt" in
+  Shell.ensure_dir state;
+  Shell.write_file wt
+    (String.concat "\n"
+       [ "#!/bin/sh";
+         "set -eu";
+         "printf '%s\\n' \"$0 $(pwd -P) $*\" >> " ^ Shell.quote log;
+         "repo=$(pwd -P)";
+         "repo_name=$(basename \"$repo\")";
+         "case \"$1\" in";
+         "  b)";
+         "    branch=$2";
+         "    if [ \"${MONTY_TEST_WT_FAIL_BRANCH:-}\" = \"$branch\" ]; then exit 77; fi";
+         "    safe=$(printf '%s' \"$branch\" | tr '/ ' '__')";
+         "    entry=" ^ Shell.quote state ^ "/${repo_name}_${safe}.entry";
+         "    worktree=" ^ Shell.quote worktrees ^ "/${repo_name}_${safe}";
+         "    if [ ! -f \"$entry\" ]; then";
+         "      mkdir -p " ^ Shell.quote worktrees;
+         "      git worktree add -q -b \"$branch\" \"$worktree\"";
+         "      printf '%s\\n%s\\n' \"$branch\" \"$worktree\" > \"$entry\"";
+         "    fi";
+         "    sed -n '2p' \"$entry\"";
+         "    ;;";
+         "  list)";
+         "    printf '%s:\\n' \"$repo_name\"";
+         "    for entry in " ^ Shell.quote state ^ "/${repo_name}_*.entry; do";
+         "      [ -f \"$entry\" ] || continue";
+         "      branch=$(sed -n '1p' \"$entry\")";
+         "      worktree=$(sed -n '2p' \"$entry\")";
+         "      printf '  %s -> %s\\n' \"$branch\" \"$worktree\"";
+         "    done";
+         "    ;;";
+         "  db)";
+         "    branch=$2";
+         "    safe=$(printf '%s' \"$branch\" | tr '/ ' '__')";
+         "    entry=" ^ Shell.quote state ^ "/${repo_name}_${safe}.entry";
+         "    if [ -f \"$entry\" ]; then";
+         "      worktree=$(sed -n '2p' \"$entry\")";
+         "      git worktree remove -f \"$worktree\"";
+         "      git branch -D \"$branch\" >/dev/null";
+         "      rm -f \"$entry\"";
+         "    fi";
+         "    ;;";
+         "  *) exit 92 ;;";
+         "esac";
+         "" ]);
+  Shell.chmod_executable wt
+
 let install_codex_exec ~root ~log =
   let codex = Filename.concat root "fake-bin/codex" in
   Shell.write_file codex
@@ -2494,6 +2545,347 @@ let test_forged_launch_script_and_resume_mode_are_safe () =
       require_contains "atomically republished script"
         (Shell.read_file owned_script) "# monty-launch-script-v1")
 
+let test_multi_workspace_sonnet_task_lifecycle () =
+  with_temp_root "multi-workspace-sonnet" (fun root ->
+      let home, log, env = setup_environment root in
+      let backend = Filename.concat root "django-backend" in
+      let admin = Filename.concat root "admin" in
+      let context =
+        Filename.concat home
+          ".monty/runs/2026-08-13-sonnet-5-invoices/sonnet-5-invoices.md"
+      in
+      let manifest =
+        Filename.concat home
+          ".monty/runs/2026-08-13-sonnet-5-invoices/jobs.json"
+      in
+      let backend_branch = "cto/invoice-parser-sonnet-5" in
+      let admin_branch = "cto/admin-invoice-sonnet-5" in
+      init_git_repo backend;
+      init_git_repo admin;
+      add_project ~root ~home ~env backend;
+      add_project ~root ~home ~env admin;
+      install_repo_scoped_wt ~root ~log;
+      let osascript = Filename.concat root "fake-bin/osascript" in
+      Shell.write_file osascript
+        (String.concat "\n"
+           [ "#!/bin/sh";
+             "set -eu";
+             "printf '%s\\n' \"$0 $*\" >> " ^ Shell.quote log;
+             "" ]);
+      Shell.chmod_executable osascript;
+      let titles =
+        [ "Filler task 1"; "Filler task 2"; "Filler task 3";
+          "Filler task 4";
+          "Upgrade incoming invoice parsing to Claude Sonnet 5";
+          "Historical admin task";
+          "Expose Claude Sonnet 5 invoice reprocessing in admin" ]
+      in
+      List.iteri
+        (fun index title ->
+          let project = if index = 6 then "admin" else "django-backend" in
+          require_code 0
+            (run ~root ~env (2100 + index)
+               [ "task"; "add"; "--home"; home; "--project"; project;
+                 "--title"; title ]))
+        titles;
+      require_code 0
+        (run ~root ~env 2108
+           [ "task"; "done"; "local-006"; "--home"; home ]);
+      require_code 0
+        (run ~root ~env 2109
+           [ "task"; "workspace"; "add"; "local-005"; "--repo";
+             backend; "--branch"; backend_branch; "--home"; home ]);
+      require_code 0
+        (run ~root ~env 2110
+           [ "task"; "workspace"; "add"; "local-007"; "--repo"; admin;
+             "--branch"; admin_branch; "--home"; home ]);
+      let before_merge =
+        run ~root ~env 2111 [ "task"; "show"; "local-005"; "--home"; home ]
+      in
+      require_code 0 before_merge;
+      require_contains "pre-launch absolute backend repo" before_merge.stdout
+        backend;
+      require_contains "pre-launch workspace state" before_merge.stdout
+        "<not materialized>";
+      let merge =
+        run ~root ~env 2112
+          [ "task"; "merge"; "local-007"; "--into"; "local-005";
+            "--home"; home ]
+      in
+      require_code 0 merge;
+      require_contains "Sonnet task merge" merge.stdout
+        "Merged local:local-007 into local:local-005";
+      let tasks = local_tasks_json home in
+      let task id =
+        match
+          List.find_opt
+            (fun json -> String.equal (json_string "id" json) id)
+            tasks
+        with
+        | Some task -> task
+        | None -> failf "missing fixture task %s" id
+      in
+      let retained = task "local-005" in
+      let merged = task "local-007" in
+      if json_string "status" retained <> "open" then
+        failwith "local-005 was not retained as the open Sonnet task";
+      if json_string "status" merged <> "done" then
+        failwith "local-007 was not closed by the explicit merge";
+      require_contains "merged task provenance"
+        Yojson.Safe.Util.(merged |> member "notes" |> to_string)
+        "merged_into=local:local-005";
+      let retained_workspaces =
+        Yojson.Safe.Util.(retained |> member "workspaces" |> to_list)
+      in
+      if List.length retained_workspaces <> 2 then
+        failwith "local-005 did not retain both repository workspaces";
+      let open_inventory =
+        run ~root ~env 2113 [ "list"; "--no-sync"; "--home"; home ]
+      in
+      require_code 0 open_inventory;
+      require_contains "multi-project task inventory" open_inventory.stdout
+        "django-backend,admin";
+      require_contains "backend branch inventory" open_inventory.stdout
+        ("django-backend=" ^ backend_branch);
+      require_contains "admin branch inventory" open_inventory.stdout
+        ("admin=" ^ admin_branch);
+      let admin_inventory =
+        run ~root ~env 21131
+          [ "tasks"; "list"; "--project"; "admin"; "--no-sync"; "--home";
+            home ]
+      in
+      require_code 0 admin_inventory;
+      require_contains "secondary project filter" admin_inventory.stdout
+        "local:local-005";
+      let premature_ensure =
+        run ~root ~env 21135
+          [ "task"; "workspace"; "ensure"; "local-005"; "--repo"; admin;
+            "--home"; home; "--wt-command"; "wt" ]
+      in
+      if premature_ensure.code = 0 then
+        failwith "an unlaunched task materialized a workspace without worker state";
+      if string_contains (read_file log) "/wt " then
+        failwith "rejected pre-launch workspace ensure invoked wt";
+      Shell.ensure_dir (Filename.dirname context);
+      Shell.write_file context
+        (String.concat "\n"
+           [ "# Claude Sonnet 5 invoice rollout";
+             "";
+             "Implement the backend parser upgrade first, then expose it in admin.";
+             "Both repositories belong to one Monty task and one lifecycle.";
+             "" ]);
+      let workspace repo branch =
+        `Assoc [ ("repo", `String repo); ("branch", `String branch) ]
+      in
+      write_manifest manifest
+        [ `Assoc
+            [ ("id", `String "sonnet-5-invoices");
+              ( "title",
+                `String
+                  "Upgrade invoice parsing and admin reprocessing to Claude Sonnet 5" );
+              ( "workspaces",
+                `List
+                  [ workspace backend backend_branch;
+                    workspace admin admin_branch ] );
+              ("context", `String context);
+              ("task_key", `String "local:local-005") ] ];
+      let dry =
+        run ~root ~env 2114
+          [ "launch-many"; "--manifest"; manifest; "--terminal"; "dry-run";
+            "--home"; home ]
+      in
+      require_code 0 dry;
+      require_contains "dry-run backend absolute repo" dry.stdout backend;
+      require_contains "dry-run admin absolute repo" dry.stdout admin;
+      require_contains "dry-run second workspace" dry.stdout
+        "[dry-run] workspace 2 branch";
+      if string_contains (read_file log) "/wt " then
+        failwith "multi-workspace dry-run materialized a worktree";
+      let worker_dir =
+        Filename.concat home
+          ".monty/runs/2026-08-13-sonnet-5-invoices/workers/sonnet-5-invoices"
+      in
+      let job_file = Filename.concat worker_dir "job.json" in
+      let failed_env =
+        replace_env env [ ("MONTY_TEST_WT_FAIL_BRANCH", admin_branch) ]
+      in
+      let failed_launch =
+        run ~root ~env:failed_env 2115
+          [ "launch-many"; "--manifest"; manifest; "--terminal"; "ghostty";
+            "--home"; home ]
+      in
+      if failed_launch.code = 0 then
+        failwith "second-workspace materialization failure was ignored";
+      if job_status job_file <> "launch-failed" then
+        failwith "partial multi-workspace launch was not retryable";
+      let partial_workspaces =
+        Yojson.Safe.Util.(
+          Yojson.Safe.from_file job_file |> member "workspaces" |> to_list)
+      in
+      if
+        Yojson.Safe.Util.(List.nth partial_workspaces 0 |> member "worktree")
+        = `Null
+        || Yojson.Safe.Util.(List.nth partial_workspaces 1 |> member "worktree")
+           <> `Null
+      then
+        failwith "partial launch did not persist only the completed workspace";
+      let headless_prepared =
+        run ~root ~env 21152
+          [ "headless"; "prepare-many"; "--manifest"; manifest; "--home";
+            home ]
+      in
+      require_code 0 headless_prepared;
+      let headless_workspaces =
+        Yojson.Safe.Util.(
+          Yojson.Safe.from_string headless_prepared.stdout |> member "jobs"
+          |> index 0 |> member "workspaces" |> to_list)
+      in
+      if List.length headless_workspaces <> 2 then
+        failwith "headless preparation omitted a Sonnet task workspace";
+      if job_status job_file <> "prepared" then
+        failwith "headless multi-workspace retry did not leave the worker prepared";
+      let launched =
+        run ~root ~env 21155
+          [ "launch-many"; "--manifest"; manifest; "--terminal"; "ghostty";
+            "--home"; home ]
+      in
+      require_code 0 launched;
+      let job = Yojson.Safe.from_file job_file in
+      let materialized =
+        Yojson.Safe.Util.(job |> member "workspaces" |> to_list)
+      in
+      if List.length materialized <> 2 then
+        failwith "the Sonnet worker did not persist two workspaces";
+      let materialized_paths =
+        materialized
+        |> List.map (fun workspace ->
+               let path =
+                 Yojson.Safe.Util.(workspace |> member "worktree" |> to_string)
+               in
+               if Filename.is_relative path then
+                 failf "persisted worktree is not absolute: %s" path;
+               if not (Sys.file_exists path && Sys.is_directory path) then
+                 failf "persisted worktree does not exist: %s" path;
+               path)
+      in
+      let backend_worktree = List.nth materialized_paths 0 in
+      let admin_worktree = List.nth materialized_paths 1 in
+      if String.equal backend_worktree admin_worktree then
+        failwith "two repositories resolved to one worktree";
+      let shown =
+        run ~root ~env 2116 [ "task"; "show"; "local-005"; "--home"; home ]
+      in
+      require_code 0 shown;
+      List.iter
+        (require_contains "task show absolute workspace" shown.stdout)
+        [ backend; admin; backend_worktree; admin_worktree ];
+      require_contains "first workspace launch cwd" shown.stdout
+        ("Launch cwd: " ^ backend_worktree);
+      let present_rows =
+        shown.stdout |> String.split_on_char '\n'
+        |> List.filter (fun line -> string_contains line "\tpresent")
+        |> List.length
+      in
+      if present_rows <> 2 then
+        failf "task show did not report both materialized workspaces present:\n%s"
+          shown.stdout;
+      let script =
+        Shell.read_file
+          (Filename.concat (Home.runtime_script_dir ~home ())
+             "monty-sonnet-5-invoices-launch.sh")
+      in
+      require_contains "first workspace environment" script "MONTY_WORKSPACE_1";
+      require_contains "second workspace environment" script "MONTY_WORKSPACE_2";
+      require_contains "worker-scoped workspace rehydration" script
+        "task workspace ensure";
+      let late_workspace =
+        run ~root ~env 21158
+          [ "task"; "workspace"; "add"; "local-005"; "--repo"; backend;
+            "--branch"; "cto/late-workspace"; "--home"; home ]
+      in
+      if late_workspace.code = 0 then
+        failwith "linked task accepted a workspace membership change";
+      require_contains "linked workspace immutability" late_workspace.stderr
+        "immutable after launch";
+      let ensured_admin =
+        run ~root ~env 2116
+          [ "task"; "workspace"; "ensure"; "local-005"; "--repo"; admin;
+            "--home"; home; "--wt-command"; "wt" ]
+      in
+      require_code 0 ensured_admin;
+      require_line "task workspace ensure absolute output" ensured_admin.stdout
+        admin_worktree;
+      let task_resume =
+        run ~root ~env 21165
+          [ "resume"; "local-005"; "--terminal"; "dry-run"; "--home";
+            home ]
+      in
+      require_code 0 task_resume;
+      require_contains "task-id resume second workspace" task_resume.stdout admin;
+      Shell.write_file (Filename.concat admin_worktree "dirty-admin.txt") "dirty\n";
+      let blocked =
+        run ~root ~env 2117
+          [ "done"; "local-005"; "--home"; home; "--wt-command";
+            "wt" ]
+      in
+      if blocked.code = 0 then
+        failwith "dirty secondary workspace did not block the shared lifecycle";
+      require_contains "secondary dirty workspace diagnostic" blocked.stderr
+        admin_worktree;
+      if
+        not
+          (Sys.file_exists backend_worktree && Sys.file_exists admin_worktree
+          && Sys.file_exists worker_dir)
+      then failwith "multi-workspace preflight deleted part of a blocked task";
+      let blocked_task =
+        local_tasks_json home
+        |> List.find (fun json -> json_string "id" json = "local-005")
+      in
+      if json_string "status" blocked_task <> "open" then
+        failwith "blocked completion closed the shared local task";
+      let completed =
+        run ~root ~env 2118
+          [ "done"; "local:local-005"; "--force"; "--home"; home;
+            "--wt-command"; "wt" ]
+      in
+      require_code 0 completed;
+      require_contains "backend completion output" completed.stdout backend;
+      require_contains "admin completion output" completed.stdout admin;
+      if Sys.file_exists backend_worktree || Sys.file_exists admin_worktree then
+        failwith "completion did not remove every task worktree";
+      let archive_job =
+        Filename.concat home
+          ".monty/runs/2026-08-13-sonnet-5-invoices/archive/sonnet-5-invoices/job.json"
+      in
+      if not (Sys.file_exists archive_job) || job_status archive_job <> "done" then
+        failwith "the shared worker was not archived once";
+      let final_task =
+        local_tasks_json home
+        |> List.find (fun json -> json_string "id" json = "local-005")
+      in
+      if json_string "status" final_task <> "done" then
+        failwith "the shared local task did not close with its worker";
+      let archived_show =
+        run ~root ~env 2119 [ "task"; "show"; "local-005"; "--home"; home ]
+      in
+      require_code 0 archived_show;
+      let missing_rows =
+        archived_show.stdout |> String.split_on_char '\n'
+        |> List.filter (fun line -> string_contains line "\tmissing")
+        |> List.length
+      in
+      if missing_rows <> 2 then
+        failwith "archived task did not report both removed worktrees as missing";
+      let archived_resume =
+        run ~root ~env 2120
+          [ "resume"; "--archived"; "local:local-005"; "--terminal";
+            "dry-run"; "--home"; home ]
+      in
+      require_code 0 archived_resume;
+      require_contains "archived task-id resume" archived_resume.stdout admin;
+      if count_lines_containing log "/wt " < 6 then
+        failwith "the repo-scoped wt fake did not observe both workspace lifecycles")
+
 let test_headless_prepare_begin_and_resume () =
   with_temp_root "headless" (fun root ->
       let home, log, env = setup_environment root in
@@ -3220,6 +3612,8 @@ let () =
       test_launch_state_race_preserves_completion_transition );
     ( "cli_forged_launch_script_and_resume_mode_are_safe",
       test_forged_launch_script_and_resume_mode_are_safe );
+    ( "cli_multi_workspace_sonnet_task_lifecycle",
+      test_multi_workspace_sonnet_task_lifecycle );
     ( "cli_headless_prepare_begin_and_resume",
       test_headless_prepare_begin_and_resume );
     ( "cli_codex_headless_uses_effective_settings_without_ghostty",

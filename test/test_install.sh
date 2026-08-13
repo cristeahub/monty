@@ -145,12 +145,12 @@ run_same_home_install() {
   ) > "$log" 2>&1
 }
 
-assert_contents 'source state version' "$source_version" '1'
+assert_contents 'source state version' "$source_version" '2'
 
 printf 'release one\n' > "$repo/control-room.txt"
 printf 'binary one\n' > "$repo/binary-release.txt"
 run_install
-assert_contents 'new state version' "$state_dir/version" '1'
+assert_contents 'new state version' "$state_dir/version" '2'
 assert_contents 'new control room' "$installed_home/control-room.txt" 'release one'
 assert_release 'binary one'
 
@@ -164,7 +164,7 @@ run_install
 assert_contents 'preserved task state' "$state_dir/tasks.local.json" \
   '{"tasks":[{"id":"keep-me"}]}'
 assert_contents 'preserved worker memory' "$state_dir/memory.md" 'durable memory'
-assert_contents 'matching state version' "$state_dir/version" '1'
+assert_contents 'matching state version' "$state_dir/version" '2'
 # shellcheck disable=SC2012
 matching_inode=$(ls -di "$state_dir" | awk '{ print $1 }')
 if [ "$matching_inode" != "$state_inode" ]; then
@@ -184,7 +184,7 @@ if [ "$interrupt_status" -ne 143 ]; then
 fi
 assert_contents 'task state after interrupted rename' "$state_dir/tasks.local.json" \
   '{"tasks":[{"id":"keep-me"}]}'
-assert_contents 'version after interrupted rename' "$state_dir/version" '1'
+assert_contents 'version after interrupted rename' "$state_dir/version" '2'
 assert_contents 'control room after interrupted rename' \
   "$installed_home/control-room.txt" 'release two'
 assert_release 'binary two'
@@ -195,41 +195,55 @@ rm "$state_dir/version"
 printf 'release three\n' > "$repo/control-room.txt"
 printf 'binary three\n' > "$repo/binary-release.txt"
 run_install
-assert_contents 'adopted legacy state version' "$state_dir/version" '1'
+assert_contents 'adopted legacy state version' "$state_dir/version" '2'
 assert_contents 'legacy task state' "$state_dir/tasks.local.json" \
   '{"tasks":[{"id":"keep-me"}]}'
 assert_release 'binary three'
 
-printf '2\n' > "$state_dir/version"
+printf '1\n' > "$state_dir/version"
+printf 'migration release\n' > "$repo/control-room.txt"
+printf 'migration binary\n' > "$repo/binary-release.txt"
+run_install --dry-run
+assert_log_contains 'migrate compatible .monty state from version 1 to 2 without replacing it'
+assert_contents 'dry-run migration state' "$state_dir/version" '1'
+run_install
+assert_contents 'migrated state version' "$state_dir/version" '2'
+assert_contents 'migrated task state' "$state_dir/tasks.local.json" \
+  '{"tasks":[{"id":"keep-me"}]}'
+assert_contents 'migration control room' \
+  "$installed_home/control-room.txt" 'migration release'
+assert_release 'migration binary'
+
+printf '99\n' > "$state_dir/version"
 printf 'release four\n' > "$repo/control-room.txt"
 printf 'binary four\n' > "$repo/binary-release.txt"
 run_install --dry-run
 assert_log_contains 'WARNING: Monty state version mismatch'
 assert_log_contains 'explicit confirmation or --replace-state would be required'
-assert_contents 'mismatched state after dry run' "$state_dir/version" '2'
+assert_contents 'mismatched state after dry run' "$state_dir/version" '99'
 assert_contents 'control room after dry run' \
-  "$installed_home/control-room.txt" 'release three'
-assert_release 'binary three'
+  "$installed_home/control-room.txt" 'migration release'
+assert_release 'migration binary'
 run_install --dry-run --replace-state
 assert_log_contains 'state replacement is explicitly authorized but dry-run makes no changes'
-assert_contents 'authorized dry-run state' "$state_dir/version" '2'
+assert_contents 'authorized dry-run state' "$state_dir/version" '99'
 assert_contents 'authorized dry-run control room' \
-  "$installed_home/control-room.txt" 'release three'
-assert_release 'binary three'
+  "$installed_home/control-room.txt" 'migration release'
+assert_release 'migration binary'
 if run_install; then
   fail 'non-interactive version mismatch was accepted without explicit replacement'
 fi
 assert_log_contains 'WARNING: Monty state version mismatch'
 assert_log_contains "will delete the current .monty folder"
-assert_contents 'mismatched state remains' "$state_dir/version" '2'
+assert_contents 'mismatched state remains' "$state_dir/version" '99'
 assert_contents 'mismatched task state remains' "$state_dir/tasks.local.json" \
   '{"tasks":[{"id":"keep-me"}]}'
 assert_contents 'control room remains after refusal' \
-  "$installed_home/control-room.txt" 'release three'
-assert_release 'binary three'
+  "$installed_home/control-room.txt" 'migration release'
+assert_release 'migration binary'
 
 run_install --replace-state
-assert_contents 'replacement state version' "$state_dir/version" '1'
+assert_contents 'replacement state version' "$state_dir/version" '2'
 assert_absent 'replaced task state' "$state_dir/tasks.local.json"
 assert_absent 'replaced worker memory' "$state_dir/memory.md"
 assert_contents 'control room after replacement' \
@@ -237,6 +251,7 @@ assert_contents 'control room after replacement' \
 assert_release 'binary four'
 
 printf 'survive rollback\n' > "$state_dir/tasks.local.json"
+printf '1\n' > "$state_dir/version"
 printf 'release five\n' > "$repo/control-room.txt"
 printf 'binary five\n' > "$repo/binary-release.txt"
 fail_wrapper=1
@@ -250,16 +265,24 @@ assert_contents 'control room after rollback' \
   "$installed_home/control-room.txt" 'release four'
 assert_release 'binary four'
 
-printf '2\n' > "$repo/.monty/version"
+run_install
+assert_contents 'version after successful migration retry' "$state_dir/version" '2'
+assert_contents 'state after successful migration retry' \
+  "$state_dir/tasks.local.json" 'survive rollback'
+assert_contents 'control room after successful migration retry' \
+  "$installed_home/control-room.txt" 'release five'
+assert_release 'binary five'
+
+printf '99\n' > "$repo/.monty/version"
 printf 'same-home state\n' > "$repo/.monty/tasks.local.json"
 if run_same_home_install; then
   fail 'same-home state mismatch was accepted without confirmation'
 fi
-assert_contents 'same-home mismatched state' "$repo/.monty/version" '2'
+assert_contents 'same-home mismatched state' "$repo/.monty/version" '99'
 assert_contents 'same-home task state' \
   "$repo/.monty/tasks.local.json" 'same-home state'
 run_same_home_install --replace-state
-assert_contents 'same-home replacement version' "$repo/.monty/version" '1'
+assert_contents 'same-home replacement version' "$repo/.monty/version" '2'
 assert_absent 'same-home replaced task state' "$repo/.monty/tasks.local.json"
 assert_contents 'same-home source checkout' "$repo/control-room.txt" 'release five'
 if [ ! -f "$repo/install.sh" ]; then

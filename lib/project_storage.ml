@@ -239,8 +239,12 @@ let ensure_project_memory ~home (project : project) =
 
 let project_id_changes old_projects new_projects =
   new_projects
-  |> List.filter_map (fun project ->
-         match List.find_opt (fun old -> String.equal old.repo project.repo) old_projects with
+  |> List.filter_map (fun (project : project) ->
+         match
+           List.find_opt
+             (fun (old : project) -> String.equal old.repo project.repo)
+             old_projects
+         with
          | Some old when not (String.equal old.id project.id) -> Some (old.id, project.id)
          | _ -> None)
 

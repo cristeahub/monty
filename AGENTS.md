@@ -47,6 +47,47 @@ Create `.monty/runs/<run-id>/jobs.json` with this shape:
 }
 ```
 
+When one task spans repositories, keep one task, one context file, one worker,
+and one lifecycle. Replace the top-level `repo` and `branch` fields with an
+ordered `workspaces` array:
+
+```json
+{
+  "jobs": [
+    {
+      "id": "invoice-sonnet-5",
+      "title": "Upgrade invoice parsing and admin reprocessing",
+      "workspaces": [
+        {
+          "repo": "/absolute/path/to/django-backend",
+          "branch": "monty/invoice-parser-sonnet-5"
+        },
+        {
+          "repo": "/absolute/path/to/admin",
+          "branch": "monty/admin-invoice-sonnet-5"
+        }
+      ],
+      "context": ".monty/runs/<run-id>/invoice-sonnet-5.md",
+      "worker_dir": ".monty/runs/<run-id>/workers/invoice-sonnet-5",
+      "task_key": "local:local-001"
+    }
+  ]
+}
+```
+
+Every workspace repo must be an absolute registered project path. The array
+order is stable; its first entry is only the initial launch directory, not a
+`primary_project`, and every entry belongs to the same task. Use the `monty task
+workspace add` command to attach planned repo-plus-branch metadata before launch.
+Use `monty task show <task>` to see every repo, branch, and absolute materialized
+worktree path. Once the task has a linked worker, the `monty task workspace ensure` command
+rehydrates all workspaces through `wt` and persists their
+absolute paths; launch and resume do this automatically. If planning accidentally
+created separate unlaunched local tasks
+for one feature, use the `monty task merge <source> --into <target>` command after
+checking both identities; the source becomes historical and the target owns the
+combined workspace set.
+
 The `branch` field is optional.
 Prefer setting it when the issue number or task name gives a clear branch name.
 Use the configured branch prefix for branch names.
@@ -129,7 +170,7 @@ When a feature is complete, archive it with:
 monty done <worker-id>
 ```
 
-This deletes the worker worktree and branch, closes any linked Monty-owned local task, marks the job done, and moves durable worker memory to `.monty/runs/<run-id>/archive/<worker-id>/`.
+This deletes every worker worktree and branch, closes any linked Monty-owned local task, marks the job done, and moves durable worker memory to `.monty/runs/<run-id>/archive/<worker-id>/`.
 Do not run a separate `monty task done` for a linked local worker unless repairing old data from before this behavior existed.
 Use `--force` only when the user explicitly accepts discarding local worktree changes.
 Use `monty list --archived` or `monty list --all` when reviewing archived work.
@@ -149,7 +190,8 @@ Use `monty task add --project <project> --title <title>` for local tracking reco
 ## Worker expectations
 
 Worker sessions are launched in repo-scoped worktrees created by Monty's `ensure-worktree` flow.
-Headless child agents receive the exact same Monty-managed worktree as their explicit `cwd`; they must never request Pi-managed worktrees.
+For a multi-workspace task Monty materializes every declared repo-plus-branch pair, launches in the first, and supplies all absolute paths to the harness.
+Headless child agents receive the first Monty-managed worktree as their explicit `cwd` and every workspace through Monty instructions; they must never request Pi-managed worktrees.
 Monty validates that any `wt` result belongs to the requested repo, because different repos may use the same branch name.
 Treat wt worktrees as ephemeral.
 Durable session memory belongs in the worker directory under `.monty/runs/<run-id>/workers/<worker-id>/`.
@@ -192,8 +234,8 @@ Use `monty settings set codex-yolo true|false` to control whether Monty-launched
 Keep headless state and payload generation in Monty.
 Pi execution uses the harness's existing subagent tool, while Codex headless execution uses the configured non-interactive Codex command.
 Do not add a Monty-specific Pi extension or a new persisted backend.
-Use Monty's repo-scoped `ensure-worktree` flow for worktree creation and reuse.
-It must use the existing `wt` CLI, validate the selected repo, and automatically answer `wt` repo-selection prompts when branch names collide across repos.
+Use Monty's repo-scoped `ensure-worktree` flow for every workspace's worktree creation and reuse.
+It must use the existing `wt` CLI, validate each selected repo, and automatically answer `wt` repo-selection prompts when branch names collide across repos.
 Never bypass `wt` with direct `git worktree` commands.
 All JSON mutations must use Monty's one-home lock and atomic replacement path.
 Never hold that lock while invoking `gh`, `wt`, Ghostty, pi, `osascript`, git, or other slow external commands.

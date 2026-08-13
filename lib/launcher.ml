@@ -17,6 +17,12 @@ type options = {
 
 type existing = New | Retryable of string | Requested
 
+type prepared_workspace = {
+  repo : string;
+  repo_identity : string;
+  branch : string;
+}
+
 type prepared = {
   index : int;
   job : Job.t;
@@ -24,6 +30,7 @@ type prepared = {
   branch : string;
   repo : string;
   repo_identity : string;
+  workspaces : prepared_workspace list;
   context : string;
   state_path : State_path.t;
   worker_dir : string;
@@ -121,18 +128,62 @@ let script_path options id =
   else Error (Printf.sprintf "unsafe launch script path escapes %s: %s" directory path)
 
 let prepare_identity ?index options manifest_index job =
-  let repo_path = Shell.normalize (Shell.abs_path job.Job.repo) in
   let context_path = Shell.normalize (Shell.abs_path job.Job.context) in
-  let* repo_identity = canonical_existing "repo" repo_path in
-  let repo = repo_path in
   let* context = canonical_existing "context" context_path in
-  let branch = Job.branch_or_default ~prefix:options.branch_prefix ?index job in
-  if String.trim branch = "" then Error "worker branch must not be empty"
-  else
+  let job_workspaces =
+    Job.workspaces_with_default_branches ~prefix:options.branch_prefix ?index job
+  in
+  let* workspaces =
+    job_workspaces
+    |> List.fold_left
+         (fun result (workspace : Job.workspace) ->
+           let* acc = result in
+           let repo = Shell.normalize (Shell.abs_path workspace.repo) in
+           let* repo_identity = canonical_existing "repo" repo in
+           let branch = Option.value ~default:"" workspace.branch in
+           if String.trim branch = "" then Error "worker branch must not be empty"
+           else Ok ({ repo; repo_identity; branch } :: acc))
+         (Ok [])
+    |> Result.map List.rev
+  in
+  let* first =
+    match workspaces with
+    | first :: _ -> Ok first
+    | [] -> Error "a Monty job needs at least one workspace"
+  in
+  let duplicate_repo =
+    workspaces
+    |> List.map (fun (workspace : prepared_workspace) -> workspace.repo_identity)
+    |> List.sort String.compare
+    |> List.find_opt (fun repo ->
+           List.length
+             (List.filter
+                (fun (workspace : prepared_workspace) ->
+                  String.equal workspace.repo_identity repo)
+                workspaces)
+           > 1)
+  in
+  match duplicate_repo with
+  | Some repo ->
+      Error
+        (Printf.sprintf "manifest job %d contains duplicate workspace repo %s"
+           manifest_index repo)
+  | None ->
+    let branch = first.branch in
+    let repo = first.repo in
+    let repo_identity = first.repo_identity in
     let id = Job.id_or_default ~branch job in
     let* _ = State_path.safe_component ~label:"worker id" id in
+    let resolved_job_workspaces =
+      List.map
+        (fun (workspace : prepared_workspace) ->
+          ({ repo = workspace.repo; branch = Some workspace.branch }
+            : Job.workspace))
+        workspaces
+    in
     let job =
-      { job with Job.id = Some id; repo; branch = Some branch; context }
+      Job.with_workspaces { job with Job.id = Some id; context }
+        resolved_job_workspaces
     in
     let* state_path = Worker_memory.worker_state ~home:options.home ~id job in
     let* () = State_path.ensure_contained_for_mutation state_path in
@@ -146,6 +197,7 @@ let prepare_identity ?index options manifest_index job =
         branch;
         repo;
         repo_identity;
+        workspaces;
         context;
         state_path;
         worker_dir;
@@ -190,12 +242,37 @@ let canonical_path_equal left right =
   | _ -> false
 
 let same_record_identity (prepared : prepared) (record : Job_store.record) =
+  let workspace_identity workspaces =
+    workspaces
+    |> List.map (fun (repo, branch) ->
+           let repo =
+             match canonical_existing "repo" repo with
+             | Ok identity -> identity
+             | Error _ -> Shell.normalize (Shell.abs_path repo)
+           in
+           (repo, branch))
+    |> List.sort compare
+  in
+  let prepared_workspaces =
+    prepared.workspaces
+    |> List.map (fun (workspace : prepared_workspace) ->
+           (workspace.repo_identity, workspace.branch))
+    |> workspace_identity
+  in
+  let record_workspaces =
+    record.job.Job.workspaces
+    |> List.map (fun (workspace : Job.workspace) ->
+           ( workspace.repo,
+             Option.value ~default:"" workspace.branch ))
+    |> workspace_identity
+  in
   String.equal record.id prepared.id
   && canonical_path_equal record.worker_dir prepared.worker_dir
   && (match canonical_existing "repo" record.job.Job.repo with
       | Ok identity -> String.equal identity prepared.repo_identity
       | Error _ -> false)
   && record.job.Job.branch = Some prepared.branch
+  && record_workspaces = prepared_workspaces
   && (match canonical_existing "context" record.job.Job.context with
       | Ok context -> String.equal context prepared.context
       | Error _ -> false)
@@ -230,14 +307,22 @@ let script_has_owner_marker (options : options) (prepared : prepared) path =
         ~worktree_mode:(worktree_mode_string options)
         ~wt_command:options.wt_command
     in
-    let legacy_expected =
-      expected |> String.split_on_char '\n'
+    let without_lines predicates text =
+      text |> String.split_on_char '\n'
       |> List.filter (fun line ->
-             not (String.equal line "# monty-launch-script-v1"))
+             not (List.exists (fun predicate -> predicate line) predicates))
       |> String.concat "\n"
     in
+    let marker line = String.equal line "# monty-launch-script-v1" in
+    let job_file line = String.starts_with ~prefix:"export MONTY_JOB_FILE=" line in
+    let accepted =
+      [ expected;
+        without_lines [ marker ] expected;
+        without_lines [ job_file ] expected;
+        without_lines [ marker; job_file ] expected ]
+    in
     let contents = Shell.read_file path in
-    String.equal contents expected || String.equal contents legacy_expected
+    List.exists (String.equal contents) accepted
   with Sys_error _ -> false
 
 let trusted_script_destination options path =
@@ -336,14 +421,24 @@ let classify_existing options records (prepared : prepared) =
         conflict "stable task link" task_key (fun record ->
             record.Job_store.job.Job.task_key = Some task_key)
   in
+  let record_owns_workspace record (workspace : prepared_workspace) =
+    record.Job_store.job.Job.workspaces
+    |> List.exists (fun (candidate : Job.workspace) ->
+           match canonical_existing "repo" candidate.repo with
+           | Error _ -> false
+           | Ok identity ->
+               String.equal identity workspace.repo_identity
+               && candidate.branch = Some workspace.branch)
+  in
   let* () =
-    conflict "repo+branch"
-      (prepared.repo_identity ^ " + " ^ prepared.branch)
-      (fun record ->
-        (match canonical_existing "repo" record.Job_store.job.Job.repo with
-        | Ok identity -> String.equal identity prepared.repo_identity
-        | Error _ -> false)
-        && record.Job_store.job.Job.branch = Some prepared.branch)
+    prepared.workspaces
+    |> List.fold_left
+         (fun result (workspace : prepared_workspace) ->
+           let* () = result in
+           conflict "repo+branch"
+             (workspace.repo_identity ^ " + " ^ workspace.branch)
+             (fun record -> record_owns_workspace record workspace))
+         (Ok ())
   in
   match List.filter same_path records with
   | [] ->
@@ -415,10 +510,21 @@ let preflight_batch options indexed_jobs =
     reject_duplicate "canonical worker directory"
       (fun (item : prepared) -> item.worker_dir) prepared
   in
-  let* () =
-    reject_duplicate "canonical repo+branch"
-      (fun (item : prepared) -> item.repo_identity ^ "\000" ^ item.branch)
-      prepared
+  let flattened_workspaces =
+    prepared
+    |> List.concat_map (fun item ->
+           List.map (fun workspace -> (item, workspace)) item.workspaces)
+  in
+  let rec reject_workspace_duplicates seen = function
+    | [] -> Ok ()
+    | (item, (workspace : prepared_workspace)) :: rest ->
+        let key = workspace.repo_identity ^ "\000" ^ workspace.branch in
+        (match List.assoc_opt key seen with
+        | None -> reject_workspace_duplicates ((key, item) :: seen) rest
+        | Some other ->
+            duplicate_error "canonical repo+branch" key other item)
+  in
+  let* () = reject_workspace_duplicates [] flattened_workspaces
   in
   let* () =
     reject_duplicate_optional "stable task link"
@@ -528,7 +634,52 @@ let validate_staged_reservation options (item : prepared) staging_dir =
       Job_store.parse_job_file (Filename.concat staging_dir "job.json")
     in
     if not (same_record item record) then
-      Error "staged job identity does not match the prepared launch"
+      let workspace_text workspaces =
+        workspaces
+        |> List.map (fun (repo, branch) -> repo ^ "@" ^ branch)
+        |> String.concat ", "
+      in
+      let prepared_workspaces =
+        item.workspaces
+        |> List.map (fun (workspace : prepared_workspace) ->
+               (workspace.repo_identity, workspace.branch))
+      in
+      let record_workspaces =
+        record.job.Job.workspaces
+        |> List.map (fun (workspace : Job.workspace) ->
+               (workspace.repo, Option.value ~default:"" workspace.branch))
+      in
+      Error
+        (Printf.sprintf
+           "staged job identity does not match the prepared launch (id=%b, worker_dir=%b, repo=%b, branch=%b, workspaces=%b [%s] != [%s], context=%b, title=%b, task_key=%b, launch_script=%b)"
+           (String.equal record.id item.id)
+           (canonical_path_equal record.worker_dir item.worker_dir)
+           (match canonical_existing "repo" record.job.Job.repo with
+           | Ok identity -> String.equal identity item.repo_identity
+           | Error _ -> false)
+           (record.job.Job.branch = Some item.branch)
+           (let normalize workspaces =
+              workspaces
+              |> List.map (fun (repo, branch) ->
+                     let repo =
+                       match canonical_existing "repo" repo with
+                       | Ok identity -> identity
+                       | Error _ -> Shell.normalize (Shell.abs_path repo)
+                     in
+                     (repo, branch))
+              |> List.sort compare
+            in
+            normalize prepared_workspaces = normalize record_workspaces)
+           (workspace_text prepared_workspaces)
+           (workspace_text record_workspaces)
+           (match canonical_existing "context" record.job.Job.context with
+           | Ok context -> String.equal context item.context
+           | Error _ -> false)
+           (String.equal record.job.Job.title item.job.Job.title)
+           (record.job.Job.task_key = item.job.Job.task_key)
+           (match record.launch_script with
+           | Some path -> canonical_path_equal path item.script_path
+           | None -> false))
     else if not (String.equal record.status "prepared") then
       Error
         (Printf.sprintf "staged job has status %S, expected prepared"
@@ -833,21 +984,28 @@ let reserve_batch ?(reject_requested = false) options prepared =
           Ok installed)))
 
 let dry_run options (prepared : prepared) =
-  let wt_line, workdir =
-    match options.worktree_mode with
-    | Never -> (None, prepared.repo)
-    | Always ->
-        ( Some
-            (Printf.sprintf
-               "%s ensure-worktree --repo %s --branch %s --wt-command %s"
-               (Shell.quote options.monty_command) (Shell.quote prepared.repo)
-               (Shell.quote prepared.branch) (Shell.quote options.wt_command)),
-          "<worktree selected for repo by monty>" )
-  in
   Fmt.pr "[dry-run] job: %s\n" prepared.job.Job.title;
   Fmt.pr "[dry-run] id: %s\n" prepared.id;
-  Option.iter (Fmt.pr "[dry-run] rehydrate worktree: %s\n") wt_line;
-  Fmt.pr "[dry-run] workdir: %s\n" workdir;
+  prepared.workspaces
+  |> List.iteri (fun index (workspace : prepared_workspace) ->
+         Fmt.pr "[dry-run] workspace %d repo: %s\n" (index + 1) workspace.repo;
+         Fmt.pr "[dry-run] workspace %d branch: %s\n" (index + 1)
+           workspace.branch;
+         match options.worktree_mode with
+         | Never ->
+             Fmt.pr "[dry-run] workspace %d path: %s\n" (index + 1)
+               workspace.repo
+         | Always ->
+             Fmt.pr "[dry-run] rehydrate workspace %d: %s\n" (index + 1)
+               (Printf.sprintf
+                  "%s ensure-worktree --repo %s --branch %s --wt-command %s"
+                  (Shell.quote options.monty_command) (Shell.quote workspace.repo)
+                  (Shell.quote workspace.branch)
+                  (Shell.quote options.wt_command)));
+  Fmt.pr "[dry-run] workdir: %s\n"
+    (match options.worktree_mode with
+    | Never -> prepared.repo
+    | Always -> "<first worktree selected for repo by monty>");
   Fmt.pr "[dry-run] worker memory: %s\n" prepared.worker_dir;
   Fmt.pr "[dry-run] monty instructions: %s\n" prepared.instructions;
   Fmt.pr "[dry-run] context: %s\n" prepared.context;
@@ -877,15 +1035,19 @@ let fault checkpoint =
   | _ -> Ok ()
 
 let update_launch_state options (prepared : prepared) ~expected_statuses ~status
-    ?error ?worktree () =
+    ?error ?worktree ?workspaces () =
   let updates =
     [ Job_store.string "status" status;
       Job_store.string "updated_at" (Worker_memory.now_utc ());
       Job_store.string "launch_script" prepared.script_path ]
     @
-    match worktree with
+    (match worktree with
     | None -> []
-    | Some path -> [ Job_store.string "last_known_worktree" path ]
+    | Some path -> [ Job_store.string "last_known_worktree" path ])
+    @
+    match workspaces with
+    | None -> []
+    | Some workspaces -> [ Job_store.workspaces_update workspaces ]
   in
   let updates =
     match error with
@@ -948,30 +1110,109 @@ type begun_request = {
   initial_workdir : string;
 }
 
+let persist_materialized_workspaces options (prepared : prepared)
+    ~expected_statuses workspaces =
+  State_store.with_lock ~home:options.home (fun () ->
+      let* current =
+        Job_store.parse_job_file ~home:options.home prepared.state_path.job_file
+      in
+      let* () =
+        if List.mem current.status expected_statuses then Ok ()
+        else
+          Error
+            (Printf.sprintf
+               "worker %s changed status while materializing workspaces: expected %s, found %S"
+               current.id (String.concat ", " expected_statuses) current.status)
+      in
+      let* () =
+        match current.transition with
+        | None -> Ok ()
+        | Some transition ->
+            Error
+              (Printf.sprintf
+                 "worker %s entered a %s transition while materializing workspaces"
+                 current.id (Job_store.operation_name transition.operation))
+      in
+      let* () =
+        if same_record prepared current then Ok ()
+        else Error (Printf.sprintf "worker %s identity changed during workspace materialization" current.id)
+      in
+      let first_worktree =
+        match workspaces with
+        | first :: _ -> first.Job_store.worktree
+        | [] -> None
+      in
+      let updates =
+        [ Job_store.workspaces_update workspaces;
+          Job_store.string "updated_at" (Worker_memory.now_utc ()) ]
+        @
+        match first_worktree with
+        | None -> []
+        | Some path -> [ Job_store.string "last_known_worktree" path ]
+      in
+      Job_store.update_file_unlocked prepared.state_path.job_file updates)
+
+let materialize_workspaces ?expected_statuses options (prepared : prepared) =
+  let pending_state (workspace : prepared_workspace) =
+    Job_store.
+      {
+        repo = workspace.repo;
+        branch = Some workspace.branch;
+        worktree = None;
+      }
+  in
+  let rec loop acc = function
+    | [] -> Ok (List.rev acc)
+    | (workspace : prepared_workspace) :: rest ->
+        let result =
+          match options.worktree_mode with
+          | Never -> Ok workspace.repo
+          | Always ->
+              Wt.create_or_reuse ~wt_command:options.wt_command
+                ~repo:workspace.repo ~branch:workspace.branch
+        in
+        let* worktree = result in
+        let* () =
+          match options.harness with
+          | Harness.Pi -> Ok ()
+          | Harness.Codex ->
+              Codex_trust.ensure ~home:options.home ~path:worktree
+        in
+        let state =
+          Job_store.
+            {
+              repo = workspace.repo;
+              branch = Some workspace.branch;
+              worktree = Some worktree;
+            }
+        in
+        let acc = state :: acc in
+        let* () =
+          match expected_statuses with
+          | None -> Ok ()
+          | Some expected_statuses ->
+              let snapshot = List.rev acc @ List.map pending_state rest in
+              persist_materialized_workspaces options prepared ~expected_statuses
+                snapshot
+        in
+        loop acc rest
+  in
+  loop [] prepared.workspaces
+
 let begin_request ?(persist_failure = true) ?(write_script = true) options
     (prepared : prepared) ~expected_statuses =
   let fail message =
     if persist_failure then mark_failed options prepared ~expected_statuses message
     else message
   in
-  let workdir_result =
-    match options.worktree_mode with
-    | Never -> Ok prepared.repo
-    | Always ->
-        Wt.create_or_reuse ~wt_command:options.wt_command ~repo:prepared.repo
-          ~branch:prepared.branch
-  in
-  match workdir_result with
+  match materialize_workspaces ~expected_statuses options prepared with
   | Error message -> `Failed (fail message)
-  | Ok workdir ->
-      let trust_result =
-        match options.harness with
-        | Harness.Pi -> Ok ()
-        | Harness.Codex -> Codex_trust.ensure ~home:options.home ~path:workdir
+  | Ok workspace_states ->
+      let workdir =
+        match workspace_states with
+        | first :: _ -> Option.value ~default:first.repo first.worktree
+        | [] -> prepared.repo
       in
-      (match trust_result with
-      | Error message -> `Failed (fail message)
-      | Ok () ->
           let initial_workdir =
             match options.worktree_mode with
             | Always -> prepared.repo
@@ -1008,10 +1249,11 @@ let begin_request ?(persist_failure = true) ?(write_script = true) options
               | Ok () -> (
                   match
                     update_launch_state options prepared ~expected_statuses
-                      ~status:"launch-requested" ~worktree:workdir ()
+                      ~status:"launch-requested" ~worktree:workdir
+                      ~workspaces:workspace_states ()
                   with
                   | Error message -> `Failed message
-                  | Ok () -> `Ready { workdir; initial_workdir }))))
+                  | Ok () -> `Ready { workdir; initial_workdir })))
 
 let request_one options (prepared : prepared) ~expected_statuses =
   match begin_request options prepared ~expected_statuses with

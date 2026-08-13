@@ -17,12 +17,18 @@ type project = {
   sources : source list;
 }
 
+type task_workspace = {
+  repo : string;
+  branch : string;
+}
+
 type local_task = {
   id : string;
   project : string;
   title : string;
   status : string;
   branch : string option;
+  workspaces : task_workspace list;
   notes : string option;
   worker_id : string option;
   worker_key : string option;
@@ -41,6 +47,7 @@ type task = {
   title : string;
   status : string;
   branch : string option;
+  workspaces : task_workspace list;
   url : string option;
 }
 

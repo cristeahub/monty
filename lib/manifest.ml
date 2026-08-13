@@ -27,9 +27,31 @@ let optional_task_key_field obj =
   | `Null -> optional_string_field obj "task"
   | _ -> optional_string_field obj "task_key"
 
+let parse_workspace json =
+  let* repo = string_field json "repo" in
+  if Filename.is_relative repo then
+    Error (Printf.sprintf "workspace repo must be an absolute path: %s" repo)
+  else
+    let* branch = optional_string_field json "branch" in
+    Ok Job.{ repo = Shell.normalize repo; branch }
+
+let parse_workspaces json =
+  match Util.member "workspaces" json with
+  | `Null -> Ok None
+  | `List [] -> Error "field \"workspaces\" must not be empty"
+  | `List values ->
+      values
+      |> List.fold_left
+           (fun result json ->
+             let* workspaces = result in
+             let* workspace = parse_workspace json in
+             Ok (workspace :: workspaces))
+           (Ok [])
+      |> Result.map (fun values -> Some (List.rev values))
+  | _ -> Error "field \"workspaces\" must be an array when present"
+
 let parse_job index json =
   let* title = string_field json "title" in
-  let* repo = string_field json "repo" in
   let* context = string_field json "context" in
   let* id =
     match Util.member "id" json with
@@ -40,10 +62,29 @@ let parse_job index json =
     | _ -> Error "field \"id\" must be a string when present"
   in
   let* branch = optional_string_field json "branch" in
+  let* workspaces = parse_workspaces json in
   let* worker_dir = optional_worker_dir_field json in
   let* prompt = optional_string_field json "prompt" in
   let* task_key = optional_task_key_field json in
-  Ok (index, Job.make ?id ?branch ?worker_dir ?prompt ?task_key ~title ~repo ~context ())
+  let* job =
+    match workspaces with
+    | None ->
+        let* repo = string_field json "repo" in
+        Ok
+          (Job.make ?id ?branch ?worker_dir ?prompt ?task_key ~title ~repo
+             ~context ())
+    | Some workspaces ->
+        let repo_present = Util.member "repo" json <> `Null in
+        let branch_present = Util.member "branch" json <> `Null in
+        if repo_present || branch_present then
+          Error
+            "manifest job must use either top-level repo/branch or workspaces, not both"
+        else
+          Ok
+            (Job.make_with_workspaces ?id ?worker_dir ?prompt ?task_key ~title
+               ~workspaces ~context ())
+  in
+  Ok (index, job)
 
 let jobs_json json =
   match json with
@@ -80,7 +121,11 @@ let default_worker_dir ~manifest_dir job =
   Filename.concat (Filename.concat manifest_dir "workers") id |> Shell.normalize
 
 let resolve_job_paths ?home ~cwd ~manifest_dir (index, job) =
-  let repo = resolve_repo ~cwd job.Job.repo in
+  let workspaces =
+    job.Job.workspaces
+    |> List.map (fun (workspace : Job.workspace) ->
+           { workspace with repo = resolve_repo ~cwd workspace.repo })
+  in
   let context = resolve_context ~cwd ~manifest_dir job.Job.context in
   let worker_dir =
     match job.Job.worker_dir with
@@ -88,16 +133,13 @@ let resolve_job_paths ?home ~cwd ~manifest_dir (index, job) =
     | None -> Some (default_worker_dir ~manifest_dir job)
   in
   ( index,
-    {
-      Job.id = job.Job.id;
-      title = job.Job.title;
-      repo;
-      branch = job.Job.branch;
-      context;
-      worker_dir;
-      prompt = job.Job.prompt;
-      task_key = job.Job.task_key;
-    } )
+    Job.with_workspaces
+      {
+        job with
+        Job.context;
+        worker_dir;
+      }
+      workspaces )
 
 let load ?home path =
   let cwd = Sys.getcwd () in

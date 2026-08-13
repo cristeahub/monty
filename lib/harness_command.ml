@@ -56,8 +56,18 @@ let build_command ~options ~instructions ~job ~context =
           " --dangerously-bypass-approvals-and-sandbox"
         else ""
       in
-      Printf.sprintf "exec %s%s%s%s -C . %s" options.command codex_effort_arg
-        codex_vim_arg yolo
+      let add_dirs =
+        match job.Job.workspaces with
+        | [] | [ _ ] -> ""
+        | _ :: rest ->
+            rest
+            |> List.mapi (fun index _ ->
+                   Printf.sprintf " --add-dir \"$MONTY_WORKSPACE_%d\""
+                     (index + 2))
+            |> String.concat ""
+      in
+      Printf.sprintf "exec %s%s%s%s -C .%s %s" options.command codex_effort_arg
+        codex_vim_arg yolo add_dirs
         (Shell.quote (codex_prompt ~instructions ~context job))
 
 let rehydrate_lines ~monty_command ~wt_command ~branch ~source_repo =
@@ -72,14 +82,69 @@ let rehydrate_lines ~monty_command ~wt_command ~branch ~source_repo =
     "fi";
     "cd \"$MONTY_JOB_WORKTREE\"" ]
 
+let rehydrate_workspace_lines ~monty_command ~wt_command (job : Job.t) =
+  let ensure index (workspace : Job.workspace) =
+    let variable = Printf.sprintf "MONTY_WORKSPACE_%d" (index + 1) in
+    let branch = Option.value ~default:"" workspace.branch in
+    let ensure_command =
+      match job.task_key with
+      | Some task_key ->
+          Shell.quote monty_command ^ " task workspace ensure "
+          ^ Shell.quote task_key ^ " --repo " ^ Shell.quote workspace.repo
+          ^ " --wt-command " ^ Shell.quote wt_command
+      | None ->
+          Shell.quote monty_command
+          ^ " ensure-worktree --repo " ^ Shell.quote workspace.repo
+          ^ " --branch " ^ Shell.quote branch ^ " --wt-command "
+          ^ Shell.quote wt_command
+    in
+    [ variable ^ "=$("
+      ^ ensure_command ^ ")";
+      "if [ -z \"$" ^ variable ^ "\" ] || [ ! -d \"$" ^ variable
+      ^ "\" ]; then";
+      "  printf '%s\\n' 'monty did not return an existing worktree path' >&2";
+      "  exit 1";
+      "fi";
+      "export " ^ variable ]
+  in
+  let workspace_lines = job.workspaces |> List.mapi ensure |> List.concat in
+  workspace_lines
+  @ [ "MONTY_JOB_WORKTREE=$MONTY_WORKSPACE_1";
+      "cd \"$MONTY_JOB_WORKTREE\"" ]
+
+let static_workspace_lines (job : Job.t) =
+  let workspace_lines =
+    job.workspaces
+    |> List.mapi (fun index (workspace : Job.workspace) ->
+           let variable = Printf.sprintf "MONTY_WORKSPACE_%d" (index + 1) in
+           [ variable ^ "=" ^ Shell.quote workspace.repo;
+             "export " ^ variable ])
+    |> List.concat
+  in
+  workspace_lines
+  @ [ "MONTY_JOB_WORKTREE=$MONTY_WORKSPACE_1";
+      "cd \"$MONTY_JOB_WORKTREE\"" ]
+
 let launch_script_contents ~options ~job ~id ~branch ~source_repo
     ~initial_workdir ~context ~instructions ~worker_dir ~worktree_mode
     ~wt_command =
   let command = build_command ~options ~instructions:(Some instructions) ~job ~context in
   let setup_lines =
     match worktree_mode with
-    | "always" -> rehydrate_lines ~monty_command:options.monty_command ~wt_command ~branch ~source_repo
-    | _ -> [ "cd " ^ Shell.quote initial_workdir; "MONTY_JOB_WORKTREE=" ^ Shell.quote initial_workdir ]
+    | "always" -> (
+        match job.Job.workspaces with
+        | [] | [ _ ] ->
+            rehydrate_lines ~monty_command:options.monty_command ~wt_command
+              ~branch ~source_repo
+        | _ ->
+            rehydrate_workspace_lines ~monty_command:options.monty_command
+              ~wt_command job)
+    | _ -> (
+        match job.Job.workspaces with
+        | [] | [ _ ] ->
+            [ "cd " ^ Shell.quote initial_workdir;
+              "MONTY_JOB_WORKTREE=" ^ Shell.quote initial_workdir ]
+        | _ -> static_workspace_lines job)
   in
   String.concat "\n"
       ([ "#!/bin/sh";
@@ -100,7 +165,9 @@ let launch_script_contents ~options ~job ~id ~branch ~source_repo
          "export MONTY_JOB_REPO=" ^ Shell.quote source_repo;
          "export MONTY_JOB_CONTEXT=" ^ Shell.quote context;
          "export MONTY_TASK_KEY=" ^ Shell.quote (Option.value ~default:"" job.Job.task_key);
-         "export MONTY_WORKTREE_MODE=" ^ Shell.quote worktree_mode ]
+         "export MONTY_WORKTREE_MODE=" ^ Shell.quote worktree_mode;
+         "export MONTY_JOB_FILE="
+         ^ Shell.quote (Worker_memory.job_file worker_dir) ]
       @ setup_lines
       @ [ "export MONTY_JOB_WORKTREE";
           "printf '%s\\n' " ^ Shell.quote ("Monty worker: " ^ job.Job.title);

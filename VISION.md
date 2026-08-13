@@ -90,18 +90,23 @@ Monty should know what projects exist and where task truth lives for each projec
 If GitHub issues provide external identity and metadata, Monty may refresh their title and URL into the local task registry.
 Remote issue state must never override the local task's user-facing open or done status.
 The local task registry owns task status for external and purely local work.
-Worker links use exact local task keys and stable repo-plus-branch-plus-worker identities rather than ordinary title matching.
+Worker links use exact local task keys and stable workspace-set-plus-worker identities rather than ordinary title matching.
 
 Project memory belongs in Markdown under `.monty/projects/`.
 Project memory should describe stable context such as purpose, conventions, architecture notes, and working commands.
 It should not become a duplicate issue tracker.
 
-## Repo plus branch identifies code work
+## A workspace set identifies code work
 
 A branch name alone is not enough.
-The durable code identity for a worker is the repo plus the branch.
+Each workspace is an absolute repo plus a branch, and one worker may own an
+ordered set of workspaces across several repositories. The first workspace is
+only the initial launch directory. It is not a privileged project, and the
+entire set shares one task status, worker memory, resume history, and completion
+lifecycle.
 
-Monty must always know which repo a worktree belongs to.
+Monty must always know which repo every worktree belongs to and expose each
+materialized absolute path for inspection.
 Monty must never accidentally resume, archive, or delete the wrong repo's worktree because another repo has the same branch name.
 Resume must honor the worker's persisted worktree mode instead of current CLI defaults.
 
@@ -234,7 +239,7 @@ Every new Monty feature should answer these questions.
 3. Can the head butler invoke it?
 4. Can a worker invoke it from generated instructions?
 5. Does it work after the worktree is deleted?
-6. Does it respect repo plus branch identity?
+6. Does it respect the complete workspace-set identity?
 7. Does it use `wt` for worktree operations?
 8. Is there a dry-run or safe preview path?
 9. What is the recovery story if it fails halfway?

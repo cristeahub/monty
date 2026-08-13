@@ -43,9 +43,11 @@ Install the `monty` CLI without opam:
 
 The installer builds with Dune, copies the Monty control room to `~/.local/share/monty`, installs the real binary at `~/.local/libexec/monty/monty-real`, and writes a wrapper at `~/.local/bin/monty`.
 Control-room, binary, and wrapper activation is rollback-protected, and matching `.monty` state is preserved across reinstallations.
-The repository and installer currently use Monty state version `1`, stored in `.monty/version`.
-Existing unversioned state is adopted as version `1` without deleting it.
-If an existing version does not match, the installer warns that it will delete the current `.monty` folder and requires interactive confirmation or the explicit `--replace-state` option.
+The repository and installer currently use Monty state version `2`, stored in `.monty/version`.
+Existing unversioned state is adopted as version `2` without deleting it, and
+version `1` state is migrated in place because singleton records remain readable
+as one-workspace records. Other version mismatches still require interactive
+confirmation or the explicit `--replace-state` option before replacement.
 It also writes `MONTY_HOME=~/.local/share/monty` and `MONTY_BRANCH_PREFIX=monty` to your shell startup file, such as `~/.zshrc`.
 If that file already has a non-Monty-managed `MONTY_HOME` setting, the installer asks before overriding it.
 The wrapper pins `MONTY_HOME` and provides `MONTY_BRANCH_PREFIX` as an install-time fallback on every invocation, so running `monty` from any directory uses the installed Monty control room. A persisted `branch-prefix` setting takes precedence over that fallback.
@@ -152,17 +154,51 @@ Example manifest:
 }
 ```
 
+One task can own branches in several repositories. Use `workspaces` instead of
+top-level `repo` and `branch` fields:
+
+```json
+{
+  "jobs": [
+    {
+      "id": "sonnet-5-invoices",
+      "title": "Upgrade invoice parsing and admin reprocessing to Claude Sonnet 5",
+      "workspaces": [
+        {
+          "repo": "/Users/cristea/code/django-backend",
+          "branch": "cto/invoice-parser-sonnet-5"
+        },
+        {
+          "repo": "/Users/cristea/code/admin",
+          "branch": "cto/admin-invoice-sonnet-5"
+        }
+      ],
+      "context": ".monty/runs/run-1/sonnet-5-invoices.md",
+      "worker_dir": ".monty/runs/run-1/workers/sonnet-5-invoices",
+      "task_key": "local:local-005"
+    }
+  ]
+}
+```
+
+Workspace repositories must be absolute registered project paths. Their order
+is durable. The first workspace is only the initial launch directory; there is
+no special `primary_project`, and all workspaces share one worker, task status,
+resume history, and completion operation. Monty materializes and validates each
+repo-plus-branch independently. Pi receives every absolute path in the generated
+instructions; Codex additionally receives secondary paths with `--add-dir`.
+
 The manifest can also omit `branch`.
 Monty then derives a safe branch name from the title using the branch prefix.
 The default is `monty`, so `Fix issue 123` becomes `monty/fix-issue-123` for one launch or `monty/01-fix-issue-123` in `launch-many`.
 With `monty settings set branch-prefix cto`, `--branch-prefix cto`, or `MONTY_BRANCH_PREFIX=cto`, the same task becomes `cto/fix-issue-123` or `cto/01-fix-issue-123`.
 A manifest entry can include `task_key` to link a worker to a Monty-owned local task.
 When `monty done` archives that worker, it also marks the linked local task done.
-Ordinary launch and reconciliation use only explicit task keys and stable repo, branch, and worker identities.
+Ordinary launch and reconciliation use only explicit task keys and stable workspace-set-plus-worker identities.
 Use `monty tasks repair-worker <worker>` for an explicit, ambiguity-checked repair of a legacy worker that has no stable link.
 
 Monty validates the complete manifest before creating a task, reserving worker memory, invoking `wt`, writing a launch script, or requesting a terminal.
-Preflight rejects missing repositories or contexts, unknown projects or tasks, unsafe paths, missing dependencies, existing-state conflicts, and duplicate worker IDs, worker directories, task links, or repo-plus-branch identities.
+Preflight rejects missing repositories or contexts, unknown projects or tasks, unsafe paths, missing dependencies, existing-state conflicts, and duplicate worker IDs, worker directories, task links, or repo-plus-branch identities anywhere in the workspace sets.
 Dry-run and real launch use the same preflight.
 A valid dry-run remains mutation-free.
 
@@ -190,7 +226,7 @@ monty headless prepare-many \
   --manifest .monty/runs/run-1/jobs.json
 ```
 
-Preparation reserves every worker and materializes its repo-scoped `wt` worktree while leaving it `prepared`.
+Preparation reserves every worker and materializes all of its repo-scoped `wt` worktrees while leaving it `prepared`.
 The output records the effective harness and Codex YOLO setting so the execution mode is visible before a worker is claimed.
 
 ### Codex headless execution
@@ -222,11 +258,11 @@ After preparation, claim each worker immediately before the tool call:
 monty headless begin issue-123
 ```
 
-`headless begin` emits the versioned `monty:headless-dispatch:v2` envelope.
+`headless begin` emits the versioned `monty:headless-dispatch:v3` envelope.
 Its `harness_call.tool` is `subagent`, and `harness_call.arguments` contains the complete asynchronous chain.
 No prompt needs to reconstruct the chain manually.
 
-Each Pi or Codex chain runs in its supplied Monty worktree:
+Each Pi or Codex chain starts in its first supplied Monty worktree and can inspect every declared workspace:
 
 1. One fresh implementer changes the worktree and runs focused validation.
 2. Two mutually isolated fresh reviewers inspect the same worktree concurrently and write only their separate reports outside it.
@@ -271,7 +307,7 @@ artifacts/
 ```
 
 Workers are instructed to write important discoveries, blockers, and handoff notes back to this folder.
-The wt worktree is treated as ephemeral and can be recreated from the durable repo and branch in `job.json`.
+The wt worktrees are treated as ephemeral and can be recreated from the durable workspace array in `job.json`.
 
 Resume a worker by id, branch leaf, branch, or title slug:
 
@@ -279,7 +315,7 @@ Resume a worker by id, branch leaf, branch, or title slug:
 dune exec -- monty resume issue-123
 ```
 
-`resume` reads `job.json`, recreates or reuses the repo-scoped worktree, and opens a new session in the selected harness with the same durable worker memory.
+`resume` reads `job.json`, recreates or reuses every repo-scoped worktree, and opens a new session in the selected harness with the same durable worker memory.
 Resume always derives worktree mode from the durable record rather than a current CLI default, so a `never` worker cannot accidentally create an unmanaged worktree.
 Open jobs are found from worker `job.json` files.
 The original `jobs.json` manifest is launch input and a safe batch-retry contract.
@@ -342,7 +378,7 @@ Use `--force` to discard local worktree changes while archiving:
 dune exec -- monty done issue-123 --force
 ```
 
-Completing a job deletes the selected repo's worktree and branch, writes `status: done` to `job.json`, and moves durable memory to:
+Completing a job first verifies every workspace, then deletes all of its worktrees and branches, writes `status: done` to `job.json`, and moves durable memory to:
 
 ```text
 .monty/runs/<run-id>/archive/<worker-id>/
@@ -394,7 +430,7 @@ dune exec -- monty tasks list --project monty
 
 `list` and `tasks list` are equivalent task-listing views and show `ID`, `PROJECT`, `STATUS`, `TITLE`, and `BRANCH`.
 They automatically reconcile worker jobs into the local task source of truth before rendering.
-Worker jobs are linked back to local tasks with exact `task_key` values and stable repo-plus-branch-plus-worker identities.
+Worker jobs are linked back to local tasks with exact `task_key` values and stable workspace-set-plus-worker identities.
 Reconciliation is sorted and replay-safe.
 It writes tasks before patching job links, so interruption can be retried without creating duplicate tasks.
 Corrupt or unknown neighboring workers produce diagnostics while healthy records continue.
@@ -407,6 +443,43 @@ Add or complete a local task:
 dune exec -- monty task add --project monty --title "Design overview"
 dune exec -- monty task done local-001
 ```
+
+Attach planned repository work to an open task and inspect its absolute paths:
+
+```sh
+monty task workspace add local-005 \
+  --repo /absolute/path/to/django-backend \
+  --branch cto/invoice-parser-sonnet-5
+
+monty task workspace add local-007 \
+  --repo /absolute/path/to/admin \
+  --branch cto/admin-invoice-sonnet-5
+
+monty task show local-005
+```
+
+After a worker is linked, materialize or rehydrate all of its workspaces—or one
+selected absolute repo—and persist the returned worktree paths with:
+
+```sh
+monty task workspace ensure local-005
+monty task workspace ensure local-005 --repo /absolute/path/to/admin
+```
+
+Normal launch and resume do this automatically. Planning-only tasks deliberately
+cannot ensure worktrees until their one durable worker record exists.
+
+If `local-005` and `local-007` were created for the same feature and neither has
+launched, combine them explicitly:
+
+```sh
+monty task merge local-007 --into local-005
+monty task show local-005
+```
+
+The merge closes `local-007` with durable provenance and gives `local-005` the
+ordered workspace set. It does not create branches or worktrees; launch or
+headless preparation materializes them later.
 
 Monty stores project overview state under:
 

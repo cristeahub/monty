@@ -605,6 +605,87 @@ let task_done_term =
   in
   Cmdliner.Term.(const task_done $ id $ home_arg)
  in
+let task_show id home =
+  match Project_overview.show_task ~home id with
+  | Error msg -> exit_code (Error msg)
+  | Ok output ->
+      Fmt.pr "%s" output;
+      0
+ in
+let task_show_term =
+  let id =
+    let doc = "Local task id, with or without the local: prefix." in
+    Cmdliner.Arg.(required & pos 0 (some string) None & info [] ~docv:"TASK" ~doc)
+  in
+  Cmdliner.Term.(const task_show $ id $ home_arg)
+ in
+let task_workspace_add id repo branch home =
+  match Project_overview.add_task_workspace ~home ~id ~repo ~branch with
+  | Error msg -> exit_code (Error msg)
+  | Ok _ ->
+      Fmt.pr "Added workspace to local task %s: %s | %s\n" id
+        (Shell.normalize (Shell.abs_path repo)) branch;
+      0
+ in
+let task_workspace_add_term =
+  let id =
+    let doc = "Open local task that should own the workspace." in
+    Cmdliner.Arg.(required & pos 0 (some string) None & info [] ~docv:"TASK" ~doc)
+  in
+  let repo =
+    let doc = "Absolute registered repository path." in
+    Cmdliner.Arg.(required & opt (some string) None & info [ "repo" ] ~docv:"DIR" ~doc)
+  in
+  let branch =
+    let doc = "Planned branch in this repository." in
+    Cmdliner.Arg.(required & opt (some string) None & info [ "branch" ] ~docv:"BRANCH" ~doc)
+  in
+  Cmdliner.Term.(const task_workspace_add $ id $ repo $ branch $ home_arg)
+ in
+let task_workspace_ensure id repo home wt_command =
+  match
+    Project_overview.ensure_task_workspaces ~home ~id ?repo ~wt_command ()
+  with
+  | Error msg -> exit_code (Error msg)
+  | Ok workspaces ->
+      List.iter
+        (fun (workspace : Job_store.workspace_state) ->
+          match workspace.worktree with
+          | Some path -> Fmt.pr "%s\n" path
+          | None -> ())
+        workspaces;
+      0
+ in
+let task_workspace_ensure_term =
+  let id =
+    let doc = "Open linked local task whose workspaces should be materialized." in
+    Cmdliner.Arg.(required & pos 0 (some string) None & info [] ~docv:"TASK" ~doc)
+  in
+  let repo =
+    let doc = "Ensure only this absolute repository path." in
+    Cmdliner.Arg.(value & opt (some string) None & info [ "repo" ] ~docv:"DIR" ~doc)
+  in
+  Cmdliner.Term.(const task_workspace_ensure $ id $ repo $ home_arg $ wt_command_arg)
+ in
+let task_merge source target home =
+  match Project_overview.merge_local_tasks ~home ~source ~target with
+  | Error msg -> exit_code (Error msg)
+  | Ok (source_task, target_task) ->
+      Fmt.pr "Merged local:%s into local:%s\n" source_task.Overview_types.id
+        target_task.Overview_types.id;
+      0
+ in
+let task_merge_term =
+  let source =
+    let doc = "Unlaunched open source task." in
+    Cmdliner.Arg.(required & pos 0 (some string) None & info [] ~docv:"SOURCE" ~doc)
+  in
+  let target =
+    let doc = "Unlaunched open task that should remain." in
+    Cmdliner.Arg.(required & opt (some string) None & info [ "into" ] ~docv:"TARGET" ~doc)
+  in
+  Cmdliner.Term.(const task_merge $ source $ target $ home_arg)
+ in
 let doctor home harness_override pi_command codex_command wt_command backend worktree_mode =
   match Settings.effective_harness ~getenv ~home harness_override with
   | Error message -> exit_code (Error message)
@@ -789,8 +870,30 @@ let task_cmd =
     let doc = "Mark a Monty-owned local task done." in
     Cmdliner.Cmd.v (Cmdliner.Cmd.info "done" ~doc) task_done_term
   in
+  let show_cmd =
+    let doc = "Show task workspaces with absolute repo and worktree paths." in
+    Cmdliner.Cmd.v (Cmdliner.Cmd.info "show" ~doc) task_show_term
+  in
+  let workspace_cmd =
+    let add_cmd =
+      let doc = "Attach planned repo-plus-branch metadata to an open task." in
+      Cmdliner.Cmd.v (Cmdliner.Cmd.info "add" ~doc) task_workspace_add_term
+    in
+    let ensure_cmd =
+      let doc = "Materialize and persist one or all linked task workspaces." in
+      Cmdliner.Cmd.v (Cmdliner.Cmd.info "ensure" ~doc) task_workspace_ensure_term
+    in
+    Cmdliner.Cmd.group
+      (Cmdliner.Cmd.info "workspace" ~doc:"Manage task workspaces.")
+      [ add_cmd; ensure_cmd ]
+  in
+  let merge_cmd =
+    let doc = "Merge one unlaunched open task into another." in
+    Cmdliner.Cmd.v (Cmdliner.Cmd.info "merge" ~doc) task_merge_term
+  in
   let doc = "Manage Monty-owned local task data." in
-  Cmdliner.Cmd.group (Cmdliner.Cmd.info "task" ~doc) [ add_cmd; done_cmd ]
+  Cmdliner.Cmd.group (Cmdliner.Cmd.info "task" ~doc)
+    [ add_cmd; show_cmd; workspace_cmd; merge_cmd; done_cmd ]
  in
 let headless_cmd =
   let prepare_cmd =

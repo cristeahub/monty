@@ -35,6 +35,19 @@ let artifacts_dir worker_dir = Filename.concat worker_dir "artifacts"
 
 let maybe_assoc name = function None -> [] | Some value -> [ (name, `String value) ]
 
+let workspace_jsons (job : Job.t) last_known_worktree =
+  job.Job.workspaces
+  |> List.mapi (fun index (workspace : Job.workspace) ->
+         `Assoc
+           ([ ("repo", `String workspace.repo) ]
+           @ (match workspace.branch with
+             | None -> []
+             | Some branch -> [ ("branch", `String branch) ])
+           @
+           match (index, last_known_worktree) with
+           | 0, Some worktree -> [ ("worktree", `String worktree) ]
+           | _ -> []))
+
 let job_json ?(status = "active") ?launch_script ?launch_error ~worker_dir ~id
     ~job ~branch ~repo ~context ~worktree_mode ~last_known_worktree () =
   `Assoc
@@ -47,7 +60,8 @@ let job_json ?(status = "active") ?launch_script ?launch_error ~worker_dir ~id
        ("run_dir", `String (run_dir_of_worker_dir worker_dir));
        ("worktree_mode", `String worktree_mode);
        ("status", `String status);
-       ("updated_at", `String (now_utc ())) ]
+       ("updated_at", `String (now_utc ()));
+       ("workspaces", `List (workspace_jsons job last_known_worktree)) ]
     @ maybe_assoc "prompt" job.Job.prompt
     @ maybe_assoc "task_key" job.Job.task_key
     @ maybe_assoc "last_known_worktree" last_known_worktree
@@ -85,9 +99,27 @@ let write_instructions ?destination_dir ~worker_dir ~id ~job ~branch ~repo
   Shell.ensure_dir (artifacts_dir destination_dir);
   init_memory ~worker_dir:destination_dir ~title:job.Job.title;
   let run_dir = run_dir_of_worker_dir worker_dir in
+  let workspace_lines =
+    job.Job.workspaces
+    |> List.mapi (fun index (workspace : Job.workspace) ->
+           let branch = Option.value ~default:"<no-branch>" workspace.branch in
+           let ensure_command =
+             match job.task_key with
+             | Some task_key ->
+                 "monty task workspace ensure " ^ Shell.quote task_key
+                 ^ " --repo " ^ Shell.quote workspace.repo
+             | None ->
+                 "monty ensure-worktree --repo " ^ Shell.quote workspace.repo
+                 ^ " --branch " ^ Shell.quote branch
+           in
+           [ Printf.sprintf "%d. repo: %s" (index + 1) workspace.repo;
+             "   branch: " ^ branch;
+             "   rehydrate: cd \"$(" ^ ensure_command ^ ")\"" ])
+    |> List.concat
+  in
   let text =
     String.concat "\n"
-      [ "# Monty worker instructions";
+      ([ "# Monty worker instructions";
         "";
         "You were spawned by Monty, the head butler.";
         "";
@@ -107,18 +139,14 @@ let write_instructions ?destination_dir ~worker_dir ~id ~job ~branch ~repo
         "";
         "## Rehydrating the worktree";
         "";
-        "The durable code identity for this task is the repo plus branch:";
+        "The durable code identity for this task is its ordered workspace set.";
         "";
-        "```text";
-        "repo: " ^ repo;
-        "branch: " ^ branch;
-        "```";
+        "The first workspace is only the initial launch directory; every workspace is part of this task:";
         "";
-        "If the worktree disappears, recreate the correct repo-scoped worktree with:";
-        "";
-        "```sh";
-        "cd \"$(monty ensure-worktree --repo " ^ Shell.quote repo ^ " --branch " ^ Shell.quote branch ^ ")\"";
-        "```";
+      ]
+    @ workspace_lines
+    @ [ "";
+        "If a worktree disappears, use its repo-scoped rehydrate command above.";
         "";
         "## Environment";
         "";
@@ -132,6 +160,7 @@ let write_instructions ?destination_dir ~worker_dir ~id ~job ~branch ~repo
         "- MONTY_JOB_BRANCH=" ^ branch;
         "- MONTY_JOB_CONTEXT=" ^ context;
         "- MONTY_TASK_KEY=" ^ Option.value ~default:"" job.Job.task_key;
+        "- MONTY_JOB_FILE=" ^ job_file worker_dir;
         "- MONTY_JOB_WORKTREE, set dynamically after `wt b` runs";
         "- MONTY_WORKTREE_MODE=" ^ worktree_mode;
         "";
@@ -151,9 +180,9 @@ let write_instructions ?destination_dir ~worker_dir ~id ~job ~branch ~repo
         "monty done";
         "```";
         "";
-        "This deletes the worktree and branch, moves this worker folder to the run archive, closes any linked Monty-owned local task, marks the job done, and archives its memory.";
-        "After it succeeds, stop working in this session because the worktree was deleted.";
-        "" ]
+        "This deletes every task worktree and branch, moves this worker folder to the run archive, closes any linked Monty-owned local task, marks the job done, and archives its memory.";
+        "After it succeeds, stop working in this session because the task worktrees were deleted.";
+        "" ])
   in
   Shell.write_file (instructions_file destination_dir) text
 

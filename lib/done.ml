@@ -83,6 +83,13 @@ let existing_dir = function
   | Some path when Sys.file_exists path && Sys.is_directory path -> Some path
   | _ -> None
 
+let required_workspace_branch (workspace : Job_store.workspace_state) =
+  match workspace.branch with
+  | Some branch when String.trim branch <> "" -> Ok branch
+  | _ ->
+      Error
+        (Printf.sprintf "Monty workspace in repo %s has no branch" workspace.repo)
+
 let locate_worktree ~wt_command ~repo ~branch record =
   match String.lowercase_ascii record.Job_store.worktree_mode with
   | "never" -> Ok None
@@ -90,6 +97,36 @@ let locate_worktree ~wt_command ~repo ~branch record =
       match existing_dir record.Job_store.last_known_worktree with
       | Some path -> Wt.validate_worktree ~repo path |> Result.map Option.some
       | None -> Wt.locate_existing ~wt_command ~repo ~branch)
+
+let locate_workspace ~wt_command ~worktree_mode
+    (workspace : Job_store.workspace_state) =
+  let ( let* ) = Result.bind in
+  let* branch = required_workspace_branch workspace in
+  let repo = Shell.normalize (Shell.abs_path workspace.repo) in
+  match String.lowercase_ascii worktree_mode with
+  | "never" -> Ok (workspace, branch, None)
+  | _ -> (
+      match existing_dir workspace.worktree with
+      | Some path ->
+          Wt.validate_worktree ~repo path
+          |> Result.map (fun path -> (workspace, branch, Some path))
+      | None ->
+          Wt.locate_existing ~wt_command ~repo ~branch
+          |> Result.map (fun path -> (workspace, branch, path)))
+
+let locate_workspaces ~wt_command record =
+  record.Job_store.workspaces
+  |> List.fold_left
+       (fun result workspace ->
+         let ( let* ) = Result.bind in
+         let* acc = result in
+         let* located =
+           locate_workspace ~wt_command
+             ~worktree_mode:record.Job_store.worktree_mode workspace
+         in
+         Ok (located :: acc))
+       (Ok [])
+  |> Result.map List.rev
 
 let fault checkpoint =
   match Sys.getenv_opt "MONTY_FAULT_INJECT" with
@@ -109,25 +146,28 @@ let ensure_archive_target record archive_dir =
 
 let prepare_fresh ~home ~wt_command ~force record =
   let ( let* ) = Result.bind in
-  let* branch = required_branch record in
-  let repo = Shell.normalize (Shell.abs_path record.Job_store.job.Job.repo) in
   let* physical = State_path.of_job_file ~home record.Job_store.path in
   let* archive_state =
     State_path.archived ~home ~run_id:physical.State_path.run_id
       ~id:physical.State_path.id
   in
-  let* linked_task_id = resolve_linked_local_task_id ~home ~repo record in
+  let* linked_task_id = resolve_linked_local_task_id ~home ~repo:record.job.repo record in
   let task_key = task_key_for_archive record linked_task_id in
   let* () = ensure_archive_target record archive_state.worker_dir in
-  let* worktree = locate_worktree ~wt_command ~repo ~branch record in
+  let* workspaces = locate_workspaces ~wt_command record in
   let* () =
-    match worktree with
-    | None -> Ok ()
-    | Some _ when force -> Ok ()
-    | Some path -> Wt.ensure_clean ~worktree:path
+    workspaces
+    |> List.fold_left
+         (fun result (_, _, worktree) ->
+           let* () = result in
+           match worktree with
+           | None -> Ok ()
+           | Some _ when force -> Ok ()
+           | Some path -> Wt.ensure_clean ~worktree:path)
+         (Ok ())
   in
   let* record = Job_store.prepare_completion record ~task_key ~force in
-  Ok (record, worktree)
+  Ok (record, workspaces)
 
 let complete ?worker ~home ~wt_command ~force () =
   let home = Shell.normalize (Shell.abs_path home) in
@@ -137,9 +177,10 @@ let complete ?worker ~home ~wt_command ~force () =
   let* _linked_task_id =
     Project_overview.validate_worker_task_link ~home initial
   in
-  let* record, preflight_worktree =
+  let* record, preflight_workspaces =
     match initial.Job_store.transition with
-    | Some transition when transition.operation = Job_store.Complete -> Ok (initial, None)
+    | Some transition when transition.operation = Job_store.Complete ->
+        Ok (initial, [])
     | Some _ -> assert false
     | None -> prepare_fresh ~home ~wt_command ~force initial
   in
@@ -149,31 +190,39 @@ let complete ?worker ~home ~wt_command ~force () =
     | Some transition when transition.operation = Job_store.Complete -> Ok transition
     | _ -> Error "completion intent was not persisted"
   in
-  let* branch = required_branch record in
-  let repo = Shell.normalize (Shell.abs_path record.Job_store.job.Job.repo) in
   let deletes_worktree_and_branch =
     not (String.equal (String.lowercase_ascii record.Job_store.worktree_mode) "never")
   in
-  let* worktree =
+  let* workspaces =
     if deletes_worktree_and_branch then
-      match preflight_worktree with
-      | Some _ as worktree -> Ok worktree
-      | None -> locate_worktree ~wt_command ~repo ~branch record
-    else Ok None
+      match preflight_workspaces with
+      | _ :: _ as workspaces -> Ok workspaces
+      | [] -> locate_workspaces ~wt_command record
+    else Ok []
   in
   let* () =
-    match worktree with
-    | None -> Ok ()
-    | Some path ->
-        if transition.force then Wt.force_clean ~worktree:path
-        else Wt.ensure_clean ~worktree:path
-  in
-  let removal_worktree =
-    match worktree with Some _ -> worktree | None -> record.Job_store.last_known_worktree
+    workspaces
+    |> List.fold_left
+         (fun result (_, _, worktree) ->
+           let* () = result in
+           match worktree with
+           | None -> Ok ()
+           | Some path ->
+               if transition.force then Wt.force_clean ~worktree:path
+               else Wt.ensure_clean ~worktree:path)
+         (Ok ())
   in
   let* () =
     if deletes_worktree_and_branch then
-      Wt.remove_if_present ?worktree:removal_worktree ~wt_command ~repo ~branch ()
+      workspaces
+      |> List.fold_left
+           (fun result
+                ((workspace : Job_store.workspace_state), branch, located) ->
+             let* () = result in
+             let repo = Shell.normalize (Shell.abs_path workspace.repo) in
+             let removal = match located with Some _ -> located | None -> workspace.worktree in
+             Wt.remove_if_present ?worktree:removal ~wt_command ~repo ~branch ())
+           (Ok ())
     else Ok ()
   in
   let* () = fault "complete-after-cleanup" in
@@ -191,11 +240,11 @@ let complete ?worker ~home ~wt_command ~force () =
   (match linked_task_id with
   | Some id -> Fmt.pr "Closed local task: local:%s\n" id
   | None -> ());
-  (match worktree with
-  | Some path -> Fmt.pr "Deleted worktree: %s\n" path
-  | None when deletes_worktree_and_branch ->
-      Fmt.pr "Deleted worktree: <already absent>\n"
-  | None -> Fmt.pr "Deleted worktree: <none, worktree mode never>\n");
-  if deletes_worktree_and_branch then Fmt.pr "Deleted branch: %s\n" branch
-  else Fmt.pr "Deleted branch: <skipped, worktree mode never>\n";
+  if deletes_worktree_and_branch then
+    List.iter
+      (fun ((workspace : Job_store.workspace_state), branch, worktree) ->
+        Fmt.pr "Deleted workspace: %s | %s | %s\n" workspace.repo branch
+          (Option.value ~default:"<already absent>" worktree))
+      workspaces
+  else Fmt.pr "Deleted workspaces: <skipped, worktree mode never>\n";
   Ok ()

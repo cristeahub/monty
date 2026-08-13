@@ -110,16 +110,17 @@ let duplicate_identity_checks records =
     List.map (fun record -> (Some record.Job_store.id, record)) records
   in
   let repo_branches =
-    List.map
-      (fun record ->
-        let repo =
-          try Unix.realpath record.Job_store.job.Job.repo
-          with Unix.Unix_error _ ->
-            Shell.normalize (Shell.abs_path record.job.Job.repo)
-        in
-        let branch = Option.value ~default:"" record.job.Job.branch in
-        (Some (repo ^ " + " ^ branch), record))
-      records
+    records
+    |> List.concat_map (fun record ->
+           record.Job_store.job.Job.workspaces
+           |> List.map (fun (workspace : Job.workspace) ->
+                  let repo =
+                    try Unix.realpath workspace.repo
+                    with Unix.Unix_error _ ->
+                      Shell.normalize (Shell.abs_path workspace.repo)
+                  in
+                  let branch = Option.value ~default:"" workspace.branch in
+                  (Some (repo ^ " + " ^ branch), record)))
   in
   let task_links =
     List.map

@@ -1,7 +1,7 @@
 let ( let* ) = Result.bind
 
-let prepare_schema = "monty:headless-prepare:v1"
-let dispatch_schema = "monty:headless-dispatch:v2"
+let prepare_schema = "monty:headless-prepare:v2"
+let dispatch_schema = "monty:headless-dispatch:v3"
 let codex_run_schema = "monty:headless-codex-run:v1"
 let codex_run_many_schema = "monty:headless-codex-run-many:v1"
 
@@ -10,6 +10,7 @@ type prepared_job = {
   title : string;
   branch : string;
   worktree : string option;
+  workspaces : Job_store.workspace_state list;
   worker_dir : string;
   status : string;
 }
@@ -20,6 +21,7 @@ type dispatch = {
   repo : string;
   branch : string;
   worktree : string;
+  workspaces : Job_store.workspace_state list;
   worker_dir : string;
   instructions : string;
   context : string;
@@ -55,6 +57,7 @@ let prepared_job_json (job : prepared_job) =
       ("title", `String job.title);
       ("branch", `String job.branch);
       ("worktree", Option.fold ~none:`Null ~some:(fun path -> `String path) job.worktree);
+      ("workspaces", `List (List.map Job_store.json_of_workspace job.workspaces));
       ("worker_dir", `String job.worker_dir);
       ("status", `String job.status) ]
 
@@ -96,10 +99,18 @@ let mutation_prohibitions =
       "Do not push, open a pull request, submit a review, post comments, or perform any other remote write." ]
 
 let implementation_task (dispatch : dispatch) =
+  let worktree_setup =
+    match dispatch.workspaces with
+    | [ _ ] ->
+        "You are in a new worktree. Install the project in this worktree before starting the task. Do not create or use symlinks into the main repository."
+    | _ ->
+        "You are in the first of multiple Monty worktrees. The Monty instructions list every absolute workspace. Install and modify the relevant projects in those exact worktrees. Do not create or use symlinks into the main repositories."
+  in
   String.concat "\n\n"
-    [ "You are in a new worktree. Install the project in this worktree before starting the task. Do not create or use symlinks into the main repository.";
+    [ worktree_setup;
       Printf.sprintf "Implement Monty worker %s: %s." dispatch.id dispatch.title;
       "Read only the supplied Monty instructions and task context before inspecting the repository.";
+      "Use the absolute MONTY_JOB_FILE path in the instructions to read the persisted workspace map; its workspaces array is authoritative.";
       "You are the only writer in this phase.";
       "Implement the requested scope completely and follow repository-local instructions.";
       "Do not invoke /review or spawn subagents; two independent reviewers run after this phase.";
@@ -113,7 +124,8 @@ let reviewer_task (dispatch : dispatch) focus =
   String.concat "\n\n"
     [ Printf.sprintf "Independently review Monty worker %s: %s." dispatch.id
         dispatch.title;
-      "Start from the supplied task context and inspect the current worktree directly.";
+      "Start from the supplied task context and inspect every supplied worktree directly.";
+      "Use the absolute MONTY_JOB_FILE path in the Monty instructions to resolve every persisted workspace path.";
       "Do not rely on another agent's summary and do not look for another reviewer's output.";
       focus;
       "This is strictly read-only. Do not modify project, source, test, configuration, task, or worker-memory files.";
@@ -127,7 +139,8 @@ let reviewer_task (dispatch : dispatch) focus =
 let fixer_task (dispatch : dispatch) =
   String.concat "\n\n"
     [ Printf.sprintf "Finalize Monty worker %s: %s." dispatch.id dispatch.title;
-      "Read the supplied task context, inspect the current worktree, and review both independent reports below.";
+      "Read the supplied task context, inspect every supplied worktree, and review both independent reports below.";
+      "Use the absolute MONTY_JOB_FILE path in the Monty instructions to resolve every persisted workspace path.";
       "You are the only writer in this phase.";
       "Verify every finding against the code and requirements. Fix valid findings without widening scope and explicitly reject invalid findings.";
       "Rerun affected validation plus any broader checks required by the repository.";
@@ -180,7 +193,7 @@ let harness_arguments_json (dispatch : dispatch) attempt_id =
       ~task:
         (reviewer_task dispatch
            "Focus on correctness, regressions, edge cases, data integrity, security, and exact requirement compliance.")
-      ~cwd:dispatch.worktree ~reads:[ dispatch.context ]
+      ~cwd:dispatch.worktree ~reads:[ dispatch.instructions; dispatch.context ]
       ~output:paths.correctness
   in
   let quality_review =
@@ -189,7 +202,8 @@ let harness_arguments_json (dispatch : dispatch) attempt_id =
       ~task:
         (reviewer_task dispatch
            "Focus on tests, failure handling, maintainability, simplicity, architectural fit, and missing validation.")
-      ~cwd:dispatch.worktree ~reads:[ dispatch.context ] ~output:paths.quality
+      ~cwd:dispatch.worktree ~reads:[ dispatch.instructions; dispatch.context ]
+      ~output:paths.quality
   in
   let reviews =
     `Assoc
@@ -230,6 +244,8 @@ let dispatch_json ?attempt_id (dispatch : dispatch) =
             ("repo", `String dispatch.repo);
             ("branch", `String dispatch.branch);
             ("worktree", `String dispatch.worktree);
+            ("workspaces",
+             `List (List.map Job_store.json_of_workspace dispatch.workspaces));
             ("worker_dir", `String dispatch.worker_dir);
             ("instructions", `String dispatch.instructions);
             ("context", `String dispatch.context) ] );
@@ -252,26 +268,37 @@ let planned_job (prepared : Launcher.prepared) =
     title = prepared.job.Job.title;
     branch = prepared.branch;
     worktree = None;
+    workspaces =
+      List.map
+        (fun (workspace : Launcher.prepared_workspace) ->
+          Job_store.
+            {
+              repo = workspace.repo;
+              branch = Some workspace.branch;
+              worktree = None;
+            })
+        prepared.workspaces;
     worker_dir = prepared.worker_dir;
     status = "planned";
   }
 
 let ensure_worktree options (prepared : Launcher.prepared) =
   let expected_status = status_before_prepare prepared in
-  let worktree_result =
-    match options.Launcher.worktree_mode with
-    | Launcher.Never -> Ok prepared.repo
-    | Launcher.Always ->
-        Wt.create_or_reuse ~wt_command:options.wt_command ~repo:prepared.repo
-          ~branch:prepared.branch
-  in
-  match worktree_result with
+  match
+    Launcher.materialize_workspaces ~expected_statuses:[ expected_status ]
+      options prepared
+  with
   | Error message -> Error message
-  | Ok worktree ->
+  | Ok workspaces ->
+      let worktree =
+        match workspaces with
+        | first :: _ -> Option.value ~default:first.repo first.worktree
+        | [] -> prepared.repo
+      in
       let* () =
         Launcher.update_launch_state options prepared
           ~expected_statuses:[ expected_status ] ~status:"prepared"
-          ~worktree ()
+          ~worktree ~workspaces ()
       in
       Ok
         {
@@ -279,6 +306,7 @@ let ensure_worktree options (prepared : Launcher.prepared) =
           title = prepared.job.Job.title;
           branch = prepared.branch;
           worktree = Some worktree;
+          workspaces;
           worker_dir = prepared.worker_dir;
           status = "prepared";
         }
@@ -396,6 +424,13 @@ let claim_begin (plan : begin_plan) =
           repo = plan.prepared.repo;
           branch = plan.prepared.branch;
           worktree = request.workdir;
+          workspaces =
+            (match
+               Job_store.parse_job_file ~home:plan.options.home
+                 plan.prepared.state_path.job_file
+             with
+            | Ok record -> record.workspaces
+            | Error _ -> plan.record.workspaces);
           worker_dir = plan.prepared.worker_dir;
           instructions = plan.prepared.instructions;
           context = plan.prepared.context;
@@ -465,6 +500,7 @@ let provisional_dispatch (plan : begin_plan) =
     branch = plan.prepared.branch;
     worktree =
       Option.value ~default:plan.prepared.repo plan.record.last_known_worktree;
+    workspaces = plan.record.workspaces;
     worker_dir = plan.prepared.worker_dir;
     instructions = plan.prepared.instructions;
     context = plan.prepared.context;
@@ -587,12 +623,23 @@ let run_codex_phase (options : Launcher.options) (dispatch : dispatch)
     (paths : attempt_paths) ~name ~writable ~prompt ~output =
   let events = phase_path paths.events name ".jsonl" in
   let progress = phase_path paths.logs name ".log" in
+  let additional_dirs =
+    match dispatch.workspaces with
+    | [] | [ _ ] -> ""
+    | _ :: rest ->
+        rest
+        |> List.filter_map (fun (workspace : Job_store.workspace_state) ->
+               workspace.worktree)
+        |> List.map (fun path -> " --add-dir " ^ Shell.quote path)
+        |> String.concat ""
+  in
   let command =
     "umask 077 && " ^ options.harness_command ^ " exec"
     ^ Harness_command.codex_effort_arg
     ^ " --ephemeral --json --color never"
     ^ codex_permission_arg options ~writable
     ^ " -C " ^ Shell.quote dispatch.worktree
+    ^ additional_dirs
     ^ " --output-last-message " ^ Shell.quote output ^ " - < "
     ^ Shell.quote prompt ^ " > " ^ Shell.quote events ^ " 2> "
     ^ Shell.quote progress

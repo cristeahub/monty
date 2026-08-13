@@ -75,6 +75,7 @@ let parse_github_issue ~(project : project) ~repo json =
           title;
           status;
           branch = None;
+          workspaces = [];
           url;
         }
   | _ -> Error "GitHub issue JSON missing number or title"
@@ -118,6 +119,82 @@ let worker_key ~repo ~branch ~id =
         `String (Option.value ~default:"" branch);
         `String id ])
 
+let task_workspaces_of_job (job : Job.t) =
+  job.Job.workspaces
+  |> List.filter_map (fun (workspace : Job.workspace) ->
+         Option.map
+           (fun branch ->
+             Overview_types.
+               {
+                 repo = Shell.normalize (Shell.abs_path workspace.repo);
+                 branch;
+               })
+           workspace.branch)
+
+let worker_key_for_job ~id (job : Job.t) =
+  match job.Job.workspaces with
+  | [ workspace ] -> worker_key ~repo:workspace.repo ~branch:workspace.branch ~id
+  | workspaces ->
+      let pairs =
+        workspaces
+        |> List.map (fun (workspace : Job.workspace) ->
+               ( Shell.normalize (Shell.abs_path workspace.repo),
+                 Option.value ~default:"" workspace.branch ))
+        |> List.sort compare
+        |> List.map (fun (repo, branch) ->
+               `List [ `String repo; `String branch ])
+      in
+      Yojson.Safe.to_string
+        (`List [ `String "v2"; `String id; `List pairs ])
+
+let workspace_sets_equal left right =
+  let normalize values =
+    values
+    |> List.map (fun (workspace : task_workspace) ->
+           (Shell.normalize (Shell.abs_path workspace.repo), workspace.branch))
+    |> List.sort compare
+  in
+  normalize left = normalize right
+
+let projects_for_job ?home projects (job : Job.t) =
+  fold_results job.Job.workspaces ~init:[] ~f:(fun acc workspace ->
+      match project_for_repo_opt projects workspace.Job.repo with
+      | Some project -> Ok (project :: acc)
+      | None ->
+          Error
+            (match home with
+            | Some home -> registration_warning ~home workspace.repo
+            | None ->
+                Printf.sprintf "worker repo is not registered: %s"
+                  workspace.repo))
+  |> Result.map List.rev
+
+let project_ids_for_task projects (task : local_task) =
+  let workspace_ids =
+    task.workspaces
+    |> List.filter_map (fun (workspace : task_workspace) ->
+           project_for_repo_opt projects workspace.repo
+           |> Option.map (fun (project : project) -> project.id))
+  in
+  List.sort_uniq String.compare (task.project :: workspace_ids)
+
+let task_project_label projects (task : local_task) =
+  match task.workspaces with
+  | [] -> task.project
+  | workspaces ->
+      workspaces
+      |> List.filter_map (fun (workspace : task_workspace) ->
+             project_for_repo_opt projects workspace.repo
+             |> Option.map (fun (project : project) -> project.id))
+      |> List.fold_left
+           (fun acc id -> if List.mem id acc then acc else acc @ [ id ])
+           []
+      |> String.concat ","
+
+let task_of_local_with_projects projects (task : local_task) =
+  let rendered = task_of_local task in
+  { rendered with project = task_project_label projects task }
+
 let find_tasks_by_worker tasks key =
   List.filter
     (fun (task : local_task) -> task.worker_key = Some key)
@@ -137,30 +214,35 @@ let validate_worker_task_link_in projects tasks (record : Job_store.record) =
               (Printf.sprintf "worker %s has unsupported non-local task key %S"
                  record.id key)
       in
-      let* project =
-        match project_for_repo_opt projects record.job.Job.repo with
-        | Some project -> Ok project
-        | None ->
-            Error
-              (Printf.sprintf "worker repo is not registered: %s"
-                 record.job.Job.repo)
-      in
+      let* worker_projects = projects_for_job projects record.job in
       let* task =
         match find_local_task_by_id tasks task_id with
         | Some task -> Ok task
         | None ->
             Error (Printf.sprintf "linked local Monty task is missing: %s" task_id)
       in
-      if not (String.equal task.project project.id) then
+      if
+        not
+          (List.exists
+             (fun (project : project) -> String.equal task.project project.id)
+             worker_projects)
+      then
         Error
           (Printf.sprintf
-             "worker %s in project %s links task %s from project %s"
-             record.id project.id key task.project)
+             "worker %s links task %s from project %s, which is not in its workspace set"
+             record.id task.id task.project)
+      else if
+        task.workspaces <> []
+        && not
+             (workspace_sets_equal task.workspaces
+                (task_workspaces_of_job record.job))
+      then
+        Error
+          (Printf.sprintf
+             "worker %s workspace set does not match linked local Monty task %s"
+             record.id task.id)
       else
-        let stable_key =
-          worker_key ~repo:record.job.Job.repo ~branch:record.job.Job.branch
-            ~id:record.id
-        in
+        let stable_key = worker_key_for_job ~id:record.id record.job in
         match (task.worker_key, task.worker_id) with
         | Some owner, _ when not (String.equal owner stable_key) ->
             Error
@@ -199,15 +281,23 @@ let set_worker_task_status ~home record status =
                 (replace_local_task tasks updated)))
 
 let valid_local_task_link projects tasks (record : Job_store.record) =
-  match
-    ( project_for_repo_opt projects record.job.Job.repo,
-      record.job.Job.task_key )
-  with
-  | Some project, Some key -> (
+  match record.job.Job.task_key with
+  | Some key -> (
       match Job_store.local_task_id_of_key (Some key) with
       | Ok (Some id) -> (
           match find_local_task_by_id tasks id with
-          | Some task -> String.equal task.project project.id
+          | Some task -> (
+              match projects_for_job projects record.job with
+              | Error _ -> false
+              | Ok worker_projects ->
+                  List.exists
+                    (fun (project : project) ->
+                      String.equal task.project project.id)
+                    worker_projects
+                  &&
+                  (task.workspaces = []
+                  || workspace_sets_equal task.workspaces
+                       (task_workspaces_of_job record.job)))
           | None -> false)
       | _ -> false)
   | _ -> false
@@ -238,6 +328,7 @@ let update_external_tasks tasks imports =
               title = import.title;
               status = "open";
               branch = None;
+              workspaces = [];
               notes = None;
               worker_id = None;
               worker_key = None;
@@ -302,9 +393,8 @@ let plan_jobs ~home projects initial_tasks records initial_warnings =
     |> List.filter (valid_local_task_link projects initial_tasks)
     |> duplicate_task_claim_warnings
   in
-  let record_worker_key record =
-    worker_key ~repo:record.Job_store.job.Job.repo
-      ~branch:record.job.Job.branch ~id:record.id
+  let record_worker_key (record : Job_store.record) =
+    worker_key_for_job ~id:record.id record.Job_store.job
   in
   let worker_keys = List.map record_worker_key records in
   let ambiguous_worker_keys =
@@ -327,15 +417,15 @@ let plan_jobs ~home projects initial_tasks records initial_warnings =
   in
   List.fold_left
     (fun (tasks, patches, created, warnings) (record : Job_store.record) ->
-      match project_for_repo_opt projects record.job.Job.repo with
-      | None ->
+      match projects_for_job ~home projects record.job with
+      | Error message ->
           ( tasks,
             patches,
             created,
-            (Printf.sprintf "%s (%s)"
-               (registration_warning ~home record.job.Job.repo) record.path)
-            :: warnings )
-      | Some project -> (
+            (Printf.sprintf "%s (%s)" message record.path) :: warnings )
+      | Ok [] -> (tasks, patches, created, warnings)
+      | Ok (project :: worker_projects) -> (
+          let worker_projects = project :: worker_projects in
           match record.job.Job.task_key with
           | Some key -> (
               match Job_store.local_task_id_of_key (Some key) with
@@ -357,7 +447,12 @@ let plan_jobs ~home projects initial_tasks records initial_warnings =
                         (Printf.sprintf "worker %s links missing local task %s"
                            record.id key)
                         :: warnings )
-                  | Some task when not (String.equal task.project project.id) ->
+                  | Some task
+                    when not
+                           (List.exists
+                              (fun (worker_project : project) ->
+                                String.equal task.project worker_project.id)
+                              worker_projects) ->
                       ( tasks,
                         patches,
                         created,
@@ -368,8 +463,7 @@ let plan_jobs ~home projects initial_tasks records initial_warnings =
                   | Some _ -> (tasks, patches, created, warnings)))
           | None -> (
               let stable_key =
-                worker_key ~repo:record.job.Job.repo ~branch:record.job.Job.branch
-                  ~id:record.id
+                worker_key_for_job ~id:record.id record.job
               in
               if List.exists (String.equal stable_key) ambiguous_worker_keys then
                 (tasks, patches, created, warnings)
@@ -389,6 +483,7 @@ let plan_jobs ~home projects initial_tasks records initial_warnings =
                       title = record.job.Job.title;
                       status = status_of_job record;
                       branch = record.job.Job.branch;
+                      workspaces = task_workspaces_of_job record.job;
                       notes = None;
                       worker_id = Some record.id;
                       worker_key = Some stable_key;
@@ -495,6 +590,7 @@ let diagnostic_task projects (record : Job_store.record) =
     title = record.job.Job.title;
     status = status_of_job record;
     branch = record.job.Job.branch;
+    workspaces = task_workspaces_of_job record.job;
     url = None;
   }
 
@@ -515,9 +611,11 @@ let load_tasks_with_warnings ~home ?project ?(all = false) () =
   let local_items =
     local_tasks
     |> List.filter (fun (task : local_task) ->
-           List.exists (String.equal task.project) selected_ids
+           List.exists
+             (fun id -> List.exists (String.equal id) selected_ids)
+             (project_ids_for_task projects task)
            && visible_task task)
-    |> List.map task_of_local
+    |> List.map (task_of_local_with_projects projects)
   in
   let orphan_tasks =
     match project with
@@ -530,7 +628,7 @@ let load_tasks_with_warnings ~home ?project ?(all = false) () =
                     (fun (known : project) -> String.equal known.id task.project)
                     projects)
                && visible_task task)
-        |> List.map task_of_local
+        |> List.map (task_of_local_with_projects projects)
   in
   let local_items = local_items @ orphan_tasks in
   let display_ids =
@@ -551,20 +649,28 @@ let load_tasks_with_warnings ~home ?project ?(all = false) () =
          (fun (items, warnings) record ->
            let linked = valid_local_task_link projects local_tasks record in
            let selected =
-             match project_for_repo_opt selected_projects record.job.Job.repo with
-             | Some _ -> true
-             | None -> project = None
+             match projects_for_job selected_projects record.job with
+             | Ok (_ :: _) -> true
+             | Ok [] | Error _ -> project = None
            in
            let visible = all || not (Job_store.is_archived record) in
+           let missing_workspace_warnings =
+             record.job.Job.workspaces
+             |> List.filter_map (fun (workspace : Job.workspace) ->
+                    match project_for_repo_opt projects workspace.repo with
+                    | Some _ -> None
+                    | None ->
+                        Some
+                          (Printf.sprintf "%s (%s)"
+                             (registration_warning ~home workspace.repo)
+                             record.path))
+           in
            let warnings =
              match project_for_repo_opt projects record.job.Job.repo with
-             | None ->
-                 (Printf.sprintf "%s (%s)"
-                    (registration_warning ~home record.job.Job.repo) record.path)
-                 :: warnings
+             | None -> missing_workspace_warnings @ warnings
              | Some worker_project -> (
                  match record.job.Job.task_key with
-                 | None -> warnings
+                 | None -> missing_workspace_warnings @ warnings
                  | Some key -> (
                      match Job_store.local_task_id_of_key (Some key) with
                      | Ok (Some id) -> (
@@ -574,9 +680,9 @@ let load_tasks_with_warnings ~home ?project ?(all = false) () =
                              (Printf.sprintf
                                 "worker %s in project %s links task %s from project %s"
                                 record.id worker_project.id key task.project)
-                             :: warnings
-                         | _ -> warnings)
-                     | _ -> warnings))
+                             :: missing_workspace_warnings @ warnings
+                         | _ -> missing_workspace_warnings @ warnings)
+                     | _ -> missing_workspace_warnings @ warnings))
            in
            if linked || not selected || not visible then (items, warnings)
            else (diagnostic_task projects record :: items, warnings))
@@ -614,25 +720,37 @@ let plan_launch_task_links ~home (jobs : (string * Job.t) list) =
   let* projects = load_projects ~home in
   let* initial_tasks = load_local_tasks ~home in
   let plan_one (tasks, planned, changed) (worker_id, (job : Job.t)) =
+    let* job_projects = projects_for_job ~home projects job in
     let* project =
-      match project_for_repo_opt projects job.repo with
-      | Some project -> Ok project
-      | None ->
-          Error
-            (registration_warning ~home
-               (Shell.normalize (Shell.abs_path job.repo)))
+      match job_projects with
+      | first :: _ -> Ok first
+      | [] -> Error "a Monty job needs at least one registered workspace"
     in
-    let stable_key = worker_key ~repo:job.repo ~branch:job.branch ~id:worker_id in
+    let job_workspaces = task_workspaces_of_job job in
+    let stable_key = worker_key_for_job ~id:worker_id job in
     let link (task : local_task) =
       if not (String.equal task.status "open") then
         Error
           (Printf.sprintf "linked local Monty task %s is %s, not open"
              task.id task.status)
-      else if not (String.equal task.project project.id) then
+      else if
+        not
+          (List.exists
+             (fun (project : project) -> String.equal task.project project.id)
+             job_projects)
+      then
         Error
           (Printf.sprintf
-             "linked task local:%s belongs to project %s, not worker repo %s"
-             task.id task.project job.repo)
+             "linked task local:%s belongs to project %s, which is absent from the worker workspace set"
+             task.id task.project)
+      else if
+        task.workspaces <> []
+        && not (workspace_sets_equal task.workspaces job_workspaces)
+      then
+        Error
+          (Printf.sprintf
+             "linked local Monty task %s workspace set does not match the manifest"
+             task.id)
       else
         match (task.worker_key, task.worker_id) with
         | Some owner, _ when not (String.equal owner stable_key) ->
@@ -650,7 +768,8 @@ let plan_launch_task_links ~home (jobs : (string * Job.t) list) =
               { task with
                 worker_id = Some worker_id;
                 worker_key = Some stable_key;
-                branch = job.branch }
+                branch = job.branch;
+                workspaces = job_workspaces }
             in
             let changed = changed || linked <> task in
             let linked =
@@ -687,6 +806,7 @@ let plan_launch_task_links ~home (jobs : (string * Job.t) list) =
                 title = job.title;
                 status = "open";
                 branch = job.branch;
+                workspaces = task_workspaces_of_job job;
                 notes = None;
                 worker_id = Some worker_id;
                 worker_key = Some stable_key;
@@ -726,16 +846,15 @@ let ensure_worker_task_link ~home ~worker_id (job : Job.t) =
   State_store.with_lock ~home (fun () ->
       let ( let* ) = Result.bind in
       let* projects = load_projects ~home in
+      let* job_projects = projects_for_job ~home projects job in
       let* project =
-        match project_for_repo_opt projects job.repo with
-        | Some project -> Ok project
-        | None ->
-            Error
-              (registration_warning ~home
-                 (Shell.normalize (Shell.abs_path job.repo)))
+        match job_projects with
+        | first :: _ -> Ok first
+        | [] -> Error "a Monty job needs at least one registered workspace"
       in
       let* tasks = load_local_tasks ~home in
-      let stable_key = worker_key ~repo:job.repo ~branch:job.branch ~id:worker_id in
+      let stable_key = worker_key_for_job ~id:worker_id job in
+      let job_workspaces = task_workspaces_of_job job in
       match job.task_key with
       | Some key -> (
           match Job_store.local_task_id_of_key (Some key) with
@@ -744,15 +863,30 @@ let ensure_worker_task_link ~home ~worker_id (job : Job.t) =
           | Ok (Some id) -> (
               match find_local_task_by_id tasks id with
               | None -> Error (Printf.sprintf "linked local Monty task is missing: %s" id)
-              | Some task when not (String.equal task.project project.id) ->
+              | Some task
+                when not
+                       (List.exists
+                          (fun (project : project) ->
+                            String.equal task.project project.id)
+                          job_projects) ->
                   Error
-                    (Printf.sprintf "linked task %s belongs to project %s, not worker repo %s"
-                       key task.project job.repo)
+                    (Printf.sprintf
+                       "linked task %s belongs to project %s, which is absent from the worker workspace set"
+                       key task.project)
+              | Some task
+                when task.workspaces <> []
+                     && not
+                          (workspace_sets_equal task.workspaces job_workspaces) ->
+                  Error
+                    (Printf.sprintf
+                       "linked local Monty task %s workspace set does not match the worker"
+                       task.id)
               | Some task ->
                   let linked =
                     { task with
                       worker_id = Some worker_id;
-                      worker_key = Some stable_key }
+                      worker_key = Some stable_key;
+                      workspaces = job_workspaces }
                   in
                   let* () =
                     if linked = task then Ok ()
@@ -774,6 +908,7 @@ let ensure_worker_task_link ~home ~worker_id (job : Job.t) =
                   title = job.title;
                   status = "open";
                   branch = job.branch;
+                  workspaces = task_workspaces_of_job job;
                   notes = None;
                   worker_id = Some worker_id;
                   worker_key = Some stable_key;
@@ -817,8 +952,7 @@ let repair_legacy_task_link ~home worker =
                   worker_id = Some record.id;
                   worker_key =
                     Some
-                      (worker_key ~repo:record.job.Job.repo
-                         ~branch:record.job.Job.branch ~id:record.id);
+                      (worker_key_for_job ~id:record.id record.job);
                   updated_at = Some (now_utc ()) }
               in
               let* () = save_local_tasks_unlocked ~home (replace_local_task tasks task) in

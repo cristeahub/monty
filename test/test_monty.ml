@@ -146,7 +146,61 @@ let test_manifest () =
             (Option.value ~default:"" job.Job.worker_dir);
           assert_equal "manifest task key" "local:local-001"
             (Option.value ~default:"" job.Job.task_key)
-      | Ok _ -> failwith "expected exactly one job")
+      | Ok _ -> failwith "expected exactly one job");
+  let backend = Filename.concat root "django-backend" in
+  let admin = Filename.concat root "admin" in
+  Shell.ensure_dir backend;
+  Shell.ensure_dir admin;
+  let multi = Filename.concat run_dir "multi.json" in
+  Yojson.Safe.to_file multi
+    (`Assoc
+      [ ( "jobs",
+          `List
+            [ `Assoc
+                [ ("title", `String "Multi task");
+                  ("context", `String "task.md");
+                  ( "workspaces",
+                    `List
+                      [ `Assoc
+                          [ ("repo", `String backend);
+                            ("branch", `String "cto/backend") ];
+                        `Assoc [ ("repo", `String admin) ] ] ) ] ] ) ]);
+  (match Manifest.load multi with
+  | Ok [ (_, job) ] ->
+      assert_equal "multi manifest workspace count" "2"
+        (List.length job.Job.workspaces |> string_of_int);
+      assert_equal "multi manifest first repo" backend
+        (List.hd job.workspaces).repo;
+      assert_bool "multi manifest omitted branch remains derivable"
+        ((List.nth job.workspaces 1).branch = None)
+  | Ok _ -> failwith "expected one multi-workspace manifest job"
+  | Error msg -> failwith msg);
+  let rejects label json needle =
+    Yojson.Safe.to_file multi json;
+    match Manifest.load multi with
+    | Ok _ -> failwith (label ^ " unexpectedly succeeded")
+    | Error msg -> assert_contains label msg needle
+  in
+  rejects "mixed manifest forms"
+    (`Assoc
+      [ ( "jobs",
+          `List
+            [ `Assoc
+                [ ("title", `String "Mixed"); ("repo", `String backend);
+                  ("context", `String context);
+                  ( "workspaces",
+                    `List [ `Assoc [ ("repo", `String admin) ] ] ) ] ] ) ])
+    "either top-level repo/branch or workspaces";
+  rejects "relative workspace repo"
+    (`Assoc
+      [ ( "jobs",
+          `List
+            [ `Assoc
+                [ ("title", `String "Relative");
+                  ("context", `String context);
+                  ( "workspaces",
+                    `List [ `Assoc [ ("repo", `String "../admin") ] ] ) ] ] ) ])
+    "must be an absolute path"
 
 let setup_worker ?(last_known_worktree = None) root =
   let home = Filename.concat root "home" in
@@ -843,6 +897,32 @@ let test_codex_harness_command () =
   assert_not_contains "codex does not use pi file syntax" command "@/monty";
   assert_not_contains "Codex YOLO defaults off" command
     "--dangerously-bypass-approvals-and-sandbox";
+  let multi_job =
+    Job.make_with_workspaces ~worker_dir:"/monty/workers/task-1"
+      ~title:"Codex multi task"
+      ~workspaces:
+        [ Job.{ repo = "/repo"; branch = Some "cto/task-1" };
+          Job.{ repo = "/admin"; branch = Some "cto/admin-task-1" } ]
+      ~context:"/monty/context.md" ()
+  in
+  let multi_command =
+    Harness_command.build_command ~options
+      ~instructions:(Some "/monty/MONTY.md") ~job:multi_job
+      ~context:multi_job.context
+  in
+  assert_contains "Codex secondary workspace permission" multi_command
+    "--add-dir \"$MONTY_WORKSPACE_2\"";
+  let never_script =
+    Harness_command.launch_script_contents ~options ~job:multi_job ~id:"task-1"
+      ~branch:"cto/task-1" ~source_repo:"/repo" ~initial_workdir:"/repo"
+      ~context:multi_job.context ~instructions:"/monty/MONTY.md"
+      ~worker_dir:"/monty/workers/task-1" ~worktree_mode:"never"
+      ~wt_command:"wt"
+  in
+  assert_contains "multi never first workspace" never_script
+    "MONTY_WORKSPACE_1='/repo'";
+  assert_contains "multi never second workspace" never_script
+    "MONTY_WORKSPACE_2='/admin'";
   let yolo_command =
     Harness_command.build_command
       ~options:{ options with codex_yolo = true }
@@ -945,6 +1025,15 @@ let test_headless_json_contract () =
         repo = "/repo";
         branch = "cto/issue-123";
         worktree = "/worktrees/issue-123";
+        workspaces =
+          [ Job_store.
+              { repo = "/repo";
+                branch = Some "cto/issue-123";
+                worktree = Some "/worktrees/issue-123" };
+            Job_store.
+              { repo = "/admin";
+                branch = Some "cto/admin-issue-123";
+                worktree = Some "/worktrees/admin-issue-123" } ];
         worker_dir = "/monty/.monty/runs/run-1/workers/issue-123";
         instructions =
           "/monty/.monty/runs/run-1/workers/issue-123/MONTY.md";
@@ -956,6 +1045,9 @@ let test_headless_json_contract () =
     Yojson.Safe.Util.(json |> member "schema" |> to_string);
   assert_equal "headless dispatch worktree" dispatch.worktree
     Yojson.Safe.Util.(json |> member "worker" |> member "worktree" |> to_string);
+  assert_equal "headless dispatch workspace count" "2"
+    (Yojson.Safe.Util.(json |> member "worker" |> member "workspaces" |> to_list)
+    |> List.length |> string_of_int);
   assert_bool "headless dispatch excludes subagent runtime state"
     Yojson.Safe.Util.(json |> member "worker" |> member "run_id" = `Null);
   let harness_call = Yojson.Safe.Util.member "harness_call" json in
@@ -1008,6 +1100,7 @@ let test_headless_json_contract () =
         title = dispatch.title;
         branch = dispatch.branch;
         worktree = Some dispatch.worktree;
+        workspaces = dispatch.workspaces;
         worker_dir = dispatch.worker_dir;
         status = "prepared" }
   in
