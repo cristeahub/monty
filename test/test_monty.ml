@@ -903,7 +903,7 @@ let test_codex_harness_command () =
       ~workspaces:
         [ Job.{ repo = "/repo"; branch = Some "cto/task-1" };
           Job.{ repo = "/admin"; branch = Some "cto/admin-task-1" } ]
-      ~context:"/monty/context.md" ()
+      ~context:"/monty/context.md" ~task_key:"local:local-005" ()
   in
   let multi_command =
     Harness_command.build_command ~options
@@ -915,7 +915,7 @@ let test_codex_harness_command () =
   let never_script =
     Harness_command.launch_script_contents ~options ~job:multi_job ~id:"task-1"
       ~branch:"cto/task-1" ~source_repo:"/repo" ~initial_workdir:"/repo"
-      ~context:multi_job.context ~instructions:"/monty/MONTY.md"
+      ~home:"/monty" ~context:multi_job.context ~instructions:"/monty/MONTY.md"
       ~worker_dir:"/monty/workers/task-1" ~worktree_mode:"never"
       ~wt_command:"wt"
   in
@@ -923,6 +923,16 @@ let test_codex_harness_command () =
     "MONTY_WORKSPACE_1='/repo'";
   assert_contains "multi never second workspace" never_script
     "MONTY_WORKSPACE_2='/admin'";
+  let always_script =
+    Harness_command.launch_script_contents ~options ~job:multi_job ~id:"task-1"
+      ~branch:"cto/task-1" ~source_repo:"/repo" ~initial_workdir:"/repo"
+      ~home:"/monty" ~context:multi_job.context ~instructions:"/monty/MONTY.md"
+      ~worker_dir:"/monty/workers/task-1" ~worktree_mode:"always"
+      ~wt_command:"wt"
+  in
+  assert_contains "multi workspace rehydration uses explicit Monty home"
+    always_script
+    "task workspace ensure 'local:local-005' --repo '/repo' --home '/monty'";
   let yolo_command =
     Harness_command.build_command
       ~options:{ options with codex_yolo = true }

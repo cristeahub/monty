@@ -2798,6 +2798,8 @@ let test_multi_workspace_sonnet_task_lifecycle () =
       require_contains "second workspace environment" script "MONTY_WORKSPACE_2";
       require_contains "worker-scoped workspace rehydration" script
         "task workspace ensure";
+      require_contains "workspace rehydration uses the control-room home" script
+        ("--home " ^ Shell.quote home);
       let late_workspace =
         run ~root ~env 21158
           [ "task"; "workspace"; "add"; "local-005"; "--repo"; backend;

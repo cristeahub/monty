@@ -70,19 +70,20 @@ let build_command ~options ~instructions ~job ~context =
         codex_vim_arg yolo add_dirs
         (Shell.quote (codex_prompt ~instructions ~context job))
 
-let rehydrate_lines ~monty_command ~wt_command ~branch ~source_repo =
+let rehydrate_lines ~monty_command ~home ~wt_command ~branch ~source_repo =
   [ "MONTY_JOB_WORKTREE=$("
     ^ Shell.quote monty_command
     ^ " ensure-worktree --repo "
     ^ Shell.quote source_repo ^ " --branch " ^ Shell.quote branch
-    ^ " --wt-command " ^ Shell.quote wt_command ^ ")";
+    ^ " --home " ^ Shell.quote home ^ " --wt-command "
+    ^ Shell.quote wt_command ^ ")";
     "if [ -z \"$MONTY_JOB_WORKTREE\" ] || [ ! -d \"$MONTY_JOB_WORKTREE\" ]; then";
     "  printf '%s\\n' 'monty did not return an existing worktree path' >&2";
     "  exit 1";
     "fi";
     "cd \"$MONTY_JOB_WORKTREE\"" ]
 
-let rehydrate_workspace_lines ~monty_command ~wt_command (job : Job.t) =
+let rehydrate_workspace_lines ~monty_command ~home ~wt_command (job : Job.t) =
   let ensure index (workspace : Job.workspace) =
     let variable = Printf.sprintf "MONTY_WORKSPACE_%d" (index + 1) in
     let branch = Option.value ~default:"" workspace.branch in
@@ -91,12 +92,13 @@ let rehydrate_workspace_lines ~monty_command ~wt_command (job : Job.t) =
       | Some task_key ->
           Shell.quote monty_command ^ " task workspace ensure "
           ^ Shell.quote task_key ^ " --repo " ^ Shell.quote workspace.repo
-          ^ " --wt-command " ^ Shell.quote wt_command
+          ^ " --home " ^ Shell.quote home ^ " --wt-command "
+          ^ Shell.quote wt_command
       | None ->
           Shell.quote monty_command
           ^ " ensure-worktree --repo " ^ Shell.quote workspace.repo
-          ^ " --branch " ^ Shell.quote branch ^ " --wt-command "
-          ^ Shell.quote wt_command
+          ^ " --branch " ^ Shell.quote branch ^ " --home "
+          ^ Shell.quote home ^ " --wt-command " ^ Shell.quote wt_command
     in
     [ variable ^ "=$("
       ^ ensure_command ^ ")";
@@ -126,7 +128,7 @@ let static_workspace_lines (job : Job.t) =
       "cd \"$MONTY_JOB_WORKTREE\"" ]
 
 let launch_script_contents ~options ~job ~id ~branch ~source_repo
-    ~initial_workdir ~context ~instructions ~worker_dir ~worktree_mode
+    ~initial_workdir ~home ~context ~instructions ~worker_dir ~worktree_mode
     ~wt_command =
   let command = build_command ~options ~instructions:(Some instructions) ~job ~context in
   let setup_lines =
@@ -134,10 +136,10 @@ let launch_script_contents ~options ~job ~id ~branch ~source_repo
     | "always" -> (
         match job.Job.workspaces with
         | [] | [ _ ] ->
-            rehydrate_lines ~monty_command:options.monty_command ~wt_command
-              ~branch ~source_repo
+            rehydrate_lines ~monty_command:options.monty_command ~home
+              ~wt_command ~branch ~source_repo
         | _ ->
-            rehydrate_workspace_lines ~monty_command:options.monty_command
+            rehydrate_workspace_lines ~monty_command:options.monty_command ~home
               ~wt_command job)
     | _ -> (
         match job.Job.workspaces with
@@ -178,7 +180,7 @@ let launch_script_contents ~options ~job ~id ~branch ~source_repo
           "" ])
 
 let write_launch_script ?path ~options ~job ~id ~branch ~source_repo
-    ~initial_workdir ~context ~instructions ~worker_dir ~worktree_mode
+    ~initial_workdir ~home ~context ~instructions ~worker_dir ~worktree_mode
     ~wt_command () =
   Shell.ensure_dir options.script_dir;
   let path =
@@ -188,7 +190,7 @@ let write_launch_script ?path ~options ~job ~id ~branch ~source_repo
   in
   let contents =
     launch_script_contents ~options ~job ~id ~branch ~source_repo
-      ~initial_workdir ~context ~instructions ~worker_dir ~worktree_mode
+      ~initial_workdir ~home ~context ~instructions ~worker_dir ~worktree_mode
       ~wt_command
   in
   (match State_store.write_file_atomic ~path ~perm:0o700 contents with

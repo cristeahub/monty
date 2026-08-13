@@ -302,7 +302,8 @@ let script_has_owner_marker (options : options) (prepared : prepared) path =
       Harness_command.launch_script_contents ~options:harness_options
         ~job:prepared.job ~id:prepared.id ~branch:prepared.branch
         ~source_repo:prepared.repo ~initial_workdir:prepared.repo
-        ~context:prepared.context ~instructions:prepared.instructions
+        ~home:options.home ~context:prepared.context
+        ~instructions:prepared.instructions
         ~worker_dir:prepared.worker_dir
         ~worktree_mode:(worktree_mode_string options)
         ~wt_command:options.wt_command
@@ -1227,6 +1228,7 @@ let begin_request ?(persist_failure = true) ?(write_script = true) options
                      ~options:(harness_options options) ~job:prepared.job
                      ~id:prepared.id ~branch:prepared.branch
                      ~source_repo:prepared.repo ~initial_workdir
+                     ~home:options.home
                      ~context:prepared.context
                      ~instructions:prepared.instructions
                      ~worker_dir:prepared.worker_dir
