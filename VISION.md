@@ -34,6 +34,30 @@ Separate task chains are independent and may run concurrently.
 Reviewers can write their assigned reports outside the worktree but must otherwise remain read-only.
 The chain must not stage, commit, push, post remotely, manage worktrees, or complete the Monty task automatically.
 
+## A run handoff is not task completion
+
+Every interactive or headless execution can publish one shared, versioned run handoff.
+The handoff says what that run did, how it was validated and reviewed, what changed in each workspace, what remains risky, and where durable evidence lives.
+Its compact Markdown rendering is a delivery surface; the canonical JSON record is the source of truth.
+
+Run state and task state must remain distinct:
+
+- A run finishes when its handoff is durably published, including a useful failure handoff when execution fails.
+- The linked local task stays open and its Monty-managed workspaces remain available for questions, another pass, interactive continuation, or an explicitly approved publish workflow.
+- A task becomes done only through the user's existing explicit completion lifecycle.
+
+Interactive finished-run delivery prints directly in the worker terminal because
+the user has taken responsibility for that session. Headless delivery uses a
+durable home-level inbox with idempotent acknowledgement and at-least-once
+semantics. Live harness callbacks and restarted head-butler sessions reference
+the same canonical handoff rather than creating competing summaries. The head
+butler surfaces pending headless results at the next safe message boundary and
+must not interrupt an unrelated response in progress.
+
+Follow-up has two valid routes.
+A still-addressable native runner may answer directly; otherwise Monty constructs a fresh read-only dispatch from the canonical handoff, task context, worker memory, attempt artifacts, and current workspaces.
+Read-only drill-down never resumes implementation implicitly and never depends on a persisted Pi run ID or Codex session ID.
+
 ## Durable memory beats ephemeral worktrees
 
 Worker memory is durable.
@@ -78,7 +102,7 @@ The head butler must confirm that the harness exposes the subagent tool before p
 A pre-dispatch failure stays `prepared` and is safe to retry.
 Monty atomically claims one worker as `launch-requested` and emits the complete harness arguments immediately before the head butler invokes that tool.
 Any later ambiguity requires an explicit successor-chain resume and must never trigger automatic replay.
-A completed headless chain remains open and `launch-requested` until the user intentionally runs the existing completion lifecycle.
+A finished headless chain remains open and `launch-requested` until the user intentionally runs the existing completion lifecycle.
 Pi run IDs, backend choice, and runtime status remain ephemeral and never enter `job.json`.
 
 This avoids split-brain state and duplicate recovery requests.
@@ -138,8 +162,9 @@ monty done
 monty done --force
 ```
 
-The `monty headless prepare-many`, `begin`, and `resume` commands form a versioned harness protocol rather than a second public lifecycle.
+The `monty headless prepare-many`, `begin`, `finish`, and `resume` commands form a versioned harness protocol rather than a second public lifecycle.
 `begin` and `resume` emit complete arguments for the existing subagent tool, so the head butler does not reconstruct chain JSON by hand.
+`finish` converts a Pi callback into the same canonical run handoff produced directly by Codex and published explicitly by interactive workers.
 Ghostty remains the default behavior of the existing public commands.
 
 Lifecycle commands should be designed as stable product surfaces.
@@ -195,7 +220,7 @@ Complete preflight rejects any invalid or colliding batch before the first side 
 Required dependencies are configuration-aware.
 Doctor exits nonzero for FAIL and zero for PASS/WARN-only results.
 
-Tests should cover state transitions, parsing behavior, lifecycle commands, repo disambiguation, concurrent writers, atomic-write faults, deterministic reconciliation, whole-batch validation, partial launch recovery, headless claim boundaries, generated harness arguments, isolated reviewer construction, and CLI exit contracts.
+Tests should cover state transitions, parsing behavior, lifecycle commands, repo disambiguation, concurrent writers, atomic-write faults, deterministic reconciliation, whole-batch validation, partial launch recovery, headless claim boundaries, generated harness arguments, isolated reviewer construction, run-handoff rendering and recovery, inbox acknowledgement and forgery rejection, read-only follow-up, and CLI exit contracts.
 Checkout-binary E2E tests should use isolated homes, fake external tools, reliable cleanup, and real temporary Git repositories when identity matters.
 
 Monty controls sessions, files, worktrees, and branches.

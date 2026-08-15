@@ -4,6 +4,8 @@ let prepare_schema = "monty:headless-prepare:v2"
 let dispatch_schema = "monty:headless-dispatch:v3"
 let codex_run_schema = "monty:headless-codex-run:v1"
 let codex_run_many_schema = "monty:headless-codex-run-many:v1"
+let attempt_schema = "monty:headless-attempt:v1"
+let completion_schema = "monty:headless-completion:v1"
 
 type prepared_job = {
   id : string;
@@ -38,6 +40,7 @@ type attempt_paths = {
   prompts : string;
   events : string;
   logs : string;
+  descriptor : string;
 }
 
 type begin_plan = {
@@ -88,7 +91,62 @@ let attempt_paths (dispatch : dispatch) attempt_id =
     prompts = Filename.concat root "prompts";
     events = Filename.concat root "events";
     logs = Filename.concat root "logs";
+    descriptor = Filename.concat root "attempt.json";
   }
+
+let ensure_attempt_directories (dispatch : dispatch) (paths : attempt_paths) =
+  let directories =
+    [ Filename.concat dispatch.worker_dir "artifacts";
+      Filename.concat (Filename.concat dispatch.worker_dir "artifacts")
+        "headless";
+      paths.root;
+      Filename.dirname paths.correctness;
+      paths.prompts;
+      paths.events;
+      paths.logs ]
+  in
+  List.fold_left
+    (fun result directory ->
+      let* () = result in
+      State_store.ensure_real_directory ~label:"headless artifact directory"
+        ~mode:0o700 directory)
+    (Ok ()) directories
+
+let attempt_descriptor_json (dispatch : dispatch) (paths : attempt_paths) source =
+  `Assoc
+    [ ("schema", `String attempt_schema);
+      ("attempt_id", `String paths.id);
+      ("worker_id", `String dispatch.id);
+      ("source", `String source);
+      ("created_at", `String (Worker_memory.now_utc ())) ]
+
+let prepare_attempt (plan : begin_plan) (dispatch : dispatch)
+    (paths : attempt_paths) source =
+  State_store.with_lock ~home:dispatch.home (fun () ->
+      let* current =
+        Job_store.parse_job_file ~home:plan.options.home
+          plan.prepared.state_path.job_file
+      in
+      let* () =
+        match current.transition with
+        | None -> Ok ()
+        | Some transition ->
+            Error
+              (Printf.sprintf
+                 "worker %s entered a %s transition before its headless attempt was prepared"
+                 current.id (Job_store.operation_name transition.operation))
+      in
+      let* () =
+        if String.equal current.status plan.record.status then Ok ()
+        else
+          Error
+            (Printf.sprintf
+               "worker %s changed from %S to %S before its headless attempt was prepared"
+               current.id plan.record.status current.status)
+      in
+      let* () = ensure_attempt_directories dispatch paths in
+      State_store.write_json_atomic ~path:paths.descriptor
+        (attempt_descriptor_json dispatch paths source))
 
 let mutation_prohibitions =
   String.concat "\n"
@@ -230,6 +288,19 @@ let harness_arguments_json (dispatch : dispatch) attempt_id =
       ("sessionDir", `String (Filename.concat paths.root "sessions"));
       ("artifacts", `Bool false) ]
 
+let completion_command (dispatch : dispatch) attempt_id ~outcome =
+  String.concat " "
+    [ "monty";
+      "headless";
+      "finish";
+      Shell.quote dispatch.id;
+      "--attempt";
+      Shell.quote attempt_id;
+      "--outcome";
+      outcome;
+      "--home";
+      Shell.quote dispatch.home ]
+
 let dispatch_json ?attempt_id (dispatch : dispatch) =
   let attempt_id =
     match attempt_id with Some attempt_id -> attempt_id | None -> fresh_attempt_id ()
@@ -252,7 +323,17 @@ let dispatch_json ?attempt_id (dispatch : dispatch) =
       ( "harness_call",
         `Assoc
           [ ("tool", `String "subagent");
-            ("arguments", harness_arguments) ] ) ]
+            ("arguments", harness_arguments) ] );
+      ( "completion",
+        `Assoc
+          [ ("schema", `String completion_schema);
+            ("attempt_id", `String attempt_id);
+            ( "success_command",
+              `String (completion_command dispatch attempt_id ~outcome:"success") );
+            ( "failure_command",
+              `String
+                (completion_command dispatch attempt_id ~outcome:"failed"
+                ^ " --last-phase <PHASE> --error <MESSAGE>") ) ] ) ]
 
 let print_json json = Fmt.pr "%s\n" (Yojson.Safe.pretty_to_string json)
 
@@ -443,8 +524,27 @@ let begin_worker ~explicit_resume options worker =
       "headless begin emits a Pi subagent call, but the effective harness is codex; use monty headless run"
   else
     let* plan = prepare_begin ~explicit_resume options worker in
+    let preview =
+      {
+        id = plan.prepared.id;
+        title = plan.prepared.job.Job.title;
+        repo = plan.prepared.repo;
+        branch = plan.prepared.branch;
+        worktree =
+          Option.value ~default:plan.prepared.repo
+            plan.record.last_known_worktree;
+        workspaces = plan.record.workspaces;
+        worker_dir = plan.prepared.worker_dir;
+        instructions = plan.prepared.instructions;
+        context = plan.prepared.context;
+        home = plan.options.home;
+      }
+    in
+    let attempt_id = fresh_attempt_id () in
+    let paths = attempt_paths preview attempt_id in
+    let* () = prepare_attempt plan preview paths "headless-pi" in
     let* dispatch = claim_begin plan in
-    Ok (dispatch_json dispatch)
+    Ok (dispatch_json ~attempt_id dispatch)
 
 let read_required_file ~label path =
   try Ok (Shell.read_file path)
@@ -506,24 +606,6 @@ let provisional_dispatch (plan : begin_plan) =
     context = plan.prepared.context;
     home = plan.options.home;
   }
-
-let ensure_attempt_directories (dispatch : dispatch) (paths : attempt_paths) =
-  let directories =
-    [ Filename.concat dispatch.worker_dir "artifacts";
-      Filename.concat (Filename.concat dispatch.worker_dir "artifacts")
-        "headless";
-      paths.root;
-      Filename.dirname paths.correctness;
-      paths.prompts;
-      paths.events;
-      paths.logs ]
-  in
-  List.fold_left
-    (fun result directory ->
-      let* () = result in
-      State_store.ensure_real_directory ~label:"headless artifact directory"
-        ~mode:0o700 directory)
-    (Ok ()) directories
 
 let source_section label path contents =
   String.concat "\n"
@@ -732,15 +814,19 @@ let run_parallel left right =
       Error (Printf.sprintf "both Codex review phases failed:\n- %s\n- %s" left right)
 
 let codex_run_result_json (options : Launcher.options) (dispatch : dispatch)
-    (paths : attempt_paths) =
+    (paths : attempt_paths) (published : Run_handoff.published) =
   `Assoc
     [ ("schema", `String codex_run_schema);
       ("harness", `String "codex");
       ("codex_yolo", `Bool options.codex_yolo);
       ("worker_id", `String dispatch.id);
       ("status", `String "launch-requested");
+      ("run_status", `String "finished");
+      ("outcome", `String "ready-for-review");
       ("attempt_id", `String paths.id);
       ("artifact_dir", `String paths.root);
+      ("handoff", `String published.handoff.evidence.handoff);
+      ("notice_id", `String published.notice.id);
       ( "outputs",
         `Assoc
           [ ("implementation", `String paths.implementation);
@@ -758,68 +844,390 @@ let run_codex_worker ~explicit_resume options worker =
   let* plan, inputs = preflight_codex_worker ~explicit_resume options worker in
   let preview = provisional_dispatch plan in
   let paths = attempt_paths preview (fresh_attempt_id ()) in
-  let* () = ensure_attempt_directories preview paths in
-  let* implementation_prompt_path =
-    write_phase_prompt paths "implementation"
-      (implementation_prompt preview inputs)
-  in
+  let* () = prepare_attempt plan preview paths "headless-codex" in
   let* dispatch = claim_begin plan in
-  let* () =
-    run_codex_phase plan.options dispatch paths ~name:"implementation"
-      ~writable:true ~prompt:implementation_prompt_path
-      ~output:paths.implementation
+  let phase = ref "implementation" in
+  let execution =
+    let* implementation_prompt_path =
+      write_phase_prompt paths "implementation"
+        (implementation_prompt dispatch inputs)
+    in
+    let* () =
+      run_codex_phase plan.options dispatch paths ~name:"implementation"
+        ~writable:true ~prompt:implementation_prompt_path
+        ~output:paths.implementation
+    in
+    let* implementation_handoff =
+      read_required_file ~label:"Codex implementation handoff"
+        paths.implementation
+    in
+    let* () =
+      append_codex_memory dispatch paths ~phase:"implementation"
+        implementation_handoff
+    in
+    phase := "review";
+    let* correctness_prompt_path =
+      write_phase_prompt paths "correctness-review"
+        (reviewer_prompt dispatch inputs
+           "Focus on correctness, regressions, edge cases, data integrity, security, and exact requirement compliance."
+           implementation_handoff)
+    in
+    let* quality_prompt_path =
+      write_phase_prompt paths "quality-review"
+        (reviewer_prompt dispatch inputs
+           "Focus on tests, failure handling, maintainability, simplicity, architectural fit, and missing validation."
+           implementation_handoff)
+    in
+    let* () =
+      run_parallel
+        (fun () ->
+          run_codex_phase plan.options dispatch paths ~name:"correctness-review"
+            ~writable:false ~prompt:correctness_prompt_path
+            ~output:paths.correctness)
+        (fun () ->
+          run_codex_phase plan.options dispatch paths ~name:"quality-review"
+            ~writable:false ~prompt:quality_prompt_path ~output:paths.quality)
+    in
+    let* correctness =
+      read_required_file ~label:"Codex correctness review" paths.correctness
+    in
+    let* quality =
+      read_required_file ~label:"Codex quality review" paths.quality
+    in
+    phase := "fixer";
+    let* fixer_prompt_path =
+      write_phase_prompt paths "fixer"
+        (fixer_prompt dispatch inputs correctness quality)
+    in
+    let* () =
+      run_codex_phase plan.options dispatch paths ~name:"fixer" ~writable:true
+        ~prompt:fixer_prompt_path ~output:paths.final
+    in
+    let* final_handoff =
+      read_required_file ~label:"Codex final handoff" paths.final
+    in
+    phase := "durable-memory";
+    let* () =
+      append_codex_memory dispatch paths ~phase:"final" final_handoff
+    in
+    Ok final_handoff
   in
-  let* implementation_handoff =
-    read_required_file ~label:"Codex implementation handoff"
-      paths.implementation
+  (match execution with
+  | Error message ->
+      let handoff =
+        Run_handoff.publish ~home:plan.options.home ~record:plan.record
+          ~handoff_id:paths.id ~source:Run_handoff.Headless_codex
+          ~outcome:Run_handoff.Failed
+          ~summary:(Printf.sprintf "Headless Codex run failed during %s." !phase)
+          ~risks:[ message ] ~last_phase:!phase ~error:message
+          ~artifacts:[ paths.root ] ()
+      in
+      (match handoff with
+      | Ok published ->
+          Error
+            (Printf.sprintf "%s\nRun handoff: %s" message
+               published.handoff.evidence.handoff)
+      | Error handoff_error ->
+          Error
+            (Printf.sprintf
+               "%s\nAdditionally failed to persist the run handoff: %s" message
+               handoff_error))
+  | Ok final_handoff ->
+      phase := "handoff";
+      let* published =
+        Run_handoff.publish ~home:plan.options.home ~record:plan.record
+          ~handoff_id:paths.id ~source:Run_handoff.Headless_codex
+          ~outcome:Run_handoff.Ready_for_review
+          ~summary:(Run_handoff.compact_summary final_handoff)
+          ~validation:
+            [ "Exact validation commands and results are recorded in the final fixer handoff." ]
+          ~review_summary:
+            "Two independent reviewers completed and the fixer verified their reports."
+          ~artifacts:[ paths.root ] ()
+      in
+      Ok (codex_run_result_json plan.options dispatch paths published))
+
+let read_attempt_descriptor ~record paths ~expected_source =
+  let* () = Run_handoff.require_regular_file paths.descriptor in
+  let* json = State_store.read_json ~path:paths.descriptor in
+  match json with
+  | None -> Error (Printf.sprintf "headless attempt descriptor is missing: %s" paths.descriptor)
+  | Some json ->
+      let string name =
+        match Yojson.Safe.Util.member name json with
+        | `String value -> Ok value
+        | _ -> Error (Printf.sprintf "headless attempt descriptor missing %S" name)
+      in
+      let* schema = string "schema" in
+      let* attempt_id = string "attempt_id" in
+      let* worker_id = string "worker_id" in
+      let* source = string "source" in
+      if schema <> attempt_schema then Error "unsupported headless attempt descriptor"
+      else if attempt_id <> paths.id || worker_id <> record.Job_store.id then
+        Error "headless attempt descriptor identity does not match the requested worker"
+      else if source <> expected_source then
+        Error
+          (Printf.sprintf "headless attempt source is %S, expected %S" source
+             expected_source)
+      else Ok ()
+
+let require_attempt_hierarchy (record : Job_store.record) paths =
+  let directories =
+    [ record.worker_dir;
+      Filename.concat record.worker_dir "artifacts";
+      Filename.concat record.worker_dir "artifacts/headless";
+      paths.root ]
   in
-  let* () =
-    append_codex_memory dispatch paths ~phase:"implementation"
-      implementation_handoff
+  directories
+  |> List.fold_left
+       (fun result path ->
+         let* () = result in
+         let* state = State_store.lstat path in
+         match state with
+         | Some { Unix.st_kind = Unix.S_DIR; _ } -> Ok ()
+         | Some { Unix.st_kind = Unix.S_LNK; _ } ->
+             Error
+               (Printf.sprintf
+                  "unsafe headless attempt hierarchy contains a symlink: %s"
+                  path)
+         | Some _ ->
+             Error
+               (Printf.sprintf
+                  "headless attempt hierarchy component is not a directory: %s"
+                  path)
+         | None ->
+             Error
+               (Printf.sprintf "headless attempt hierarchy is missing: %s" path))
+       (Ok ())
+
+let finish_pi_worker ~home ~worker ~attempt_id ~success ?last_phase ?error () =
+  let* attempt_id = State_path.safe_component ~label:"headless attempt id" attempt_id in
+  let* record = Job_store.find ~home ~scope:Job_store.All worker in
+  let dispatch =
+    {
+      id = record.id;
+      title = record.job.title;
+      repo = record.job.repo;
+      branch = Option.value ~default:"" record.job.branch;
+      worktree = Option.value ~default:record.job.repo record.last_known_worktree;
+      workspaces = record.workspaces;
+      worker_dir = record.worker_dir;
+      instructions = Worker_memory.instructions_file record.worker_dir;
+      context = record.job.context;
+      home;
+    }
   in
-  let* correctness_prompt_path =
-    write_phase_prompt paths "correctness-review"
-      (reviewer_prompt dispatch inputs
-         "Focus on correctness, regressions, edge cases, data integrity, security, and exact requirement compliance."
-         implementation_handoff)
+  let paths = attempt_paths dispatch attempt_id in
+  let* () = require_attempt_hierarchy record paths in
+  let* () = read_attempt_descriptor ~record paths ~expected_source:"headless-pi" in
+  let publish ~outcome ~summary ~validation ?review_summary ~risks ?last_phase
+      ?error () =
+    Run_handoff.publish ~home ~record ~handoff_id:attempt_id
+      ~source:Run_handoff.Headless_pi ~outcome ~summary ~validation
+      ?review_summary ~risks ?last_phase ?error ~artifacts:[ paths.root ] ()
   in
-  let* quality_prompt_path =
-    write_phase_prompt paths "quality-review"
-      (reviewer_prompt dispatch inputs
-         "Focus on tests, failure handling, maintainability, simplicity, architectural fit, and missing validation."
-         implementation_handoff)
+  let completion_json (published : Run_handoff.published) =
+    `Assoc
+      [ ("schema", `String completion_schema);
+        ("worker_id", `String record.id);
+        ("attempt_id", `String attempt_id);
+        ("run_status", `String "finished");
+        ( "outcome",
+          `String (Run_handoff.outcome_to_string published.handoff.outcome) );
+        ("handoff", `String published.handoff.evidence.handoff);
+        ("notice_id", `String published.notice.id) ]
   in
-  let* () =
-    run_parallel
-      (fun () ->
-        run_codex_phase plan.options dispatch paths ~name:"correctness-review"
-          ~writable:false ~prompt:correctness_prompt_path
-          ~output:paths.correctness)
-      (fun () ->
-        run_codex_phase plan.options dispatch paths ~name:"quality-review"
-          ~writable:false ~prompt:quality_prompt_path ~output:paths.quality)
+  let finish requested (published : Run_handoff.published) =
+    if published.handoff.outcome = requested then Ok (completion_json published)
+    else
+      Error
+        (Printf.sprintf
+           "headless attempt %s already has canonical outcome %s; refusing conflicting outcome %s\nRun handoff: %s"
+           attempt_id
+           (Run_handoff.outcome_to_string published.handoff.outcome)
+           (Run_handoff.outcome_to_string requested)
+           published.handoff.evidence.handoff)
   in
-  let* correctness =
-    read_required_file ~label:"Codex correctness review" paths.correctness
+  if success then
+    match
+      let* () = Run_handoff.require_regular_file paths.final in
+      read_required_file ~label:"Pi final handoff" paths.final
+    with
+    | Ok final ->
+        let outcome = Run_handoff.Ready_for_review in
+        let* published =
+          publish ~outcome ~summary:(Run_handoff.compact_summary final)
+            ~validation:
+              [ "Exact validation commands and results are recorded in the final fixer handoff." ]
+            ~review_summary:
+              "Two independent reviewers completed and the fixer verified their reports."
+            ~risks:[] ()
+        in
+        finish outcome published
+    | Error message ->
+        let outcome = Run_handoff.Failed in
+        let handoff =
+          publish ~outcome
+            ~summary:"Pi callback succeeded but its final handoff artifact was unavailable."
+            ~validation:[] ~risks:[ message ] ~last_phase:"finalization"
+            ~error:message ()
+        in
+        (match handoff with
+        | Ok published ->
+            Error
+              (Printf.sprintf "%s\nRun handoff: %s" message
+                 published.handoff.evidence.handoff)
+        | Error handoff_error ->
+            Error
+              (Printf.sprintf
+                 "%s\nAdditionally failed to persist the run handoff: %s"
+                 message handoff_error))
+  else
+    let message =
+      Option.value ~default:"Pi headless chain failed without an error message"
+        error
+    in
+    let outcome = Run_handoff.Failed in
+    let* published =
+      publish ~outcome ~summary:"Headless Pi run failed." ~validation:[]
+        ~risks:[ message ] ?last_phase ~error:message ()
+    in
+    finish outcome published
+
+let recover_pi_attempt ~home ~(record : Job_store.record) attempt_id paths =
+  Run_handoff.publish ~home ~record ~handoff_id:attempt_id
+    ~source:Run_handoff.Headless_pi ~outcome:Run_handoff.Needs_attention
+    ~summary:
+      "Pi wrote a final artifact, but the live callback outcome was unavailable."
+    ~validation:[]
+    ~risks:
+      [ "Monty did not observe the callback result and cannot infer success from final.md alone." ]
+    ~last_phase:"finalization" ~artifacts:[ paths.root ] ()
+
+let recover_finished_pi ~home =
+  let inspect path =
+    match State_store.lstat path with
+    | Ok value -> Ok value
+    | Error _ as error -> error
   in
-  let* quality =
-    read_required_file ~label:"Codex quality review" paths.quality
+  let directory_entries ~label path =
+    let* state = inspect path in
+    match state with
+    | None -> Ok []
+    | Some { Unix.st_kind = Unix.S_LNK; _ } ->
+        Error (Printf.sprintf "unsafe %s is a symlink: %s" label path)
+    | Some { Unix.st_kind = Unix.S_DIR; _ } -> (
+        try Ok (Sys.readdir path |> Array.to_list |> List.sort String.compare)
+        with Sys_error message -> Error message)
+    | Some _ -> Error (Printf.sprintf "%s is not a directory: %s" label path)
   in
-  let* fixer_prompt_path =
-    write_phase_prompt paths "fixer"
-      (fixer_prompt dispatch inputs correctness quality)
-  in
-  let* () =
-    run_codex_phase plan.options dispatch paths ~name:"fixer" ~writable:true
-      ~prompt:fixer_prompt_path ~output:paths.final
-  in
-  let* final_handoff =
-    read_required_file ~label:"Codex final handoff" paths.final
-  in
-  let* () =
-    append_codex_memory dispatch paths ~phase:"final" final_handoff
-  in
-  Ok (codex_run_result_json plan.options dispatch paths)
+  let* records = Job_store.load ~home ~scope:Job_store.All in
+  let* canonical_home = State_path.canonicalize home in
+  records
+  |> List.fold_left
+       (fun result (record : Job_store.record) ->
+         let* recovered = result in
+         let artifacts = Filename.concat record.worker_dir "artifacts" in
+         let root =
+           Filename.concat artifacts "headless"
+         in
+         let* _ = directory_entries ~label:"worker artifact directory" artifacts in
+         let* names = directory_entries ~label:"headless artifact root" root in
+         names
+         |> List.fold_left
+              (fun result name ->
+                let* recovered = result in
+                let attempt_dir = Filename.concat root name in
+                let* state = inspect attempt_dir in
+                match state with
+                | Some { Unix.st_kind = Unix.S_LNK; _ } ->
+                    Error
+                      (Printf.sprintf "unsafe headless attempt is a symlink: %s"
+                         attempt_dir)
+                | Some { Unix.st_kind = Unix.S_DIR; _ } ->
+                    let* attempt_id =
+                      State_path.safe_component ~label:"headless attempt id" name
+                    in
+                    let dispatch =
+                      {
+                        id = record.id;
+                        title = record.job.title;
+                        repo = record.job.repo;
+                        branch = Option.value ~default:"" record.job.branch;
+                        worktree =
+                          Option.value ~default:record.job.repo
+                            record.last_known_worktree;
+                        workspaces = record.workspaces;
+                        worker_dir = record.worker_dir;
+                        instructions =
+                          Worker_memory.instructions_file record.worker_dir;
+                        context = record.job.context;
+                        home;
+                      }
+                    in
+                    let paths = attempt_paths dispatch attempt_id in
+                    let* descriptor_state = inspect paths.descriptor in
+                    (match descriptor_state with
+                    | None -> Ok recovered
+                    | Some { Unix.st_kind = Unix.S_LNK; _ } ->
+                        Error
+                          (Printf.sprintf
+                             "unsafe headless attempt descriptor is a symlink: %s"
+                             paths.descriptor)
+                    | Some { Unix.st_kind = Unix.S_REG; _ } ->
+                        let* json = State_store.read_json ~path:paths.descriptor in
+                        let* source =
+                          match json with
+                          | Some json -> (
+                              match Yojson.Safe.Util.member "source" json with
+                              | `String value -> Ok value
+                              | _ ->
+                                  Error
+                                    (Printf.sprintf
+                                       "headless attempt descriptor missing source: %s"
+                                       paths.descriptor))
+                          | None ->
+                              Error
+                                (Printf.sprintf
+                                   "headless attempt descriptor disappeared: %s"
+                                   paths.descriptor)
+                        in
+                        if source <> "headless-pi" then Ok recovered
+                        else
+                          let* final_state = inspect paths.final in
+                          (match final_state with
+                          | None -> Ok recovered
+                          | Some { Unix.st_kind = Unix.S_LNK; _ } ->
+                              Error
+                                (Printf.sprintf
+                                   "unsafe Pi final handoff is a symlink: %s"
+                                   paths.final)
+                          | Some { Unix.st_kind = Unix.S_REG; _ } ->
+                              let* reference =
+                                Run_handoff.reference_of_record record attempt_id
+                              in
+                              let canonical =
+                                Run_handoff.handoff_path canonical_home reference
+                              in
+                              if State_path.path_exists canonical then Ok recovered
+                              else
+                                let* _published =
+                                  recover_pi_attempt ~home ~record attempt_id paths
+                                in
+                                Ok (recovered + 1)
+                          | Some _ ->
+                              Error
+                                (Printf.sprintf
+                                   "Pi final handoff is not a regular file: %s"
+                                   paths.final))
+                    | Some _ ->
+                        Error
+                          (Printf.sprintf
+                             "headless attempt descriptor is not a regular file: %s"
+                             paths.descriptor))
+                | Some _ | None -> Ok recovered)
+              (Ok recovered))
+       (Ok 0)
 
 let preflight_codex_batch options indexed_jobs =
   let* () = require_codex_harness options in

@@ -1,6 +1,12 @@
 # Monty head-butler instructions
 
 This repo is the Monty control room.
+At the start of a head-butler planning session, run `monty handoff pending` before presenting the task inventory.
+Surface each pending run handoff at the next safe message boundary; never interrupt, cancel, or replace an unrelated response already in progress.
+After a handoff has actually been displayed to the user, run `monty handoff acknowledge <notice-id>`.
+Acknowledgement is idempotent, and reading a pending handoff must never start another run or change task status.
+When the user asks for more detail, use a still-addressable native runner when available; otherwise run `monty handoff follow-up <worker> --question <question>` and inspect only its read-only durable context.
+Use an explicit `monty resume` or `monty headless resume` only when the user asks to continue implementation.
 Use it to plan work, choose actionable tasks, and launch worker agent sessions through the configured Pi or Codex harness.
 In Monty conversations, a worker job and a task are the same unit of work.
 Do not treat active worker jobs and local tasks as separate concepts in user-facing replies.
@@ -142,8 +148,12 @@ monty headless prepare-many --manifest .monty/runs/<run-id>/jobs.json
 Headless preparation reserves every job and materializes its Monty-managed `wt` worktree while leaving the job `prepared`.
 With Pi selected, run `monty headless begin <worker-id>` immediately before the harness call.
 Read the returned `harness_call.tool` and pass `harness_call.arguments` unchanged to that exposed harness tool; do not manually reconstruct, simplify, or enrich the generated chain JSON.
+The same dispatch includes a versioned `completion` contract.
+After a successful Pi callback, run its exact `success_command`; after a failed callback, run the `failure_command` with the concrete last phase and error substituted.
+Completion finalization writes the shared durable handoff and pending notice but does not mark the task done.
 With Codex selected, run `monty headless run <worker-id>` or `monty headless run-many --manifest <manifest>`.
 Codex headless execution uses non-interactive `codex exec` processes and must not open Ghostty.
+A small native Codex supervisor may run the blocking Monty command and return its result to the main conversation; the returned result and durable inbox must both reference the same canonical handoff.
 Independent Pi or Codex chains can run concurrently without waiting for earlier jobs to finish.
 
 Each chain gets fresh minimal context and runs one implementer, two mutually isolated reviewers in parallel, and one fixer.

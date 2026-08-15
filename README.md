@@ -246,7 +246,9 @@ With Codex YOLO disabled, implementer and fixer processes use `workspace-write`,
 `monty settings set codex-yolo true` applies the configured unrestricted Codex mode to every phase and must be treated as a high-risk choice.
 
 Codex progress, JSONL events, prompts, and final phase messages are kept under the worker's durable `artifacts/headless/<attempt-id>/` directory.
-The CLI returns a compact JSON summary after the chain finishes.
+Before returning success, Codex also writes the canonical `monty:run-handoff:v1` record and a pending finished-run notice.
+Failures after the worker is claimed write the same record with outcome `failed`, the last known phase, useful error text, workspace identity, and artifact paths.
+The CLI returns a compact JSON summary that references the canonical handoff; it does not close the task.
 
 ### Pi headless execution
 
@@ -261,6 +263,9 @@ monty headless begin issue-123
 `headless begin` emits the versioned `monty:headless-dispatch:v3` envelope.
 Its `harness_call.tool` is `subagent`, and `harness_call.arguments` contains the complete asynchronous chain.
 No prompt needs to reconstruct the chain manually.
+The envelope also includes a versioned completion contract.
+After the asynchronous callback, run the exact `success_command`, or fill the concrete phase and message into the `failure_command`.
+`monty headless finish` normalizes Pi's callback into the same durable handoff and inbox used by Codex and interactive workers.
 
 Each Pi or Codex chain starts in its first supplied Monty worktree and can inspect every declared workspace:
 
@@ -287,6 +292,60 @@ monty headless resume issue-123
 With Pi selected, the successor envelope contains the complete harness call.
 With Codex selected, `resume` directly runs a fresh successor Codex chain.
 Monty does not persist a backend, Pi run ID, Codex session ID, async status, or runtime state in `job.json`.
+
+## Run handoffs and pending results
+
+A finished run and a done task are deliberately different events.
+An interactive or headless run can finish successfully while its linked local task remains `open`, every worktree remains intact, and `job.json` keeps its existing open launch status.
+Only the explicit `monty done` lifecycle closes and archives the task.
+
+Every run handoff uses the documented `monty:run-handoff:v1` JSON contract.
+[The complete v1 field and delivery contract](docs/run-handoff-v1.md) is versioned with the repository.
+Canonical records and deterministic Markdown renderings live outside the movable worker directory:
+
+```text
+.monty/handoffs/<worker-run-id>/<worker-id>/<run-id>.json
+.monty/handoffs/<worker-run-id>/<worker-id>/<run-id>.md
+```
+
+The record contains the worker and task identity, run outcome, dense summary, per-workspace Git diff statistics, validation and review reports, risks, every repo/branch/worktree, durable evidence, and supported next actions.
+Artifact evidence also retains a safe path relative to worker memory, so read-only follow-up can remap it after archive or reopen moves the worker directory.
+
+Interactive workers publish without marking the task done:
+
+```sh
+monty handoff publish issue-123 \
+  --summary "Added the shared handoff contract and pending inbox." \
+  --check "dune runtest --force: passed" \
+  --fixed "Rejected forged inbox paths before reading evidence" \
+  --risk "Draft PR still requires explicit approval"
+```
+
+The compact TL;DR is printed directly in that worker's Ghostty session. Because
+the user owns an interactive terminal run, it is not also queued for the head
+butler. Its canonical record remains available for later inspection.
+
+Headless completion uses Monty's home-level `.monty/inbox/run-handoffs/`, whose small `monty:run-handoff-notice:v1` records reference canonical handoffs.
+Reading is at-least-once: `pending` never acknowledges implicitly, and acknowledgement is idempotent.
+If publication stopped after the canonical record was written, `pending` repairs its rendering and delivery receipt without turning an interactive result into a head-butler notification. If a Pi chain wrote its final artifact after the original head-butler callback became unavailable, `pending` publishes a `needs-attention` receipt without inferring success from `final.md`; it never launches or resumes a run and never changes task status.
+
+```sh
+monty handoff pending
+monty handoff pending --format plain
+monty handoff acknowledge <notice-id>
+monty handoff show issue-123 --format json
+```
+
+The head butler displays pending cards only at a safe conversation boundary, then acknowledges the notices it actually displayed.
+If a native runner is no longer addressable, a fresh agent or the head butler can prepare a durable, read-only drill-down without resuming implementation:
+
+```sh
+monty handoff follow-up issue-123 \
+  --question "Which review findings were rejected and why?"
+```
+
+This emits `monty:run-handoff-follow-up:v1` with the current workspace map and verified paths to the canonical handoff, task context, worker memory, and attempt artifacts.
+It never modifies code; continuing work still requires an explicit `monty resume` or `monty headless resume`.
 
 ## Worker memory and resume
 
@@ -637,7 +696,7 @@ Scripts are published through same-directory atomic replacement so a destination
 
 The checkout-binary E2E suite uses a unique temporary `MONTY_HOME` for every scenario.
 It installs fake `wt`, `gh`, pi, Ghostty, `osascript`, and related tools, and uses real temporary Git repositories when repository identity matters.
-The suite covers concurrent mutation, atomic faults, canonical paths, lifecycle recovery, deterministic reconciliation, whole-batch preflight, partial launch recovery, the headless two-phase protocol, generated harness tool arguments, clean-context chain construction, parser behavior, and doctor exit contracts.
+The suite covers concurrent mutation, atomic faults, canonical paths, lifecycle recovery, deterministic reconciliation, whole-batch preflight, partial launch recovery, the headless two-phase protocol, generated harness tool arguments, shared run handoffs, pending delivery and acknowledgement, read-only follow-up construction, clean-context chain construction, parser behavior, and doctor exit contracts.
 
 Run the complete validation with:
 

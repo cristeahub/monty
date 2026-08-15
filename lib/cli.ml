@@ -53,6 +53,22 @@ let worktree_conv =
     ( Launcher.worktree_mode_of_string,
       fun ppf value -> Fmt.pf ppf "%s" (Launcher.worktree_mode_to_string value) )
 
+type handoff_format = Markdown | Plain | Json
+
+let handoff_format_conv =
+  let parse = function
+    | "markdown" | "md" -> Ok Markdown
+    | "plain" | "text" -> Ok Plain
+    | "json" -> Ok Json
+    | value -> Error (`Msg (Printf.sprintf "unknown handoff format %S" value))
+  in
+  let print ppf = function
+    | Markdown -> Fmt.pf ppf "markdown"
+    | Plain -> Fmt.pf ppf "plain"
+    | Json -> Fmt.pf ppf "json"
+  in
+  Cmdliner.Arg.conv (parse, print)
+
 let harness_conv =
   Cmdliner.Arg.conv
     ( Harness.of_string,
@@ -358,6 +374,256 @@ let headless_run_many_term =
     Cmdliner.Arg.(required & opt (some string) None & info [ "manifest" ] ~docv:"FILE" ~doc)
   in
   Cmdliner.Term.(const headless_run_many $ manifest $ headless_options_term)
+ in
+let resolve_handoff_worker worker home =
+  let home = Shell.normalize (Shell.abs_path home) in
+  match worker with
+  | Some worker -> Job_store.find ~home ~scope:Job_store.All worker
+  | None -> (
+      match getenv "MONTY_WORKER_DIR" with
+      | Some worker_dir when String.trim worker_dir <> "" ->
+          let path = Filename.concat (Shell.normalize worker_dir) "job.json" in
+          if Sys.file_exists path then Job_store.parse_job_file ~home path
+          else
+            Error
+              (Printf.sprintf
+                 "MONTY_WORKER_DIR has no job.json: %s; pass a worker explicitly"
+                 worker_dir)
+      | _ -> (
+          match getenv "MONTY_JOB_ID" with
+          | Some id when String.trim id <> "" ->
+              Job_store.find ~home ~scope:Job_store.All id
+          | _ ->
+              Error
+                "run handoff command needs a worker argument or MONTY_WORKER_DIR in the current session"))
+ in
+let print_published format (published : Run_handoff.published) =
+  (match format with
+  | Markdown ->
+      Fmt.pr "%s" (Run_handoff.render_markdown published.handoff)
+  | Plain ->
+      Fmt.pr "%s" (Run_handoff.render_plain published.handoff)
+  | Json ->
+      Headless.print_json
+        (`Assoc
+          [ ("handoff", Run_handoff.to_json published.handoff);
+            ("delivery", `String "direct") ]));
+  0
+ in
+let handoff_publish worker run_id outcome summary validation accepted fixed rejected
+    unresolved review_summary risks last_phase error artifacts format home =
+  let result =
+    let ( let* ) = Result.bind in
+    let* record = resolve_handoff_worker worker home in
+    let* outcome = Run_handoff.outcome_of_string outcome in
+    Run_handoff.publish ~home ~record ?handoff_id:run_id
+      ~source:Run_handoff.Interactive ~outcome ~summary ~validation ~accepted
+      ~fixed ~rejected ~unresolved ?review_summary ~risks ?last_phase ?error
+      ~artifacts ()
+  in
+  match result with
+  | Error message -> exit_code (Error message)
+  | Ok published -> print_published format published
+ in
+let handoff_publish_term =
+  let worker =
+    let doc = "Worker id, branch, task key, or title slug. Defaults to the current Monty worker environment." in
+    Cmdliner.Arg.(value & pos 0 (some string) None & info [] ~docv:"WORKER" ~doc)
+  in
+  let run_id =
+    let doc = "Stable run id for idempotent publication. Monty generates one when omitted." in
+    Cmdliner.Arg.(value & opt (some string) None & info [ "run-id" ] ~docv:"ID" ~doc)
+  in
+  let outcome =
+    let doc = "Run outcome: ready-for-review, needs-attention, or failed." in
+    Cmdliner.Arg.(value & opt string "ready-for-review" & info [ "outcome" ] ~docv:"OUTCOME" ~doc)
+  in
+  let summary =
+    let doc = "Dense description of what this run did." in
+    Cmdliner.Arg.(required & opt (some string) None & info [ "summary" ] ~docv:"TEXT" ~doc)
+  in
+  let many name doc =
+    Cmdliner.Arg.(value & opt_all string [] & info [ name ] ~docv:"TEXT" ~doc)
+  in
+  let validation = many "check" "Validation command and result; repeat for multiple checks." in
+  let accepted = many "accepted" "Accepted review finding; repeat as needed." in
+  let fixed = many "fixed" "Review finding fixed in this run; repeat as needed." in
+  let rejected = many "rejected" "Review finding rejected after verification; repeat as needed." in
+  let unresolved = many "unresolved" "Unresolved review finding; repeat as needed." in
+  let review_summary =
+    let doc = "Short overall review result." in
+    Cmdliner.Arg.(value & opt (some string) None & info [ "review" ] ~docv:"TEXT" ~doc)
+  in
+  let risks = many "risk" "Residual risk, blocker, or user decision; repeat as needed." in
+  let last_phase =
+    let doc = "Last known execution phase, especially for failures." in
+    Cmdliner.Arg.(value & opt (some string) None & info [ "last-phase" ] ~docv:"PHASE" ~doc)
+  in
+  let error =
+    let doc = "Useful failure message." in
+    Cmdliner.Arg.(value & opt (some string) None & info [ "error" ] ~docv:"MESSAGE" ~doc)
+  in
+  let artifacts = many "artifact" "Evidence path inside durable worker memory; repeat as needed." in
+  let format =
+    let doc = "Output format: markdown, plain, or json." in
+    Cmdliner.Arg.(value & opt handoff_format_conv Markdown & info [ "format" ] ~docv:"FORMAT" ~doc)
+  in
+  Cmdliner.Term.(
+    const handoff_publish $ worker $ run_id $ outcome $ summary $ validation
+    $ accepted $ fixed $ rejected $ unresolved $ review_summary $ risks
+    $ last_phase $ error $ artifacts $ format $ home_arg)
+ in
+let handoff_pending format home =
+  let result =
+    let ( let* ) = Result.bind in
+    let* _recovered = Headless.recover_finished_pi ~home in
+    let* _repaired = Run_handoff.recover_orphaned_notices ~home in
+    Run_handoff.pending ~home
+  in
+  match result with
+  | Error message -> exit_code (Error message)
+  | Ok values ->
+      (match format with
+      | Json ->
+          let entries =
+            values
+            |> List.map (fun ((notice : Run_handoff.notice), handoff) ->
+                   `Assoc
+                     [ ("notice", Run_handoff.notice_to_json notice);
+                       ("handoff", Run_handoff.to_json handoff) ])
+          in
+          Headless.print_json
+            (`Assoc
+              [ ("schema", `String "monty:run-handoff-pending:v1");
+                ("pending", `List entries) ])
+      | Markdown ->
+          List.iter
+            (fun ((notice : Run_handoff.notice), handoff) ->
+              Fmt.pr "%s"
+                (Run_handoff.render_markdown ~notice_id:notice.id handoff))
+            values
+      | Plain ->
+          List.iter
+            (fun ((notice : Run_handoff.notice), handoff) ->
+              Fmt.pr "%s"
+                (Run_handoff.render_plain ~notice_id:notice.id handoff))
+            values);
+      0
+ in
+let handoff_format_term =
+  let doc = "Output format: markdown, plain, or json." in
+  Cmdliner.Arg.(value & opt handoff_format_conv Markdown & info [ "format" ] ~docv:"FORMAT" ~doc)
+ in
+let handoff_pending_term =
+  Cmdliner.Term.(const handoff_pending $ handoff_format_term $ home_arg)
+ in
+let handoff_acknowledge notice home =
+  match Run_handoff.acknowledge ~home notice with
+  | Error message -> exit_code (Error message)
+  | Ok notice ->
+      Fmt.pr "Acknowledged run handoff %s\n" notice.Run_handoff.id;
+      0
+ in
+let handoff_acknowledge_term =
+  let notice =
+    let doc = "Notice id printed with a pending run handoff." in
+    Cmdliner.Arg.(required & pos 0 (some string) None & info [] ~docv:"NOTICE" ~doc)
+  in
+  Cmdliner.Term.(const handoff_acknowledge $ notice $ home_arg)
+ in
+let handoff_show worker run_id format home =
+  let result =
+    let ( let* ) = Result.bind in
+    let* record = resolve_handoff_worker (Some worker) home in
+    Run_handoff.find_handoff ~home record run_id
+  in
+  match result with
+  | Error message -> exit_code (Error message)
+  | Ok handoff ->
+      (match format with
+      | Markdown -> Fmt.pr "%s" (Run_handoff.render_markdown handoff)
+      | Plain -> Fmt.pr "%s" (Run_handoff.render_plain handoff)
+      | Json -> Headless.print_json (Run_handoff.to_json handoff));
+      0
+ in
+let handoff_show_term =
+  let worker =
+    let doc = "Worker whose latest or named run handoff should be shown." in
+    Cmdliner.Arg.(required & pos 0 (some string) None & info [] ~docv:"WORKER" ~doc)
+  in
+  let run_id =
+    let doc = "Specific run id. Defaults to the latest handoff." in
+    Cmdliner.Arg.(value & opt (some string) None & info [ "run-id" ] ~docv:"ID" ~doc)
+  in
+  Cmdliner.Term.(const handoff_show $ worker $ run_id $ handoff_format_term $ home_arg)
+ in
+let handoff_follow_up worker run_id question home =
+  let result =
+    let ( let* ) = Result.bind in
+    let* record = resolve_handoff_worker (Some worker) home in
+    let* handoff = Run_handoff.find_handoff ~home record run_id in
+    Run_handoff.follow_up_json ~home ~record ~handoff ~question
+  in
+  match result with
+  | Error message -> exit_code (Error message)
+  | Ok json ->
+      Headless.print_json json;
+      0
+ in
+let handoff_follow_up_term =
+  let worker =
+    let doc = "Worker whose durable run evidence should answer the question." in
+    Cmdliner.Arg.(required & pos 0 (some string) None & info [] ~docv:"WORKER" ~doc)
+  in
+  let run_id =
+    let doc = "Specific run id. Defaults to the latest handoff." in
+    Cmdliner.Arg.(value & opt (some string) None & info [ "run-id" ] ~docv:"ID" ~doc)
+  in
+  let question =
+    let doc = "Read-only follow-up question." in
+    Cmdliner.Arg.(required & opt (some string) None & info [ "question" ] ~docv:"TEXT" ~doc)
+  in
+  Cmdliner.Term.(const handoff_follow_up $ worker $ run_id $ question $ home_arg)
+ in
+let headless_finish worker attempt outcome last_phase error home =
+  let success =
+    match String.lowercase_ascii outcome with
+    | "success" | "succeeded" -> Ok true
+    | "failed" | "failure" -> Ok false
+    | value ->
+        Error
+          (Printf.sprintf
+             "unknown headless finish outcome %S; expected success or failed" value)
+  in
+  match success with
+  | Error message -> exit_code (Error message)
+  | Ok success ->
+      Headless.finish_pi_worker ~home ~worker ~attempt_id:attempt ~success
+        ?last_phase ?error ()
+      |> print_headless_result
+ in
+let headless_finish_term =
+  let worker =
+    let doc = "Pi worker whose asynchronous chain returned." in
+    Cmdliner.Arg.(required & pos 0 (some string) None & info [] ~docv:"WORKER" ~doc)
+  in
+  let attempt =
+    let doc = "Attempt id from the versioned completion contract." in
+    Cmdliner.Arg.(required & opt (some string) None & info [ "attempt" ] ~docv:"ID" ~doc)
+  in
+  let outcome =
+    let doc = "Harness callback outcome: success or failed." in
+    Cmdliner.Arg.(required & opt (some string) None & info [ "outcome" ] ~docv:"OUTCOME" ~doc)
+  in
+  let last_phase =
+    let doc = "Last known chain phase for a failure." in
+    Cmdliner.Arg.(value & opt (some string) None & info [ "last-phase" ] ~docv:"PHASE" ~doc)
+  in
+  let error =
+    let doc = "Harness failure message." in
+    Cmdliner.Arg.(value & opt (some string) None & info [ "error" ] ~docv:"MESSAGE" ~doc)
+  in
+  Cmdliner.Term.(const headless_finish $ worker $ attempt $ outcome $ last_phase $ error $ home_arg)
  in
 let resume archived worker options =
   match options with
@@ -919,9 +1185,38 @@ let headless_cmd =
     Cmdliner.Cmd.v (Cmdliner.Cmd.info "resume" ~doc)
       (headless_worker_term headless_resume)
   in
+  let finish_cmd =
+    let doc = "Finalize a returned Pi chain through the shared durable run-handoff contract." in
+    Cmdliner.Cmd.v (Cmdliner.Cmd.info "finish" ~doc) headless_finish_term
+  in
   let doc = "Prepare and run headless Pi or Codex worker chains." in
   Cmdliner.Cmd.group (Cmdliner.Cmd.info "headless" ~doc)
-    [ prepare_cmd; begin_cmd; run_cmd; run_many_cmd; resume_cmd ]
+    [ prepare_cmd; begin_cmd; run_cmd; run_many_cmd; resume_cmd; finish_cmd ]
+ in
+let handoff_cmd =
+  let publish_cmd =
+    let doc = "Publish a versioned run handoff without marking the task done." in
+    Cmdliner.Cmd.v (Cmdliner.Cmd.info "publish" ~doc) handoff_publish_term
+  in
+  let pending_cmd =
+    let doc = "Show unacknowledged finished-run notices for safe-boundary delivery." in
+    Cmdliner.Cmd.v (Cmdliner.Cmd.info "pending" ~doc) handoff_pending_term
+  in
+  let acknowledge_cmd =
+    let doc = "Idempotently acknowledge a displayed finished-run notice." in
+    Cmdliner.Cmd.v (Cmdliner.Cmd.info "acknowledge" ~doc) handoff_acknowledge_term
+  in
+  let show_cmd =
+    let doc = "Show the latest or named durable handoff for one worker." in
+    Cmdliner.Cmd.v (Cmdliner.Cmd.info "show" ~doc) handoff_show_term
+  in
+  let follow_up_cmd =
+    let doc = "Build a versioned read-only follow-up dispatch from durable run evidence." in
+    Cmdliner.Cmd.v (Cmdliner.Cmd.info "follow-up" ~doc) handoff_follow_up_term
+  in
+  let doc = "Publish, deliver, inspect, and ask follow-ups about worker runs." in
+  Cmdliner.Cmd.group (Cmdliner.Cmd.info "handoff" ~doc)
+    [ publish_cmd; pending_cmd; acknowledge_cmd; show_cmd; follow_up_cmd ]
  in
 let doctor_cmd =
   let doc = "Check Monty launch dependencies." in
@@ -951,6 +1246,7 @@ let main_cmd =
       tasks_cmd;
       task_cmd;
       headless_cmd;
+      handoff_cmd;
       ensure_worktree_cmd;
       doctor_cmd;
     ]

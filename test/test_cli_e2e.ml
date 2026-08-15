@@ -3097,6 +3097,17 @@ let test_headless_prepare_begin_and_resume () =
       let harness_call = Yojson.Safe.Util.(dispatch |> member "harness_call") in
       if Yojson.Safe.Util.(harness_call |> member "tool" |> to_string) <> "subagent"
       then failwith "headless begin did not target the harness subagent tool";
+      let completion = Yojson.Safe.Util.(dispatch |> member "completion") in
+      if
+        Yojson.Safe.Util.(completion |> member "schema" |> to_string)
+        <> Headless.completion_schema
+      then failwith "headless begin omitted the versioned completion contract";
+      require_contains "Pi success finalizer"
+        Yojson.Safe.Util.(completion |> member "success_command" |> to_string)
+        "headless finish";
+      require_contains "Pi failure finalizer"
+        Yojson.Safe.Util.(completion |> member "failure_command" |> to_string)
+        "--error <MESSAGE>";
       let chain =
         Yojson.Safe.Util.(harness_call |> member "arguments" |> member "chain" |> to_list)
       in
@@ -3153,6 +3164,133 @@ let test_headless_prepare_begin_and_resume () =
           [ "headless"; "resume"; "headless-one"; "--home"; home ]
       in
       require_code 0 resumed;
+      let first_attempt =
+        Yojson.Safe.Util.(completion |> member "attempt_id" |> to_string)
+      in
+      let first_attempt_root =
+        Filename.concat
+          (Filename.dirname (job_file "headless-one"))
+          ("artifacts/headless/" ^ first_attempt)
+      in
+      Shell.write_file (Filename.concat first_attempt_root "final.md")
+        "Pi successfully implemented and reviewed the task.\n";
+      let finished =
+        run ~root ~env 19561
+          [ "headless"; "finish"; "headless-one"; "--attempt";
+            first_attempt; "--outcome"; "success"; "--home"; home ]
+      in
+      require_code 0 finished;
+      if
+        Yojson.Safe.Util.(
+          Yojson.Safe.from_string finished.stdout |> member "outcome" |> to_string)
+        <> "ready-for-review"
+      then failwith "Pi success did not publish a ready run handoff";
+      let conflicting_finish =
+        run ~root ~env 195611
+          [ "headless"; "finish"; "headless-one"; "--attempt";
+            first_attempt; "--outcome"; "failed"; "--error";
+            "Contradictory replay"; "--home"; home ]
+      in
+      if conflicting_finish.code = 0 then
+        failwith "Pi finalization accepted a conflicting canonical outcome";
+      require_contains "conflicting Pi finalization" conflicting_finish.stderr
+        "refusing conflicting outcome";
+      let resumed_json = Yojson.Safe.from_string resumed.stdout in
+      let second_attempt =
+        Yojson.Safe.Util.(
+          resumed_json |> member "completion" |> member "attempt_id" |> to_string)
+      in
+      let failed_finish =
+        let outside_final = Filename.concat root "outside-final.md" in
+        Shell.write_file outside_final "forged final handoff\n";
+        let linked_final = Filename.concat
+            (Filename.concat
+               (Filename.dirname (job_file "headless-one"))
+               ("artifacts/headless/" ^ second_attempt))
+            "final.md"
+        in
+        Unix.symlink outside_final linked_final;
+        let rejected_link =
+          run ~root ~env 195621
+            [ "headless"; "finish"; "headless-one"; "--attempt";
+              second_attempt; "--outcome"; "success"; "--home"; home ]
+        in
+        if rejected_link.code = 0 then
+          failwith "Pi finish followed a symlinked final artifact";
+        require_contains "Pi final symlink rejection" rejected_link.stderr "symlink";
+        Unix.unlink linked_final;
+        run ~root ~env 19562
+          [ "headless"; "finish"; "headless-one"; "--attempt";
+            second_attempt; "--outcome"; "failed"; "--last-phase"; "review";
+            "--error"; "Pi callback failed"; "--home"; home ]
+      in
+      require_code 0 failed_finish;
+      if
+        Yojson.Safe.Util.(
+          Yojson.Safe.from_string failed_finish.stdout |> member "outcome"
+          |> to_string)
+        <> "failed"
+      then failwith "Pi failure did not publish a failed run handoff";
+      let pending =
+        run ~root ~env 19563
+          [ "handoff"; "pending"; "--format"; "json"; "--home"; home ]
+      in
+      require_code 0 pending;
+      if
+        Yojson.Safe.Util.(
+          Yojson.Safe.from_string pending.stdout |> member "pending" |> to_list
+          |> List.length)
+        <> 2
+      then failwith "Pi finished-run notices were not durably recoverable";
+      let missed_callback =
+        run ~root ~env 19564
+          [ "headless"; "resume"; "headless-one"; "--home"; home ]
+      in
+      require_code 0 missed_callback;
+      let missed_attempt =
+        Yojson.Safe.Util.(
+          Yojson.Safe.from_string missed_callback.stdout |> member "completion"
+          |> member "attempt_id" |> to_string)
+      in
+      let missed_root =
+        Filename.concat
+          (Filename.dirname (job_file "headless-one"))
+          ("artifacts/headless/" ^ missed_attempt)
+      in
+      Shell.write_file (Filename.concat missed_root "final.md")
+        "Pi finished while the original head-butler callback was unavailable.\n";
+      let recovered_after_restart =
+        run ~root ~env 19565
+          [ "handoff"; "pending"; "--format"; "json"; "--home"; home ]
+      in
+      require_code 0 recovered_after_restart;
+      if
+        Yojson.Safe.Util.(
+          Yojson.Safe.from_string recovered_after_restart.stdout
+          |> member "pending" |> to_list |> List.length)
+        <> 3
+      then
+        failwith
+          "pending discovery did not recover a Pi final artifact after callback loss";
+      let recovered_entries =
+        Yojson.Safe.Util.(
+          Yojson.Safe.from_string recovered_after_restart.stdout
+          |> member "pending" |> to_list)
+      in
+      let recovered_outcome =
+        recovered_entries
+        |> List.find_map (fun entry ->
+               let handoff = Yojson.Safe.Util.member "handoff" entry in
+               if
+                 Yojson.Safe.Util.(handoff |> member "id" |> to_string)
+                 = missed_attempt
+               then
+                 Some
+                   Yojson.Safe.Util.(handoff |> member "outcome" |> to_string)
+               else None)
+      in
+      if recovered_outcome <> Some "needs-attention" then
+        failwith "missed Pi callback recovery inferred a successful outcome";
       if job_status (job_file "headless-one") <> "launch-requested" then
         failwith "explicit headless resume changed the open launch state";
       require_no_terminal_script "headless-one";
@@ -3245,6 +3383,16 @@ let test_codex_headless_uses_effective_settings_without_ghostty () =
       let first_artifacts =
         Yojson.Safe.Util.(first_json |> member "artifact_dir" |> to_string)
       in
+      let first_handoff =
+        Yojson.Safe.Util.(first_json |> member "handoff" |> to_string)
+      in
+      if not (Sys.file_exists first_handoff) then
+        failwith "successful Codex run returned before its durable handoff existed";
+      if
+        Yojson.Safe.Util.(
+          Yojson.Safe.from_file first_handoff |> member "outcome" |> to_string)
+        <> "ready-for-review"
+      then failwith "successful Codex run wrote the wrong handoff outcome";
       List.iter
         (fun relative ->
           let path = Filename.concat first_artifacts relative in
@@ -3290,6 +3438,21 @@ let test_codex_headless_uses_effective_settings_without_ghostty () =
       then failwith "Codex YOLO was used while disabled";
       if job_status (job_file "run-codex-one" "codex-one") <> "launch-requested"
       then failwith "Codex run did not preserve the launch-requested lifecycle";
+      let first_job_json =
+        Yojson.Safe.from_file (job_file "run-codex-one" "codex-one")
+      in
+      List.iter
+        (fun forbidden ->
+          if Yojson.Safe.Util.member forbidden first_job_json <> `Null then
+            failf "run handoff persisted forbidden job.json field %s" forbidden)
+        [ "backend"; "pi_run_id"; "codex_session_id"; "runtime_status";
+          "handoff"; "pending_result" ];
+      let ordinary_resume =
+        run ~root ~env 19641
+          [ "resume"; "codex-one"; "--terminal"; "dry-run"; "--home";
+            home ]
+      in
+      require_code 0 ordinary_resume;
       let duplicate_run =
         run ~root ~env 1965
           [ "headless"; "run"; "codex-one"; "--home"; home ]
@@ -3346,6 +3509,13 @@ let test_codex_headless_uses_effective_settings_without_ghostty () =
           Yojson.Safe.from_string successor.stdout |> member "harness" |> to_string)
         <> "codex"
       then failwith "headless resume ignored the effective Codex harness";
+      let codex_one_handoffs =
+        Filename.concat home ".monty/handoffs/run-codex-one/codex-one"
+        |> Sys.readdir |> Array.to_list
+        |> List.filter (String.ends_with ~suffix:".json")
+      in
+      if List.length codex_one_handoffs <> 2 then
+        failwith "explicit successor run did not publish a distinct durable handoff";
       write_manifest manifest_failure
         [ manifest_job ~id:"codex-failure" ~branch:"cto/codex-failure"
             ~title:"Codex failure" ~repo ~context () ];
@@ -3369,6 +3539,27 @@ let test_codex_headless_uses_effective_settings_without_ghostty () =
         job_status (job_file "run-codex-failure" "codex-failure")
         <> "launch-requested"
       then failwith "failed Codex dispatch did not remain launch-requested";
+      let failure_handoff_dir =
+        Filename.concat home
+          ".monty/handoffs/run-codex-failure/codex-failure"
+      in
+      let failure_handoffs =
+        Sys.readdir failure_handoff_dir |> Array.to_list
+        |> List.filter (String.ends_with ~suffix:".json")
+      in
+      if List.length failure_handoffs <> 1 then
+        failwith "failed Codex run did not write exactly one durable handoff";
+      let failure_handoff =
+        Yojson.Safe.from_file
+          (Filename.concat failure_handoff_dir (List.hd failure_handoffs))
+      in
+      if
+        Yojson.Safe.Util.(failure_handoff |> member "outcome" |> to_string)
+        <> "failed"
+        || Yojson.Safe.Util.(failure_handoff |> member "last_phase" |> to_string)
+           <> "implementation"
+        || Yojson.Safe.Util.(failure_handoff |> member "error") = `Null
+      then failwith "failed Codex handoff omitted outcome, phase, or error";
       let recovered =
         run ~root ~env 1972
           [ "headless"; "resume"; "codex-failure"; "--home"; home ]
@@ -3393,6 +3584,406 @@ let test_codex_headless_uses_effective_settings_without_ghostty () =
             Yojson.Safe.Util.(task |> member "status" |> to_string) <> "open")
           tasks
       then failwith "Codex headless execution closed a task automatically")
+
+let test_run_handoff_publish_delivery_follow_up_and_lifecycle_race () =
+  with_temp_root "run-handoff" (fun root ->
+      let home, _log, env = setup_environment root in
+      let repo_one = Filename.concat root "repo-one" in
+      let repo_two = Filename.concat root "repo-two" in
+      let context = Filename.concat root "context.md" in
+      init_git_repo repo_one;
+      init_git_repo repo_two;
+      add_project ~root ~home ~env repo_one;
+      add_project ~root ~home ~env repo_two;
+      Shell.write_file context "# Shared handoff task\n";
+      Shell.write_file (Filename.concat repo_one "tracked.txt") "changed one\n";
+      Shell.write_file (Filename.concat repo_one "untracked.txt") "new\n";
+      Shell.write_file (Filename.concat repo_two "tracked.txt") "changed two\n";
+      let create_worker ~run_id ~id =
+        let run_dir = Filename.concat home (".monty/runs/" ^ run_id) in
+        let worker_dir = Filename.concat run_dir ("workers/" ^ id) in
+        Shell.ensure_dir worker_dir;
+        Shell.write_file (Filename.concat worker_dir "memory.md") "# Durable memory\n";
+        Shell.write_file (Filename.concat worker_dir "MONTY.md") "# Instructions\n";
+        let workspace repo branch =
+          `Assoc
+            [ ("repo", `String repo);
+              ("branch", `String branch);
+              ("worktree", `String repo) ]
+        in
+        Yojson.Safe.to_file (Filename.concat worker_dir "job.json")
+          (`Assoc
+            [ ("id", `String id);
+              ("title", `String "Reusable run handoff");
+              ("repo", `String repo_one);
+              ("branch", `String "cto/handoff-one");
+              ("context", `String context);
+              ("worker_dir", `String worker_dir);
+              ("run_dir", `String run_dir);
+              ("worktree_mode", `String "never");
+              ("status", `String "active");
+              ("last_known_worktree", `String repo_one);
+              ( "workspaces",
+                `List
+                  [ workspace repo_one "cto/handoff-one";
+                    workspace repo_two "cto/handoff-two" ] ) ]);
+        (run_dir, worker_dir)
+      in
+      let _run_dir, worker_dir =
+        create_worker ~run_id:"run-handoff" ~id:"handoff-worker"
+      in
+      let published =
+        run ~root ~env 2200
+          [ "handoff"; "publish"; "handoff-worker"; "--home"; home;
+            "--run-id"; "interactive-1"; "--summary";
+            "Added one canonical contract for interactive and headless runs.";
+            "--check"; "dune runtest --force: passed"; "--fixed";
+            "Rejected forged inbox paths"; "--risk";
+            "Draft PR still requires approval"; "--artifact"; "memory.md" ]
+      in
+      require_code 0 published;
+      require_contains "styled handoff" published.stdout "### 🛎 Monty run finished";
+      require_contains "styled task" published.stdout "Reusable run handoff";
+      if string_contains published.stdout "Notice:" then
+        failwith "interactive publication printed a head-butler notice id";
+      if job_status (Filename.concat worker_dir "job.json") <> "active" then
+        failwith "interactive publication changed the task lifecycle";
+      let canonical_dir =
+        Filename.concat home
+          ".monty/handoffs/run-handoff/handoff-worker"
+      in
+      let canonical = Filename.concat canonical_dir "interactive-1.json" in
+      if not (Sys.file_exists canonical) then
+        failwith "interactive publication did not write a canonical handoff";
+      let handoff = Yojson.Safe.from_file canonical in
+      if
+        Yojson.Safe.Util.(handoff |> member "schema" |> to_string)
+        <> Run_handoff.schema
+      then failwith "canonical handoff used the wrong schema";
+      if
+        Yojson.Safe.Util.(handoff |> member "workspaces" |> to_list |> List.length)
+        <> 2
+      then failwith "multi-workspace handoff omitted a workspace";
+      let changes = Yojson.Safe.Util.(handoff |> member "changes" |> to_list) in
+      if List.length changes <> 2 then
+        failwith "multi-workspace handoff omitted Git change statistics";
+      let changed_files =
+        changes
+        |> List.map (fun change ->
+               Yojson.Safe.Util.(change |> member "files" |> to_list)
+               |> List.map Yojson.Safe.Util.to_string)
+        |> List.flatten
+      in
+      List.iter
+        (fun path ->
+          if not (List.mem path changed_files) then
+            failf "handoff Git statistics omitted %s" path)
+        [ "tracked.txt"; "untracked.txt" ];
+      let notice_id =
+        Run_handoff.notice_id
+          {
+            worker_run_id = "run-handoff";
+            worker_id = "handoff-worker";
+            handoff_id = "interactive-1";
+          }
+      in
+      let pending_markdown =
+        run ~root ~env 2201
+          [ "handoff"; "pending"; "--format"; "json"; "--home"; home ]
+      in
+      require_code 0 pending_markdown;
+      if
+        Yojson.Safe.Util.(
+          Yojson.Safe.from_string pending_markdown.stdout |> member "pending"
+          |> to_list)
+        <> []
+      then failwith "interactive publication was queued for the head butler";
+      let direct_notice =
+        Run_handoff.notice_path home notice_id |> Yojson.Safe.from_file
+      in
+      if Yojson.Safe.Util.(direct_notice |> member "acknowledged_at") = `Null then
+        failwith "interactive delivery receipt was not suppressed at publication";
+      let pending_plain =
+        run ~root ~env 2202
+          [ "handoff"; "show"; "handoff-worker"; "--run-id";
+            "interactive-1"; "--format"; "plain"; "--home"; home ]
+      in
+      require_code 0 pending_plain;
+      require_contains "plain rendering" pending_plain.stdout "Monty run finished";
+      if string_contains pending_plain.stdout "###" then
+        failwith "plain handoff rendering contained Markdown headings";
+      let duplicate =
+        run ~root ~env 2203
+          [ "handoff"; "publish"; "handoff-worker"; "--home"; home;
+            "--run-id"; "interactive-1"; "--summary";
+            "This duplicate must not replace the canonical run." ]
+      in
+      require_code 0 duplicate;
+      require_contains "idempotent publication retained canonical summary"
+        duplicate.stdout "Added one canonical contract";
+      let canonical_files =
+        Sys.readdir canonical_dir |> Array.to_list
+        |> List.filter (String.ends_with ~suffix:".json")
+      in
+      if canonical_files <> [ "interactive-1.json" ] then
+        failwith "duplicate delivery created a second canonical run";
+      let follow_up =
+        run ~root ~env 2204
+          [ "handoff"; "follow-up"; "handoff-worker"; "--home"; home;
+            "--question"; "Which review finding was fixed?" ]
+      in
+      require_code 0 follow_up;
+      let follow_json = Yojson.Safe.from_string follow_up.stdout in
+      if
+        Yojson.Safe.Util.(follow_json |> member "schema" |> to_string)
+        <> Run_handoff.follow_up_schema
+        || not Yojson.Safe.Util.(follow_json |> member "read_only" |> to_bool)
+      then failwith "follow-up did not use the versioned read-only contract";
+      if
+        Yojson.Safe.Util.(follow_json |> member "workspaces" |> to_list |> List.length)
+        <> 2
+      then failwith "follow-up omitted a current workspace";
+      let artifacts = Filename.concat worker_dir "artifacts" in
+      Shell.ensure_dir artifacts;
+      Unix.symlink "/etc" (Filename.concat artifacts "external");
+      let artifact_publish =
+        run ~root ~env 22041
+          [ "handoff"; "publish"; "handoff-worker"; "--home"; home;
+            "--run-id"; "artifact-symlink"; "--summary";
+            "Recorded worker-relative supporting evidence."; "--artifact";
+            "artifacts/external/passwd" ]
+      in
+      require_code 0 artifact_publish;
+      let rejected_artifact_symlink =
+        run ~root ~env 22042
+          [ "handoff"; "follow-up"; "handoff-worker"; "--home"; home;
+            "--run-id"; "artifact-symlink"; "--question";
+            "Inspect the supporting evidence." ]
+      in
+      if rejected_artifact_symlink.code = 0 then
+        failwith "follow-up traversed an intermediate artifact symlink";
+      require_contains "intermediate artifact symlink rejection"
+        rejected_artifact_symlink.stderr "hierarchy contains a symlink";
+      Unix.unlink (Filename.concat artifacts "external");
+      let no_pending =
+        run ~root ~env 2207
+          [ "handoff"; "pending"; "--format"; "json"; "--home"; home ]
+      in
+      require_code 0 no_pending;
+      if
+        Yojson.Safe.Util.(
+          Yojson.Safe.from_string no_pending.stdout |> member "pending" |> to_list)
+        <> []
+      then failwith "a direct interactive handoff entered the pending inbox";
+      let fault_cases =
+        [ ("fault-canonical", "run-handoff-after-canonical", false);
+          ("fault-rendered", "run-handoff-after-rendered", true) ]
+      in
+      List.iteri
+        (fun offset (handoff_id, checkpoint, expect_rendered) ->
+          let interrupted =
+            run ~root
+              ~env:(replace_env env [ ("MONTY_FAULT_INJECT", checkpoint) ])
+              (22071 + offset)
+              [ "handoff"; "publish"; "handoff-worker"; "--home"; home;
+                "--run-id"; handoff_id; "--summary";
+                "Exercise publication crash reconciliation." ]
+          in
+          if interrupted.code = 0 then
+            failf "publication checkpoint %s unexpectedly succeeded" checkpoint;
+          require_contains "publication checkpoint" interrupted.stderr checkpoint;
+          let reference : Run_handoff.reference =
+            {
+              worker_run_id = "run-handoff";
+              worker_id = "handoff-worker";
+              handoff_id;
+            }
+          in
+          let json_path = Run_handoff.handoff_path home reference in
+          let markdown_path = Run_handoff.rendered_path home reference in
+          let notice = Run_handoff.notice_id reference in
+          let inbox_path = Run_handoff.notice_path home notice in
+          if not (Sys.file_exists json_path) then
+            failwith "publication checkpoint lost the canonical handoff";
+          if Sys.file_exists markdown_path <> expect_rendered then
+            failwith "publication checkpoint stopped at the wrong boundary";
+          if Sys.file_exists inbox_path then
+            failwith "publication checkpoint unexpectedly wrote the inbox notice";
+          let repaired =
+            run ~root ~env (22073 + offset)
+              [ "handoff"; "pending"; "--format"; "json"; "--home"; home ]
+          in
+          require_code 0 repaired;
+          if not (Sys.file_exists markdown_path && Sys.file_exists inbox_path) then
+            failwith "pending did not reconcile an interrupted publication";
+          if
+            Yojson.Safe.Util.(
+              Yojson.Safe.from_string repaired.stdout |> member "pending"
+              |> to_list)
+            <> []
+          then
+            failwith
+              "crash reconciliation turned an interactive handoff into a head-butler notification";
+          let receipt = Yojson.Safe.from_file inbox_path in
+          if Yojson.Safe.Util.(receipt |> member "acknowledged_at") = `Null then
+            failwith "recovered interactive receipt was not suppressed")
+        fault_cases;
+      let resumed =
+        run ~root ~env 2208
+          [ "resume"; "handoff-worker"; "--terminal"; "dry-run";
+            "--worktree"; "never"; "--home"; home ]
+      in
+      require_code 0 resumed;
+      if job_status (Filename.concat worker_dir "job.json") <> "active" then
+        failwith "resume after a finished run changed task status";
+      let race_run_dir, race_worker_dir =
+        create_worker ~run_id:"run-race" ~id:"race-worker"
+      in
+      let publish_child =
+        spawn ~root ~env 2209
+          [ "handoff"; "publish"; "race-worker"; "--home"; home;
+            "--run-id"; "race-1"; "--summary";
+            "Published while completion moved worker memory." ]
+      in
+      let done_child =
+        spawn ~root ~env 2210
+          [ "done"; "race-worker"; "--home"; home; "--wt-command"; "wt" ]
+      in
+      let publish_result = await publish_child in
+      let done_result = await done_child in
+      require_code 0 publish_result;
+      require_code 0 done_result;
+      if Sys.file_exists race_worker_dir then
+        failwith "lifecycle race left the worker at its active path";
+      let race_archive =
+        Filename.concat race_run_dir "archive/race-worker/job.json"
+      in
+      if not (Sys.file_exists race_archive) || job_status race_archive <> "done" then
+        failwith "lifecycle race corrupted completion state";
+      let shown_after_archive =
+        run ~root ~env 2211
+          [ "handoff"; "show"; "race-worker"; "--format"; "json";
+            "--home"; home ]
+      in
+      require_code 0 shown_after_archive;
+      if
+        Yojson.Safe.Util.(
+          Yojson.Safe.from_string shown_after_archive.stdout |> member "id"
+          |> to_string)
+        <> "race-1"
+      then failwith "archive/reopen-safe canonical handoff could not be recovered";
+      let second =
+        run ~root ~env 2212
+          [ "handoff"; "publish"; "handoff-worker"; "--home"; home;
+            "--run-id"; "interactive-2"; "--summary";
+            "Created a second pending result for forgery validation." ]
+      in
+      require_code 0 second;
+      let second_reference : Run_handoff.reference =
+        {
+          worker_run_id = "run-handoff";
+          worker_id = "handoff-worker";
+          handoff_id = "interactive-2";
+        }
+      in
+      let forged_notice =
+        Run_handoff.notice_path home (Run_handoff.notice_id second_reference)
+      in
+      let original_notice =
+        match Yojson.Safe.from_file forged_notice with
+        | `Assoc fields ->
+            `Assoc
+              (("acknowledged_at", `Null)
+              :: List.remove_assoc "acknowledged_at" fields)
+        | _ -> failwith "notice was not an object"
+      in
+      Yojson.Safe.to_file forged_notice original_notice;
+      let second_canonical = Filename.concat canonical_dir "interactive-2.json" in
+      let second_handoff_json = Yojson.Safe.from_file second_canonical in
+      let copied_notice =
+        Filename.concat (Filename.dirname forged_notice) "copied-notice.json"
+      in
+      Yojson.Safe.to_file copied_notice original_notice;
+      let rejected_copied_notice =
+        run ~root ~env 22121 [ "handoff"; "pending"; "--home"; home ]
+      in
+      if rejected_copied_notice.code = 0 then
+        failwith "pending accepted a notice copied under a different filename";
+      require_contains "notice filename authentication"
+        rejected_copied_notice.stderr "filename does not match its canonical id";
+      Unix.unlink copied_notice;
+      let forged =
+        match original_notice with
+        | `Assoc fields ->
+            let handoff =
+              match List.assoc "handoff" fields with
+              | `Assoc handoff_fields ->
+                  `Assoc
+                    (("path", `String "/tmp/forged-handoff.json")
+                    :: List.remove_assoc "path" handoff_fields)
+              | _ -> failwith "notice handoff was not an object"
+            in
+            `Assoc (("handoff", handoff) :: List.remove_assoc "handoff" fields)
+        | _ -> failwith "notice was not an object"
+      in
+      Yojson.Safe.to_file forged_notice forged;
+      let rejected_forgery =
+        run ~root ~env 2213 [ "handoff"; "pending"; "--home"; home ]
+      in
+      if rejected_forgery.code = 0 then
+        failwith "pending delivery accepted a forged canonical handoff path";
+      require_contains "forged notice rejection" rejected_forgery.stderr
+        "forged run-handoff notice path";
+      Unix.unlink forged_notice;
+      Unix.symlink canonical forged_notice;
+      let rejected_symlink =
+        run ~root ~env 2214 [ "handoff"; "pending"; "--home"; home ]
+      in
+      if rejected_symlink.code = 0 then
+        failwith "pending delivery followed a symlinked notice";
+      require_contains "symlinked notice rejection" rejected_symlink.stderr
+        "symlink";
+      Unix.unlink forged_notice;
+      Yojson.Safe.to_file forged_notice original_notice;
+      Unix.unlink second_canonical;
+      let rejected_missing =
+        run ~root ~env 2215 [ "handoff"; "pending"; "--home"; home ]
+      in
+      if rejected_missing.code = 0 then
+        failwith "pending delivery accepted a missing canonical handoff";
+      require_contains "missing handoff rejection" rejected_missing.stderr
+        "run-handoff file is missing";
+      Yojson.Safe.to_file second_canonical second_handoff_json;
+      Shell.write_file second_canonical "{malformed\n";
+      let rejected_malformed =
+        run ~root ~env 2216 [ "handoff"; "pending"; "--home"; home ]
+      in
+      if rejected_malformed.code = 0 then
+        failwith "pending delivery accepted a malformed canonical handoff";
+      require_contains "malformed handoff rejection" rejected_malformed.stderr
+        "invalid JSON";
+      let forged_handoff =
+        match second_handoff_json with
+        | `Assoc fields ->
+            let evidence =
+              match List.assoc "evidence" fields with
+              | `Assoc evidence_fields ->
+                  `Assoc
+                    (("rendered", `String "/tmp/forged-rendering.md")
+                    :: List.remove_assoc "rendered" evidence_fields)
+              | _ -> failwith "handoff evidence was not an object"
+            in
+            `Assoc (("evidence", evidence) :: List.remove_assoc "evidence" fields)
+        | _ -> failwith "handoff was not an object"
+      in
+      Yojson.Safe.to_file second_canonical forged_handoff;
+      let rejected_handoff_forgery =
+        run ~root ~env 2217 [ "handoff"; "pending"; "--home"; home ]
+      in
+      if rejected_handoff_forgery.code = 0 then
+        failwith "pending delivery accepted forged handoff evidence";
+      require_contains "forged handoff rejection"
+        rejected_handoff_forgery.stderr "forged rendered handoff path")
 
 let test_settings_commands_and_effective_harness () =
   with_temp_root "settings" (fun root ->
@@ -3670,6 +4261,8 @@ let () =
       test_headless_prepare_begin_and_resume );
     ( "cli_codex_headless_uses_effective_settings_without_ghostty",
       test_codex_headless_uses_effective_settings_without_ghostty );
+    ( "cli_run_handoff_publish_delivery_follow_up_and_lifecycle_race",
+      test_run_handoff_publish_delivery_follow_up_and_lifecycle_race );
     ( "cli_settings_commands_and_effective_harness",
       test_settings_commands_and_effective_harness );
     ( "cli_parser_and_doctor_contracts", test_cli_parser_and_doctor_contracts ) ]
