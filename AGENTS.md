@@ -155,6 +155,11 @@ With Codex selected, run `monty headless run <worker-id>` or `monty headless run
 Codex headless execution uses non-interactive `codex exec` processes and must not open Ghostty.
 A small native Codex supervisor may run the blocking Monty command and return its result to the main conversation; the returned result and durable inbox must both reference the same canonical handoff.
 Independent Pi or Codex chains can run concurrently without waiting for earlier jobs to finish.
+Run long-lived headless commands under a background terminal or native supervisor.
+Once launch is confirmed, return control to the user immediately; do not wait for,
+synchronously poll, or babysit the run unless the user explicitly asks for
+monitoring. Let the process finish independently and recover its result from the
+durable handoff inbox at the next safe message boundary.
 
 Each chain gets fresh minimal context and runs one implementer, two mutually isolated reviewers in parallel, and one fixer.
 Reviewers may write only their separate reports outside the worktree.
