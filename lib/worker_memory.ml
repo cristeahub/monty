@@ -169,6 +169,14 @@ let write_instructions ?destination_dir ~worker_dir ~id ~job ~branch ~repo
         "Read the task context file passed after this instructions file.";
         "Write back important session memory to the durable worker folder above.";
         "";
+        "## Review posture";
+        String.concat "\n" Reviewer_prompt.review_posture_header;
+        String.concat "\n" Reviewer_prompt.review_preamble;
+        "";
+        Reviewer_prompt.read_only_worktree_rule;
+        "Use shell commands only for read-only inspection and non-mutating validation.";
+        String.concat "\n" Reviewer_prompt.review_output_requirements;
+        "";
         "## Reporting this run";
         "";
         "When this interactive run finishes, publish one dense, durable run handoff before yielding to the user.";

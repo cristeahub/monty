@@ -182,17 +182,14 @@ let reviewer_task (dispatch : dispatch) focus =
   String.concat "\n\n"
     [ Printf.sprintf "Independently review Monty worker %s: %s." dispatch.id
         dispatch.title;
-      "Start from the supplied task context and inspect every supplied worktree directly.";
-      "Use the absolute MONTY_JOB_FILE path in the Monty instructions to resolve every persisted workspace path.";
-      "Do not rely on another agent's summary and do not look for another reviewer's output.";
+      String.concat "\n" Reviewer_prompt.review_preamble;
       focus;
-      "This is strictly read-only. Do not modify project, source, test, configuration, task, or worker-memory files.";
+      Reviewer_prompt.read_only_worktree_rule;
       "Use shell commands only for read-only inspection and non-mutating validation.";
       mutation_prohibitions;
       "Implementation handoff for orientation only; verify every claim against the worktree:";
       "{previous}";
-      "Return only evidence-backed findings ordered by severity, each with file and line references, impact, and the smallest safe correction.";
-      "State 'No findings' plainly if no correction is warranted." ]
+      String.concat "\n" Reviewer_prompt.review_output_requirements ]
 
 let fixer_task (dispatch : dispatch) =
   String.concat "\n\n"
