@@ -26,6 +26,22 @@ Workers execute focused tasks, keep durable notes, and report back through their
 A worker must be able to start from its context file and Monty instructions without reading the full planning conversation.
 The head butler must be able to inspect current work without entering every worker session.
 
+## A head-butler conversation is not a task
+
+The head butler may discuss, investigate, or plan a general topic without
+reaching a conclusion and without promoting that discussion into a task.
+Interactive conversation history belongs to the selected harness. Monty exposes
+the harness-native picker, latest-session, and exact-session continuation paths
+instead of duplicating transcripts or introducing a parallel conversation state
+machine.
+
+Starting and continuing are intentionally distinct. A bare `monty` invocation
+starts a fresh head-butler conversation, while `monty continue` explicitly
+reopens saved harness history. Continuing a head-butler conversation must not
+create or mutate local tasks, workers, run handoffs, or task inventory. Native
+conversation selectors are harness-specific and are not portable between Pi and
+Codex.
+
 Headless execution is a head-butler-only alternative to terminal workers.
 Monty generates complete arguments for the harness's existing subagent tool and gives every child a Monty-owned repo-scoped worktree rather than requesting a Pi-managed worktree.
 Monty does not need its own Pi extension or a second agent runtime.

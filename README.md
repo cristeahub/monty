@@ -111,6 +111,37 @@ monty settings set harness codex
 Inspect settings with `monty settings` or read just this value with
 `monty settings get harness`.
 
+## Continue a head-butler conversation
+
+Head-butler conversations may stop without reaching a conclusion or creating a
+Monty task. The selected harness saves its own interactive history. Reopen a
+saved conversation with the native session picker:
+
+```sh
+monty continue
+```
+
+Skip the picker and reopen the most recent conversation associated with the
+Monty control room:
+
+```sh
+monty continue --last
+```
+
+Or select an exact native session. Pi accepts a session path or id; Codex
+accepts a UUID or saved session name:
+
+```sh
+monty continue <session>
+```
+
+Continuation is explicit: bare `monty` and `monty start` still create a fresh
+head-butler conversation. Use the same harness that created the conversation,
+selecting it explicitly when needed with `--harness pi` or `--harness codex`.
+Continuing a conversation does not create a local task, worker, run handoff, or
+entry in `monty list`. The existing `monty resume` and `monty open` commands
+remain worker-task lifecycle commands.
+
 ## Launch one worker
 
 ```sh

@@ -12,6 +12,13 @@ type operations = {
     harness_command:string ->
     codex_yolo:bool ->
     (unit, string) result;
+  continue :
+    continuation:Head_butler.continuation ->
+    home:string ->
+    harness:Harness.t ->
+    harness_command:string ->
+    codex_yolo:bool ->
+    (unit, string) result;
   launch_one : Launcher.options -> Job.t -> (unit, string) result;
   doctor :
     home:string ->
@@ -28,6 +35,10 @@ let default_operations =
     start =
       (fun ~name ~home ~harness ~harness_command ~codex_yolo ->
         Head_butler.start ~home ~harness ~harness_command ~codex_yolo ~name);
+    continue =
+      (fun ~continuation ~home ~harness ~harness_command ~codex_yolo ->
+        Head_butler.continue ~home ~harness ~harness_command ~codex_yolo
+          continuation);
     launch_one = Launcher.launch_one;
     doctor =
       (fun ~home ~harness ~harness_command ~wt_command ~backend ~worktree_mode ->
@@ -239,6 +250,46 @@ let start_term =
     Cmdliner.Arg.(value & opt string "Monty Head Butler" & info [ "name"; "n" ] ~docv:"NAME" ~doc)
   in
   Cmdliner.Term.(const start $ name_arg $ home_arg $ harness_arg $ codex_yolo_arg $ pi_command_arg $ codex_command_arg)
+ in
+let continue_head_butler session last home harness_override
+    codex_yolo_override pi_command codex_command =
+  let continuation =
+    match (session, last) with
+    | Some _, true ->
+        Error "continue accepts either a session selector or --last, not both"
+    | Some session, false -> Ok (Head_butler.Session session)
+    | None, true -> Ok Head_butler.Last
+    | None, false -> Ok Head_butler.Picker
+  in
+  match
+    ( continuation,
+      Settings.effective_harness ~getenv ~home harness_override,
+      Settings.effective_codex_yolo ~getenv ~home codex_yolo_override )
+  with
+  | Error message, _, _ | _, Error message, _ | _, _, Error message ->
+      exit_code (Error message)
+  | Ok continuation, Ok harness, Ok codex_yolo ->
+      let harness_command =
+        match harness with Harness.Pi -> pi_command | Harness.Codex -> codex_command
+      in
+      operations.continue ~continuation ~home ~harness ~harness_command
+        ~codex_yolo
+      |> exit_code
+ in
+let continue_term =
+  let session =
+    let doc =
+      "Exact native session selector: a Pi path or id, or a Codex UUID or session name."
+    in
+    Cmdliner.Arg.(value & pos 0 (some string) None & info [] ~docv:"SESSION" ~doc)
+  in
+  let last =
+    let doc = "Resume the most recent head-butler conversation without a picker." in
+    Cmdliner.Arg.(value & flag & info [ "last" ] ~doc)
+  in
+  Cmdliner.Term.(
+    const continue_head_butler $ session $ last $ home_arg $ harness_arg
+    $ codex_yolo_arg $ pi_command_arg $ codex_command_arg)
  in
 let launch repo title context branch options =
   match options with
@@ -1063,6 +1114,12 @@ let start_cmd =
   let doc = "Start the head-butler agent session in the Monty control room." in
   Cmdliner.Cmd.v (Cmdliner.Cmd.info "start" ~doc) start_term
  in
+let continue_cmd =
+  let doc =
+    "Continue a saved head-butler conversation without creating a task."
+  in
+  Cmdliner.Cmd.v (Cmdliner.Cmd.info "continue" ~doc) continue_term
+ in
 let launch_cmd =
   let doc = "Launch one worker agent session." in
   Cmdliner.Cmd.v (Cmdliner.Cmd.info "launch" ~doc) launch_term
@@ -1227,6 +1284,7 @@ let main_cmd =
   let man =
     [ `S Cmdliner.Manpage.s_description;
       `P "Run monty with no subcommand to start the head-butler agent session in this repo.";
+      `P "Use continue to reopen a harness-native head-butler conversation without creating a task.";
       `P "Use launch or launch-many when the head-butler needs to spin out worker sessions.";
       `P "Use open or resume to reopen an existing worker from durable Monty memory." ]
   in
@@ -1234,6 +1292,7 @@ let main_cmd =
     (Cmdliner.Cmd.info "monty" ~version:"dev" ~doc ~man)
     [
       start_cmd;
+      continue_cmd;
       launch_cmd;
       launch_many_cmd;
       open_cmd;

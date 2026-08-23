@@ -4233,6 +4233,58 @@ let test_settings_commands_and_effective_harness () =
       require_code 0 override;
       require_contains "CLI harness override" override.stdout "pi")
 
+let test_head_butler_continue_uses_native_sessions_without_monty_state () =
+  with_temp_root "head-butler-continue" (fun root ->
+      let home, log, env = setup_environment root in
+      Shell.ensure_dir home;
+      let picker =
+        run ~root ~env 1955
+          [ "continue"; "--home"; home; "--harness"; "pi" ]
+      in
+      require_code 97 picker;
+      require_contains "Pi native session picker" (read_file log) "pi --resume";
+      let last =
+        run ~root ~env 1956
+          [ "continue"; "--last"; "--home"; home; "--harness"; "pi" ]
+      in
+      require_code 97 last;
+      require_contains "Pi native last session" (read_file log) "pi --continue";
+      let exact =
+        run ~root ~env 1957
+          [ "continue"; "design-notes"; "--home"; home; "--harness"; "pi" ]
+      in
+      require_code 97 exact;
+      require_contains "Pi native exact session" (read_file log)
+        "pi --session design-notes";
+      let codex =
+        run ~root ~env 1958
+          [ "continue"; "saved-chat"; "--home"; home; "--harness"; "codex";
+            "--codex-command"; "codex"; "--codex-yolo" ]
+      in
+      require_code 97 codex;
+      let calls = read_file log in
+      require_contains "Codex native exact session" calls "codex resume";
+      require_contains "continued Codex reasoning configuration" calls
+        "model_reasoning_effort=\"xhigh\"";
+      require_contains "continued Codex Vim configuration" calls
+        "tui.vim_mode_default=true";
+      require_contains "continued Codex YOLO configuration" calls
+        "--dangerously-bypass-approvals-and-sandbox";
+      require_contains "continued Codex exact selector" calls "saved-chat";
+      let conflict =
+        run ~root ~env 1959
+          [ "continue"; "saved-chat"; "--last"; "--home"; home ]
+      in
+      require_code 1 conflict;
+      require_contains "continue selection conflict" conflict.stderr
+        "either a session selector or --last";
+      [ ".monty/tasks.local.json"; ".monty/runs"; ".monty/conversations" ]
+      |> List.iter (fun relative ->
+             if Sys.file_exists (Filename.concat home relative) then
+               failwith
+                 ("continuing a head-butler conversation created Monty state at "
+                ^ relative)))
+
 let test_cli_parser_and_doctor_contracts () =
   with_temp_root "parser-doctor" (fun root ->
       let home, _log, env = setup_environment root in
@@ -4415,5 +4467,7 @@ let () =
       test_run_handoff_publish_delivery_follow_up_and_lifecycle_race );
     ( "cli_settings_commands_and_effective_harness",
       test_settings_commands_and_effective_harness );
+    ( "cli_head_butler_continue_uses_native_sessions_without_monty_state",
+      test_head_butler_continue_uses_native_sessions_without_monty_state );
     ( "cli_parser_and_doctor_contracts", test_cli_parser_and_doctor_contracts ) ]
   |> List.iter (fun (name, test) -> run_named name test)

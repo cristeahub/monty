@@ -1,13 +1,15 @@
 # Monty head-butler instructions
 
 This repo is the Monty control room.
+Use this control room to plan work, choose actionable tasks, and launch worker agent sessions through the configured Pi or Codex harness.
 At the start of a head-butler planning session, run `monty handoff pending` before presenting the task inventory.
 Surface each pending run handoff at the next safe message boundary; never interrupt, cancel, or replace an unrelated response already in progress.
 After a handoff has actually been displayed to the user, run `monty handoff acknowledge <notice-id>`.
 Acknowledgement is idempotent, and reading a pending handoff must never start another run or change task status.
 When the user asks for more detail, use a still-addressable native runner when available; otherwise run `monty handoff follow-up <worker> --question <question>` and inspect only its read-only durable context.
 Use an explicit `monty resume` or `monty headless resume` only when the user asks to continue implementation.
-Use it to plan work, choose actionable tasks, and launch worker agent sessions through the configured Pi or Codex harness.
+General head-butler discussions do not need to become tasks merely to remain resumable.
+Use `monty continue`, `monty continue --last`, or `monty continue <session>` only when the user asks to restore a saved head-butler conversation; these commands use harness-native history and do not create a task or resume implementation.
 In Monty conversations, a worker job and a task are the same unit of work.
 Do not treat active worker jobs and local tasks as separate concepts in user-facing replies.
 The local task registry is the source of truth for task status.

@@ -867,6 +867,94 @@ let test_cli_factory_injects_environment_and_dispatch () =
       assert_bool "factory second worktree" (two.worktree_mode = Launcher.Always)
   | _ -> failwith "injected CLI launch operation was not called four times"
 
+let test_cli_continue_dispatch () =
+  let captured = ref [] in
+  let operations =
+    Cli.
+      {
+        default_operations with
+        continue =
+          (fun ~continuation ~home ~harness ~harness_command ~codex_yolo ->
+            captured :=
+              (continuation, home, harness, harness_command, codex_yolo)
+              :: !captured;
+            Ok ());
+      }
+  in
+  let home = temp_root "cli-continue" in
+  let getenv name =
+    match name with
+    | "MONTY_HOME" -> Some home
+    | "MONTY_HARNESS" -> Some "pi"
+    | "MONTY_PI_COMMAND" -> Some "pi --fixed"
+    | "MONTY_CODEX_COMMAND" -> Some "codex --fixed"
+    | _ -> None
+  in
+  let run args =
+    Cli.eval ~getenv ~operations (Array.of_list ("monty" :: args))
+  in
+  assert_bool "continue picker dispatch" (run [ "continue" ] = 0);
+  assert_bool "continue last dispatch"
+    (run [ "continue"; "--last"; "--harness"; "codex"; "--codex-yolo" ]
+    = 0);
+  assert_bool "continue exact dispatch"
+    (run [ "continue"; "design notes" ] = 0);
+  assert_bool "continue rejects last plus exact session"
+    (run [ "continue"; "design notes"; "--last" ] = 1);
+  match List.rev !captured with
+  | [ (Head_butler.Picker, picker_home, Harness.Pi, picker_command, false);
+      (Head_butler.Last, last_home, Harness.Codex, last_command, true);
+      (Head_butler.Session session, session_home, Harness.Pi, session_command, false)
+    ] ->
+      assert_equal "continue picker home" home picker_home;
+      assert_equal "continue last home" home last_home;
+      assert_equal "continue session home" home session_home;
+      assert_equal "continue picker command" "pi --fixed" picker_command;
+      assert_equal "continue last command" "codex --fixed" last_command;
+      assert_equal "continue session command" "pi --fixed" session_command;
+      assert_equal "continue exact selector" "design notes" session
+  | _ -> failwith "continue CLI did not dispatch the expected native selections"
+
+let test_head_butler_continuation_commands () =
+  let command harness continuation =
+    Head_butler.continuation_command ~home:"/monty home" ~harness
+      ~harness_command:
+        (match harness with Harness.Pi -> "pi --fixed" | Harness.Codex -> "codex --fixed")
+      ~codex_yolo:true continuation
+  in
+  assert_equal "Pi continuation picker"
+    "cd '/monty home' && exec pi --fixed --resume"
+    (command Harness.Pi Head_butler.Picker);
+  assert_equal "Pi continuation last"
+    "cd '/monty home' && exec pi --fixed --continue"
+    (command Harness.Pi Head_butler.Last);
+  assert_equal "Pi continuation exact selector"
+    ("cd '/monty home' && exec pi --fixed --session "
+    ^ Shell.quote "design's notes")
+    (command Harness.Pi (Head_butler.Session "design's notes"));
+  let codex_picker = command Harness.Codex Head_butler.Picker in
+  assert_contains "Codex continuation picker" codex_picker
+    "exec codex --fixed resume";
+  assert_contains "continued Codex xhigh reasoning" codex_picker
+    "model_reasoning_effort=\"xhigh\"";
+  assert_contains "continued Codex Vim mode" codex_picker
+    "tui.vim_mode_default=true";
+  assert_contains "continued Codex YOLO" codex_picker
+    "--dangerously-bypass-approvals-and-sandbox";
+  let codex_safe =
+    Head_butler.continuation_command ~home:"/monty home"
+      ~harness:Harness.Codex ~harness_command:"codex --fixed"
+      ~codex_yolo:false Head_butler.Picker
+  in
+  assert_not_contains "continued Codex YOLO defaults off" codex_safe
+    "--dangerously-bypass-approvals-and-sandbox";
+  assert_contains "continued Codex home cwd" codex_picker "-C .";
+  assert_contains "Codex continuation last"
+    (command Harness.Codex Head_butler.Last) "-C . --last";
+  assert_contains "Codex continuation exact selector"
+    (command Harness.Codex (Head_butler.Session "design's notes"))
+    ("-C . " ^ Shell.quote "design's notes")
+
 let test_codex_harness_command () =
   let job =
     Job.make ~worker_dir:"/monty/workers/task-1" ~title:"Codex task"
@@ -1196,6 +1284,8 @@ let () =
     ("job_symlink_escape", test_job_store_rejects_symlink_escape);
     ("doctor_typed_configuration", test_doctor_typed_checks_and_configuration);
     ("cli_factory_injection", test_cli_factory_injects_environment_and_dispatch);
+    ("cli_continue_dispatch", test_cli_continue_dispatch);
+    ("head_butler_continuation_commands", test_head_butler_continuation_commands);
     ("codex_harness_command", test_codex_harness_command);
     ("codex_harness_rejects_fork", test_codex_harness_rejects_fork);
     ( "settings_harness_roundtrip_and_precedence",
