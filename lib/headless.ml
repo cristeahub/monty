@@ -475,7 +475,6 @@ let prepare_existing options (record : Job_store.record) =
           (Printf.sprintf "worker %s is in a %s transition" record.id
              (Job_store.operation_name transition.operation))
   in
-  let* prepared = Launcher.script_for_resume options prepared record in
   Ok (options, prepared)
 
 let prepare_begin ~explicit_resume options worker =

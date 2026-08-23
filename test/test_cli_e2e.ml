@@ -340,6 +340,38 @@ let test_readme_worker_path_is_home_relative () =
         (Filename.concat home ".monty/runs/run-1/workers/issue-123");
       require_empty_log log)
 
+let test_readme_context_path_is_home_relative () =
+  with_temp_root "readme-context-path" (fun root ->
+      let home, log, env = setup_environment root in
+      let repo = Filename.concat root "repo" in
+      let relative_context = ".monty/runs/run-1/task.md" in
+      let context = Filename.concat home relative_context in
+      let manifest = Filename.concat home ".monty/runs/run-1/jobs.json" in
+      Shell.ensure_dir repo;
+      Shell.write_file context "# Task\n";
+      add_project ~root ~home ~env repo;
+      write_manifest manifest
+        [ `Assoc
+            [ ("id", `String "issue-123");
+              ("title", `String "README context path");
+              ("repo", `String repo);
+              ("context", `String relative_context);
+              ( "worker_dir",
+                `String ".monty/runs/run-1/workers/issue-123" ) ] ];
+      let result =
+        run ~root ~env 10
+          [ "launch-many";
+            "--terminal";
+            "dry-run";
+            "--home";
+            home;
+            "--manifest";
+            manifest ]
+      in
+      require_code 0 result;
+      require_contains "README context path" result.stdout context;
+      require_empty_log log)
+
 let test_cli_atomic_fault_preserves_previous_json () =
   with_temp_root "atomic-fault" (fun root ->
       let home, log, env = setup_environment root in
@@ -3453,6 +3485,22 @@ let test_codex_headless_uses_effective_settings_without_ghostty () =
             home ]
       in
       require_code 0 ordinary_resume;
+      let osascript = Filename.concat root "fake-bin/osascript" in
+      Shell.write_file osascript "#!/bin/sh\nexit 0\n";
+      Shell.chmod_executable osascript;
+      let interactive_resume =
+        run ~root ~env 19642
+          [ "resume"; "codex-one"; "--terminal"; "ghostty"; "--harness";
+            "pi"; "--home"; home ]
+      in
+      require_code 0 interactive_resume;
+      let recorded_script =
+        Yojson.Safe.Util.(
+          Yojson.Safe.from_file (job_file "run-codex-one" "codex-one")
+          |> member "launch_script" |> to_string)
+      in
+      if not (Sys.file_exists recorded_script) then
+        failwith "interactive resume did not write its recorded Pi launch script";
       let duplicate_run =
         run ~root ~env 1965
           [ "headless"; "run"; "codex-one"; "--home"; home ]
@@ -4202,6 +4250,7 @@ let () =
     ( "cli_dry_run_rejects_unsafe_manifest_before_side_effects",
       test_dry_run_rejects_unsafe_manifest_before_side_effects );
     ("cli_readme_worker_path_is_home_relative", test_readme_worker_path_is_home_relative);
+    ("cli_readme_context_path_is_home_relative", test_readme_context_path_is_home_relative);
     ("cli_atomic_fault_preserves_previous_json", test_cli_atomic_fault_preserves_previous_json);
     ("cli_concurrent_project_adds_keep_every_project", test_concurrent_project_adds_keep_every_project);
     ( "cli_rejects_unsafe_persisted_worker_before_external_commands",

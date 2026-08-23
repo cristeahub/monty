@@ -96,11 +96,16 @@ let jobs_json json =
   | `List jobs -> Ok jobs
   | _ -> Error "manifest must be an object with a \"jobs\" array or a jobs array"
 
-let resolve_context ~cwd ~manifest_dir path =
+let resolve_context ?home ~cwd ~manifest_dir path =
   if Filename.is_relative path |> not then Shell.normalize path
   else
     let from_cwd = Filename.concat cwd path in
     if Sys.file_exists from_cwd then Shell.normalize from_cwd
+    else if String.equal path ".monty" || String.starts_with ~prefix:".monty/" path
+    then
+      match home with
+      | Some home -> Filename.concat home path |> Shell.normalize
+      | None -> Filename.concat manifest_dir path |> Shell.normalize
     else Shell.normalize (Filename.concat manifest_dir path)
 
 let resolve_repo ~cwd path =
@@ -126,7 +131,7 @@ let resolve_job_paths ?home ~cwd ~manifest_dir (index, job) =
     |> List.map (fun (workspace : Job.workspace) ->
            { workspace with repo = resolve_repo ~cwd workspace.repo })
   in
-  let context = resolve_context ~cwd ~manifest_dir job.Job.context in
+  let context = resolve_context ?home ~cwd ~manifest_dir job.Job.context in
   let worker_dir =
     match job.Job.worker_dir with
     | Some worker_dir -> Some (resolve_worker_dir ?home ~manifest_dir worker_dir)
