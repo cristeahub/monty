@@ -1023,6 +1023,37 @@ let test_completion_persists_force_and_never_creates_worktree () =
       if logged_command calls "db" then
         failwith "missing worktree and branch invoked wt db")
 
+let test_completion_makes_ignored_artifacts_removable () =
+  with_temp_root "read-only-worktree-artifacts" (fun root ->
+      let home, _tool_log, env = setup_environment root in
+      let repo = Filename.concat root "repo" in
+      let context = Filename.concat root "context.md" in
+      init_git_repo repo;
+      ignore
+        (setup_direct_worker ~home ~repo ~context ~worktree_mode:"always"
+           ~last_known_worktree:repo ());
+      Shell.write_file (Filename.concat repo ".git/info/exclude")
+        "read-only-artifacts/\n";
+      let artifact_dir = Filename.concat repo "read-only-artifacts/sealed" in
+      let artifact = Filename.concat artifact_dir "artifact.json" in
+      Shell.ensure_dir artifact_dir;
+      Shell.write_file artifact "{}\n";
+      Unix.chmod artifact 0o400;
+      Unix.chmod artifact_dir 0o500;
+      let wt_log =
+        install_remove_only_wt ~root ~repo ~branch:"cto/force-lifecycle"
+          ~present:true
+      in
+      require_code 0
+        (run ~root ~env 625
+           [ "done"; "worker-force"; "--home"; home; "--wt-command"; "wt" ]);
+      if not (logged_command (read_file wt_log) "db") then
+        failwith "read-only artifact completion did not invoke wt db";
+      if (Unix.stat artifact_dir).st_perm land 0o200 = 0 then
+        failwith "completion left the ignored artifact directory read-only";
+      if (Unix.stat artifact).st_perm land 0o200 = 0 then
+        failwith "completion left the ignored artifact file read-only")
+
 let test_collision_task_failure_and_resume_dry_run_are_safe () =
   with_temp_root "collision" (fun root ->
       let home, _tool_log, env = setup_environment root in
@@ -4264,6 +4295,8 @@ let () =
       test_lifecycle_faults_recover_from_both_locations );
     ( "cli_completion_persists_force_and_never_creates_worktree",
       test_completion_persists_force_and_never_creates_worktree );
+    ( "cli_completion_makes_ignored_artifacts_removable",
+      test_completion_makes_ignored_artifacts_removable );
     ( "cli_collision_task_failure_and_resume_dry_run_are_safe",
       test_collision_task_failure_and_resume_dry_run_are_safe );
     ( "cli_cleanup_stale_wt_doctor_and_transition_guards",

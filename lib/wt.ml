@@ -257,6 +257,42 @@ let force_clean ~worktree =
   let* () = Process.run_quiet ~cwd:worktree "git reset --hard" in
   Process.run_quiet ~cwd:worktree "git clean -fdx"
 
+let rec make_owner_writable path =
+  match Unix.lstat path with
+  | { Unix.st_kind = Unix.S_LNK; _ } -> Ok ()
+  | ({ st_kind = Unix.S_DIR; st_perm; _ } : Unix.stats) -> (
+      try
+        Unix.chmod path (st_perm lor 0o700);
+        Sys.readdir path
+        |> Array.fold_left
+             (fun result name ->
+               let ( let* ) = Result.bind in
+               let* () = result in
+               make_owner_writable (Filename.concat path name))
+             (Ok ())
+      with Unix.Unix_error (error, operation, _) ->
+        Error
+          (Printf.sprintf "cannot prepare worktree removal at %s: %s (%s)" path
+             (Unix.error_message error) operation))
+  | ({ st_perm; _ } : Unix.stats) -> (
+      try
+        Unix.chmod path (st_perm lor 0o200);
+        Ok ()
+      with Unix.Unix_error (error, operation, _) ->
+        Error
+          (Printf.sprintf "cannot prepare worktree removal at %s: %s (%s)" path
+             (Unix.error_message error) operation))
+  | exception Unix.Unix_error ((Unix.ENOENT | Unix.ENOTDIR), _, _) -> Ok ()
+
+let prepare_entries_for_removal entries =
+  entries
+  |> List.fold_left
+       (fun result entry ->
+         let ( let* ) = Result.bind in
+         let* () = result in
+         make_owner_writable entry.path)
+       (Ok ())
+
 let delete_with_wt ?selection ~wt_command ~repo ~branch () =
   match run_wt_branch ?selection ~wt_command ~repo "db" branch with
   | Error msg -> Error msg
@@ -297,8 +333,11 @@ let remove_if_present ?worktree ~wt_command ~repo ~branch () =
         (Printf.sprintf
            "wt has branch %S in another repo, but not in requested repo %s"
            branch repo)
-  | [ _ ], [ _ ] -> delete_with_wt ~wt_command ~repo ~branch ()
+  | [ _ ], [ entry ] ->
+      let* () = prepare_entries_for_removal [ entry ] in
+      delete_with_wt ~wt_command ~repo ~branch ()
   | _ -> (
+      let* () = prepare_entries_for_removal matching_entries in
       match run_wt_branch ~wt_command ~repo "db" branch with
       | Error msg -> Error msg
       | Ok { status = `Exited 0; _ } -> Ok ()
