@@ -128,6 +128,31 @@ let locate_workspaces ~wt_command record =
        (Ok [])
   |> Result.map List.rev
 
+let locate_workspace_for_completion_recovery ~wt_command ~worktree_mode
+    (workspace : Job_store.workspace_state) =
+  let ( let* ) = Result.bind in
+  let* branch = required_workspace_branch workspace in
+  let repo = Shell.normalize (Shell.abs_path workspace.repo) in
+  match String.lowercase_ascii worktree_mode with
+  | "never" -> Ok (workspace, branch, None)
+  | _ ->
+      Wt.locate_existing ~wt_command ~repo ~branch
+      |> Result.map (fun path -> (workspace, branch, path))
+
+let locate_workspaces_for_completion_recovery ~wt_command record =
+  record.Job_store.workspaces
+  |> List.fold_left
+       (fun result workspace ->
+         let ( let* ) = Result.bind in
+         let* acc = result in
+         let* located =
+           locate_workspace_for_completion_recovery ~wt_command
+             ~worktree_mode:record.Job_store.worktree_mode workspace
+         in
+         Ok (located :: acc))
+       (Ok [])
+  |> Result.map List.rev
+
 let fault checkpoint =
   match Sys.getenv_opt "MONTY_FAULT_INJECT" with
   | Some value when String.equal value checkpoint ->
@@ -197,7 +222,7 @@ let complete ?worker ~home ~wt_command ~force () =
     if deletes_worktree_and_branch then
       match preflight_workspaces with
       | _ :: _ as workspaces -> Ok workspaces
-      | [] -> locate_workspaces ~wt_command record
+      | [] -> locate_workspaces_for_completion_recovery ~wt_command record
     else Ok []
   in
   let* () =

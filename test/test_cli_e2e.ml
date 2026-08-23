@@ -910,6 +910,36 @@ let install_stateful_remove_wt ~root ~worktree ~branch =
   Shell.chmod_executable wt;
   log
 
+let install_partial_remove_wt ~root ~worktree ~branch =
+  let log = Filename.concat root "partial-remove-wt.log" in
+  let marker = Filename.concat root "partial-remove-first-call" in
+  let wt = Filename.concat root "fake-bin/wt" in
+  Shell.write_file marker "first\n";
+  Shell.write_file wt
+    (String.concat "\n"
+       [ "#!/bin/sh";
+         "set -eu";
+         "printf '%s\n' \"$*\" >> " ^ Shell.quote log;
+         "case \"$1\" in";
+         "  list)";
+         "    printf 'repo:\\n  %s -> %s\\n' " ^ Shell.quote branch ^ " "
+         ^ Shell.quote worktree;
+         "    ;;";
+         "  db)";
+         "    if [ -f " ^ Shell.quote marker ^ " ]; then";
+         "      rm -f " ^ Shell.quote marker;
+         "      rm -f " ^ Shell.quote (Filename.concat worktree ".git");
+         "      exit 77";
+         "    fi";
+         "    exit 0";
+         "    ;;";
+         "  b) exit 91 ;;";
+         "  *) exit 92 ;;";
+         "esac";
+         "" ]);
+  Shell.chmod_executable wt;
+  log
+
 let logged_command calls command =
   calls |> String.split_on_char '\n'
   |> List.exists (fun line ->
@@ -1053,6 +1083,42 @@ let test_completion_makes_ignored_artifacts_removable () =
         failwith "completion left the ignored artifact directory read-only";
       if (Unix.stat artifact).st_perm land 0o200 = 0 then
         failwith "completion left the ignored artifact file read-only")
+
+let test_completion_recovers_after_partial_worktree_removal () =
+  with_temp_root "partial-worktree-removal" (fun root ->
+      let home, _tool_log, env = setup_environment root in
+      let repo = Filename.concat root "repo" in
+      let worktree = Filename.concat root "worktree" in
+      let context = Filename.concat root "context.md" in
+      init_git_repo repo;
+      let add_worktree =
+        Process.run_quiet ~cwd:repo
+          (Printf.sprintf "git worktree add -q -b %s %s"
+             (Shell.quote "cto/force-lifecycle") (Shell.quote worktree))
+      in
+      (match add_worktree with
+      | Ok () -> ()
+      | Error message -> failwith message);
+      ignore
+        (setup_direct_worker ~home ~repo ~context ~worktree_mode:"always"
+           ~last_known_worktree:worktree ());
+      let wt_log =
+        install_partial_remove_wt ~root ~worktree
+          ~branch:"cto/force-lifecycle"
+      in
+      let interrupted =
+        run ~root ~env 626
+          [ "done"; "worker-force"; "--home"; home; "--wt-command"; "wt" ]
+      in
+      if interrupted.code = 0 then
+        failwith "partial worktree removal unexpectedly completed";
+      if Sys.file_exists (Filename.concat worktree ".git") then
+        failwith "partial removal fixture retained Git metadata";
+      require_code 0
+        (run ~root ~env 627
+           [ "done"; "worker-force"; "--home"; home; "--wt-command"; "wt" ]);
+      if command_count (read_file wt_log) "db" <> 2 then
+        failwith "completion retry did not repeat the partial wt removal")
 
 let test_collision_task_failure_and_resume_dry_run_are_safe () =
   with_temp_root "collision" (fun root ->
@@ -4297,6 +4363,8 @@ let () =
       test_completion_persists_force_and_never_creates_worktree );
     ( "cli_completion_makes_ignored_artifacts_removable",
       test_completion_makes_ignored_artifacts_removable );
+    ( "cli_completion_recovers_after_partial_worktree_removal",
+      test_completion_recovers_after_partial_worktree_removal );
     ( "cli_collision_task_failure_and_resume_dry_run_are_safe",
       test_collision_task_failure_and_resume_dry_run_are_safe );
     ( "cli_cleanup_stale_wt_doctor_and_transition_guards",
