@@ -714,6 +714,14 @@ let run_codex_phase (options : Launcher.options) (dispatch : dispatch)
   let command =
     "umask 077 && " ^ options.harness_command ^ " exec"
     ^ Harness_command.codex_effort_arg
+    ^ Codex_trust.arguments
+        (match
+           dispatch.workspaces
+           |> List.filter_map (fun (workspace : Job_store.workspace_state) ->
+                  workspace.worktree)
+         with
+        | [] -> [ dispatch.worktree ]
+        | paths -> paths)
     ^ " --ephemeral --json --color never"
     ^ codex_permission_arg options ~writable
     ^ " -C " ^ Shell.quote dispatch.worktree

@@ -1,8 +1,3 @@
-let required_branch record =
-  match record.Job_store.job.Job.branch with
-  | Some branch when String.trim branch <> "" -> Ok branch
-  | _ -> Error (Printf.sprintf "Monty job %s has no branch" record.Job_store.id)
-
 let env_worker_dir () =
   match Sys.getenv_opt "MONTY_WORKER_DIR" with
   | Some dir when String.trim dir <> "" -> Some (Shell.normalize dir)
@@ -12,23 +7,6 @@ let env_job_id () =
   match Sys.getenv_opt "MONTY_JOB_ID" with
   | Some id when String.trim id <> "" -> Some id
   | _ -> None
-
-let prefix text value =
-  let text_len = String.length text in
-  let value_len = String.length value in
-  value_len >= text_len && String.sub value 0 text_len = text
-
-let is_digit = function '0' .. '9' -> true | _ -> false
-
-let legacy_local_task_id_from_worker_id value =
-  let length = String.length value in
-  if
-    length >= 9
-    && prefix "local-" value
-    && is_digit value.[6] && is_digit value.[7] && is_digit value.[8]
-    && (length = 9 || value.[9] = '-' || value.[9] = '_' || value.[9] = '/')
-  then Some (String.sub value 0 9)
-  else None
 
 let task_key_for_archive record linked_local_task_id =
   match record.Job_store.job.Job.task_key with
@@ -89,14 +67,6 @@ let required_workspace_branch (workspace : Job_store.workspace_state) =
   | _ ->
       Error
         (Printf.sprintf "Monty workspace in repo %s has no branch" workspace.repo)
-
-let locate_worktree ~wt_command ~repo ~branch record =
-  match String.lowercase_ascii record.Job_store.worktree_mode with
-  | "never" -> Ok None
-  | _ -> (
-      match existing_dir record.Job_store.last_known_worktree with
-      | Some path -> Wt.validate_worktree ~repo path |> Result.map Option.some
-      | None -> Wt.locate_existing ~wt_command ~repo ~branch)
 
 let locate_workspace ~wt_command ~worktree_mode
     (workspace : Job_store.workspace_state) =

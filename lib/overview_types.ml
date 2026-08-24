@@ -3,18 +3,16 @@ type github_source = {
   query : string option;
 }
 
-type source = Github_issues of github_source
-
 type raw_project = {
   persisted_id : string option;
   repo : string;
-  sources : source list;
+  sources : github_source list;
 }
 
 type project = {
   id : string;
   repo : string;
-  sources : source list;
+  sources : github_source list;
 }
 
 type task_workspace = {

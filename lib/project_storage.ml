@@ -7,18 +7,6 @@ let projects_dir home = Filename.concat (monty_dir home) "projects"
 let memory_file ~home id = Filename.concat (projects_dir home) (id ^ ".md")
 let project_memory_file = memory_file
 
-let now_utc = Worker_memory.now_utc
-
-let prefix text value =
-  let text_len = String.length text in
-  let value_len = String.length value in
-  value_len >= text_len && String.sub value 0 text_len = text
-
-let strip_prefix text value =
-  if prefix text value then
-    Some (String.sub value (String.length text) (String.length value - String.length text))
-  else None
-
 let member_string json name =
   match Util.member name json with
   | `String value when String.trim value <> "" -> Ok value
@@ -55,16 +43,15 @@ let parse_source json =
   | "github_issues" ->
       let* repo = member_string json "repo" in
       let* query = optional_string json "query" in
-      Ok (Github_issues { repo; query })
+      Ok Overview_types.{ repo; query }
   | _ -> Error (Printf.sprintf "unknown project source kind %S" kind)
 
-let json_of_source = function
-  | Github_issues { repo; query } ->
-      let fields =
-        [ ("kind", `String "github_issues"); ("repo", `String repo) ]
-        @ (match query with None -> [] | Some value -> [ ("query", `String value) ])
-      in
-      `Assoc fields
+let json_of_source ({ repo; query } : github_source) =
+  let fields =
+    [ ("kind", `String "github_issues"); ("repo", `String repo) ]
+    @ (match query with None -> [] | Some value -> [ ("query", `String value) ])
+  in
+  `Assoc fields
 
 let parse_raw_project json =
   let ( let* ) = Result.bind in
@@ -95,14 +82,10 @@ let repo_basename repo =
 
 let base_id (project : raw_project) = Slug.of_title (repo_basename project.repo)
 
-let first_github_repo sources =
-  sources
-  |> List.find_map (function Github_issues { repo; _ } -> Some repo)
-
 let disambiguated_id (project : raw_project) =
-  match first_github_repo project.sources with
-  | Some repo -> Slug.of_title repo
-  | None ->
+  match project.sources with
+  | { repo; _ } :: _ -> Slug.of_title repo
+  | [] ->
       let parent = project.repo |> Filename.dirname |> Filename.basename |> Slug.of_title in
       let base = base_id project in
       if parent = "" || parent = base then base else parent ^ "-" ^ base
@@ -169,18 +152,14 @@ let save_raw_projects_unlocked ~home (projects : raw_project list) =
   State_store.write_json_atomic ~path
     (`Assoc [ ("projects", `List (List.map json_of_raw_project projects)) ])
 
-let save_raw_projects ~home projects =
-  State_store.with_lock ~home (fun () -> save_raw_projects_unlocked ~home projects)
-
 let load_projects ~home =
   try load_raw_projects ~home |> Result.map with_ids
   with Invalid_argument msg -> Error msg
 
-let source_label = function
-  | Github_issues { repo; query } -> (
-      match query with
-      | None -> "github:" ^ repo
-      | Some query -> "github:" ^ repo ^ " search:" ^ query)
+let source_label ({ repo; query } : github_source) =
+  match query with
+  | None -> "github:" ^ repo
+  | Some query -> "github:" ^ repo ^ " search:" ^ query
 
 let sources_label sources =
   match sources with [] -> "local" | sources -> sources |> List.map source_label |> String.concat ", "
@@ -288,7 +267,7 @@ let add_project ~home ~repo ?github ?query () =
           let sources =
             match github with
             | None -> []
-            | Some repo -> [ Github_issues { repo; query } ]
+            | Some repo -> [ Overview_types.{ repo; query } ]
           in
           let candidates = stabilized @ [ { persisted_id = None; repo; sources } ] in
           let* assigned =

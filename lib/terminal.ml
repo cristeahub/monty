@@ -16,11 +16,3 @@ let target_of_string = function
   | value -> Error (`Msg (Printf.sprintf "unknown launch target %S" value))
 
 let target_to_string = function Tab -> "tab" | Window -> "window" | Split -> "split"
-
-let default_backend () =
-  match Sys.getenv_opt "MONTY_TERMINAL" with
-  | Some value -> value
-  | None -> "ghostty"
-
-let default_target () =
-  match Sys.getenv_opt "MONTY_TARGET" with Some value -> value | None -> "tab"

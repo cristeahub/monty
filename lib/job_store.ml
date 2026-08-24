@@ -123,11 +123,6 @@ let parse_transition json =
 
 let operation_name = function Complete -> "complete" | Reopen -> "reopen"
 
-let prefix text value =
-  let text_length = String.length text in
-  String.length value >= text_length
-  && String.sub value 0 text_length = text
-
 let all_digits value =
   String.length value > 0
   && String.for_all (function '0' .. '9' -> true | _ -> false) value
@@ -136,16 +131,16 @@ let local_task_id_of_key = function
   | None -> Ok None
   | Some key ->
       let id =
-        if prefix "local:" key then
+        if String.starts_with ~prefix:"local:" key then
           Some (String.sub key 6 (String.length key - 6))
-        else if prefix "local-" key then Some key
+        else if String.starts_with ~prefix:"local-" key then Some key
         else None
       in
       (match id with
       | None -> Ok None
       | Some id ->
           let suffix =
-            if prefix "local-" id then
+            if String.starts_with ~prefix:"local-" id then
               String.sub id 6 (String.length id - 6)
             else ""
           in
@@ -603,10 +598,6 @@ let find ~home ?(scope = Active) needle =
           in
           Error (Printf.sprintf "multiple Monty workers match %S:\n%s" needle labels))
 
-let archive_dir record =
-  Filename.concat record.run_dir (Filename.concat "archive" record.id)
-  |> Shell.normalize
-
 let active_dir record =
   Filename.concat record.run_dir (Filename.concat "workers" record.id)
   |> Shell.normalize
@@ -629,13 +620,6 @@ let update_file_unlocked ?(remove = []) path updates =
   | None -> Error (Printf.sprintf "job.json is missing: %s" path)
   | Some json ->
       State_store.write_json_atomic ~path (upsert_assoc ~remove updates json)
-
-let update_file ?home ?(remove = []) path updates =
-  match home with
-  | Some home ->
-      State_store.with_lock ~home (fun () ->
-          update_file_unlocked ~remove path updates)
-  | None -> update_file_unlocked ~remove path updates
 
 let string name value = (name, `String value)
 
@@ -755,13 +739,6 @@ let prepare_reopen record =
   | None ->
       prepare_transition record ~operation:Reopen ~task_key:record.job.Job.task_key
         ~force:false
-
-let reload_transition record operation =
-  match (record.home, record.state_path) with
-  | Some home, Some state ->
-      State_store.with_lock ~home (fun () ->
-          load_identity_unlocked ~home ~run_id:state.run_id ~id:state.id ~operation)
-  | _ -> Error "cannot reload a transition without canonical home metadata"
 
 let relocate_transition record operation =
   match (record.home, record.state_path) with

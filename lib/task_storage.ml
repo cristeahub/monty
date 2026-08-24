@@ -31,12 +31,8 @@ let read_json_file path =
   | Sys_error msg -> Error msg
   | Yojson.Json_error msg -> Error ("invalid JSON in " ^ path ^ ": " ^ msg)
 
-let prefix text value =
-  let length = String.length text in
-  String.length value >= length && String.sub value 0 length = text
-
 let strip_prefix text value =
-  if prefix text value then
+  if String.starts_with ~prefix:text value then
     Some (String.sub value (String.length text) (String.length value - String.length text))
   else None
 
@@ -172,9 +168,6 @@ let save_local_tasks_unlocked ~home tasks =
   State_store.write_json_atomic ~path
     (`Assoc [ ("tasks", `List (List.map json_of_local_task tasks)) ])
 
-let save_local_tasks ~home tasks =
-  State_store.with_lock ~home (fun () -> save_local_tasks_unlocked ~home tasks)
-
 let parse_local_number id =
   match strip_prefix "local-" id with
   | None -> None
@@ -250,7 +243,6 @@ let set_local_task_status ~home id status =
           Ok ())
 
 let done_local_task ~home id = set_local_task_status ~home id "done"
-let reopen_local_task ~home id = set_local_task_status ~home id "open"
 
 let normalize_local_id id =
   match strip_prefix "local:" id with Some value -> value | None -> id

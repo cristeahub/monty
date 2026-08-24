@@ -1,7 +1,6 @@
 open Overview_types
 
 let project_memory_file = Project_storage.project_memory_file
-let source_label = Project_storage.source_label
 let sources_label = Project_storage.sources_label
 let compare_project = Project_storage.compare_project
 let load_projects = Project_storage.load_projects

@@ -286,7 +286,8 @@ let same_record prepared (record : Job_store.record) =
   | Some path -> canonical_path_equal path prepared.script_path
   | None -> false
 
-let script_has_owner_marker (options : options) (prepared : prepared) path =
+let script_has_owner_marker (options : options) (prepared : prepared)
+    (record : Job_store.record) path =
   try
     let harness_options =
       Harness_command.
@@ -298,8 +299,9 @@ let script_has_owner_marker (options : options) (prepared : prepared) path =
           branch_prefix = options.branch_prefix;
           monty_command = options.monty_command }
     in
-    let expected =
+    let expected codex_trusted_paths =
       Harness_command.launch_script_contents ~options:harness_options
+        ~codex_trusted_paths
         ~job:prepared.job ~id:prepared.id ~branch:prepared.branch
         ~source_repo:prepared.repo ~initial_workdir:prepared.repo
         ~home:options.home ~context:prepared.context
@@ -316,11 +318,18 @@ let script_has_owner_marker (options : options) (prepared : prepared) path =
     in
     let marker line = String.equal line "# monty-launch-script-v1" in
     let job_file line = String.starts_with ~prefix:"export MONTY_JOB_FILE=" line in
-    let accepted =
+    let variants expected =
       [ expected;
         without_lines [ marker ] expected;
         without_lines [ job_file ] expected;
         without_lines [ marker; job_file ] expected ]
+    in
+    let trusted_paths =
+      record.workspaces
+      |> List.filter_map (fun (workspace : Job_store.workspace_state) ->
+             workspace.worktree)
+    in
+    let accepted = variants (expected trusted_paths) @ variants (expected [])
     in
     let contents = Shell.read_file path in
     List.exists (String.equal contents) accepted
@@ -371,7 +380,7 @@ let recorded_script options (prepared : prepared) (record : Job_store.record) =
           try
             match (Unix.lstat path).Unix.st_kind with
             | Unix.S_REG ->
-                if script_has_owner_marker options prepared path then Ok ()
+                if script_has_owner_marker options prepared record path then Ok ()
                 else
                   Error
                     (Printf.sprintf
@@ -555,20 +564,6 @@ let preflight_batch options indexed_jobs =
 let prepare_batch options indexed_jobs =
   let* () = check_dependencies options in
   preflight_batch options indexed_jobs
-
-let matching_current (prepared : prepared) =
-  if not (State_path.path_exists prepared.state_path.State_path.job_file) then
-    Ok None
-  else
-    let* record =
-      Job_store.parse_job_file ~home:prepared.state_path.home
-        prepared.state_path.job_file
-    in
-    if same_record prepared record then Ok (Some record)
-    else
-      Error
-        (Printf.sprintf "worker reservation changed during launch: %s"
-           prepared.state_path.job_file)
 
 let rec remove_staging_tree path =
   try
@@ -1026,6 +1021,7 @@ let dry_run options (prepared : prepared) =
   Fmt.pr "[dry-run] harness: %s\n" (Harness.to_string options.harness);
   Fmt.pr "[dry-run] command: %s\n"
     (Harness_command.build_command ~options:harness_options
+       ~codex_trusted_paths:[]
        ~instructions:(Some prepared.instructions) ~job:prepared.job
        ~context:prepared.context)
 
@@ -1173,12 +1169,6 @@ let materialize_workspaces ?expected_statuses options (prepared : prepared) =
                 ~repo:workspace.repo ~branch:workspace.branch
         in
         let* worktree = result in
-        let* () =
-          match options.harness with
-          | Harness.Pi -> Ok ()
-          | Harness.Codex ->
-              Codex_trust.ensure ~home:options.home ~path:worktree
-        in
         let state =
           Job_store.
             {
@@ -1225,6 +1215,11 @@ let begin_request ?(persist_failure = true) ?(write_script = true) options
               try
                 ignore
                   (Harness_command.write_launch_script ~path:prepared.script_path
+                     ~codex_trusted_paths:
+                       (workspace_states
+                       |> List.filter_map
+                            (fun (workspace : Job_store.workspace_state) ->
+                              workspace.worktree))
                      ~options:(harness_options options) ~job:prepared.job
                      ~id:prepared.id ~branch:prepared.branch
                      ~source_repo:prepared.repo ~initial_workdir

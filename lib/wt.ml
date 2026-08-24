@@ -1,13 +1,3 @@
-let prefix text value =
-  let text_len = String.length text in
-  let value_len = String.length value in
-  value_len >= text_len && String.sub value 0 text_len = text
-
-let strip_prefix text value =
-  if prefix text value then
-    Some (String.sub value (String.length text) (String.length value - String.length text))
-  else None
-
 let realpath_if_exists path =
   try Unix.realpath path with Unix.Unix_error _ -> path
 
@@ -106,7 +96,10 @@ let parse_list text =
     | line :: rest ->
         let trimmed = String.trim line in
         if trimmed = "" then loop repo_label acc rest
-        else if not (prefix " " line) && not (prefix "\t" line) then
+        else if
+          not (String.starts_with ~prefix:" " line)
+          && not (String.starts_with ~prefix:"\t" line)
+        then
           let repo_label =
             match String.ends_with ~suffix:":" trimmed with
             | true -> String.sub trimmed 0 (String.length trimmed - 1)

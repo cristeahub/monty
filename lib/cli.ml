@@ -4,48 +4,6 @@ let exit_code = function
       Fmt.epr "monty: %s\n" msg;
       1
 
-type operations = {
-  start :
-    name:string ->
-    home:string ->
-    harness:Harness.t ->
-    harness_command:string ->
-    codex_yolo:bool ->
-    (unit, string) result;
-  continue :
-    continuation:Head_butler.continuation ->
-    home:string ->
-    harness:Harness.t ->
-    harness_command:string ->
-    codex_yolo:bool ->
-    (unit, string) result;
-  launch_one : Launcher.options -> Job.t -> (unit, string) result;
-  doctor :
-    home:string ->
-    harness:Harness.t ->
-    harness_command:string ->
-    wt_command:string ->
-    backend:Terminal.backend ->
-    worktree_mode:Launcher.worktree_mode ->
-    (unit, string) result;
-}
-
-let default_operations =
-  {
-    start =
-      (fun ~name ~home ~harness ~harness_command ~codex_yolo ->
-        Head_butler.start ~home ~harness ~harness_command ~codex_yolo ~name);
-    continue =
-      (fun ~continuation ~home ~harness ~harness_command ~codex_yolo ->
-        Head_butler.continue ~home ~harness ~harness_command ~codex_yolo
-          continuation);
-    launch_one = Launcher.launch_one;
-    doctor =
-      (fun ~home ~harness ~harness_command ~wt_command ~backend ~worktree_mode ->
-        Doctor.run ~home ~harness ~harness_command ~wt_command ~backend
-          ~worktree_mode);
-  }
-
 let env_default getenv name default =
   match getenv name with Some value when String.trim value <> "" -> value | _ -> default
 
@@ -100,7 +58,7 @@ let worktree_default getenv =
   | Ok mode -> mode
   | Error _ -> Launcher.Always
 
-let make_cmd ?(getenv = Sys.getenv_opt) ?(operations = default_operations) () =
+let make_cmd ?(getenv = Sys.getenv_opt) () =
 let home_arg =
   let doc = "Monty control-room directory. Defaults to MONTY_HOME or the nearest parent dune-project named monty." in
   Cmdliner.Arg.(value & opt string (Home.default_with_getenv getenv) & info [ "home" ] ~docv:"DIR" ~doc)
@@ -197,33 +155,9 @@ let options_term =
  in
 let headless_options harness_override codex_yolo_override pi_command codex_command
     wt_command branch_prefix_override fork home script_dir =
-  let ( let* ) = Result.bind in
-  let* harness =
-    Settings.effective_harness ~getenv ~home harness_override
-  in
-  let* codex_yolo =
-    Settings.effective_codex_yolo ~getenv ~home codex_yolo_override
-  in
-  let* branch_prefix =
-    Settings.effective_branch_prefix ~getenv ~home branch_prefix_override
-  in
-  Ok Launcher.
-    { backend = Terminal.Dry_run;
-      target = Terminal.Tab;
-      harness;
-      harness_command =
-        (match harness with Harness.Pi -> pi_command | Harness.Codex -> codex_command);
-      codex_yolo;
-      wt_command;
-      worktree_mode = Always;
-      branch_prefix;
-      fork;
-      home;
-      script_dir =
-        (match script_dir with
-        | Some dir -> Shell.normalize (Shell.abs_path dir)
-        | None -> Home.runtime_script_dir ~home () |> Shell.normalize);
-      monty_command = monty_command () }
+  options Terminal.Dry_run Terminal.Tab harness_override codex_yolo_override
+    pi_command codex_command wt_command Launcher.Always branch_prefix_override
+    fork home script_dir
  in
 let headless_options_term =
   Cmdliner.Term.(
@@ -241,7 +175,7 @@ let start name home harness_override codex_yolo_override pi_command codex_comman
       let harness_command =
         match harness with Harness.Pi -> pi_command | Harness.Codex -> codex_command
       in
-      operations.start ~name ~home ~harness ~harness_command ~codex_yolo
+      Head_butler.start ~name ~home ~harness ~harness_command ~codex_yolo
       |> exit_code
  in
 let start_term =
@@ -272,8 +206,8 @@ let continue_head_butler session last home harness_override
       let harness_command =
         match harness with Harness.Pi -> pi_command | Harness.Codex -> codex_command
       in
-      operations.continue ~continuation ~home ~harness ~harness_command
-        ~codex_yolo
+      Head_butler.continue ~home ~harness ~harness_command ~codex_yolo
+        continuation
       |> exit_code
  in
 let continue_term =
@@ -299,7 +233,7 @@ let launch repo title context branch options =
       let repo = Shell.normalize (Shell.abs_path ~base:cwd repo) in
       let context = Shell.normalize (Shell.abs_path ~base:cwd context) in
       let job = Job.make ?branch ~title ~repo ~context () in
-      operations.launch_one options job |> exit_code
+      Launcher.launch_one options job |> exit_code
  in
 let launch_term =
   let repo =
@@ -811,7 +745,7 @@ let projects_add repo github query home =
   match Project_overview.add_project ~home ~repo ?github ?query () with
   | Error msg -> exit_code (Error msg)
   | Ok project ->
-      Fmt.pr "Added project %s\n" project.Project_overview.id;
+      Fmt.pr "Added project %s\n" project.Overview_types.id;
       Fmt.pr "Memory: %s\n" (Project_overview.project_memory_file ~home project.id);
       0
  in
@@ -834,25 +768,8 @@ let print_sync_warnings warnings =
   List.iter (fun warning -> Fmt.epr "monty: warning: %s\n" warning) warnings
  in
 let tasks_list project all no_sync home =
-  let result =
-    let ( let* ) = Result.bind in
-    let* sync_warnings =
-      if no_sync then Ok []
-      else
-        Project_overview.sync_jobs_to_local_tasks ~home
-        |> Result.map (fun result -> result.Project_overview.warnings)
-    in
-    let* tasks, inventory_warnings =
-      Project_overview.load_tasks_with_warnings ~home ?project ~all ()
-    in
-    Ok (tasks, List.sort_uniq String.compare (sync_warnings @ inventory_warnings))
-  in
-  match result with
-  | Error msg -> exit_code (Error msg)
-  | Ok (tasks, warnings) ->
-      print_sync_warnings warnings;
-      Fmt.pr "%s" (Project_overview.render_tasks tasks);
-      0
+  let scope = if all then Job_store.All else Job_store.Active in
+  List_jobs.run ~home ~scope ?project ~sync:(not no_sync) () |> exit_code
  in
 let tasks_list_term =
   let project =
@@ -873,9 +790,9 @@ let tasks_sync home =
   match Project_overview.sync_jobs_to_local_tasks ~home with
   | Error msg -> exit_code (Error msg)
   | Ok result ->
-      print_sync_warnings result.Project_overview.warnings;
+      print_sync_warnings result.Overview_types.warnings;
       Fmt.pr "Synced jobs to local tasks: %d created, %d updated, %d linked jobs\n"
-        result.Project_overview.created result.updated result.linked_jobs;
+        result.Overview_types.created result.updated result.linked_jobs;
       0
  in
 let tasks_sync_term = Cmdliner.Term.(const tasks_sync $ home_arg)
@@ -898,7 +815,7 @@ let task_add project title home =
   match Project_overview.add_local_task ~home ~project ~title () with
   | Error msg -> exit_code (Error msg)
   | Ok task ->
-      Fmt.pr "Added local task %s\n" task.Project_overview.id;
+      Fmt.pr "Added local task %s\n" task.Overview_types.id;
       0
  in
 let task_add_term =
@@ -1010,7 +927,7 @@ let doctor home harness_override pi_command codex_command wt_command backend wor
       let harness_command =
         match harness with Harness.Pi -> pi_command | Harness.Codex -> codex_command
       in
-      operations.doctor ~home ~harness ~harness_command ~wt_command ~backend
+      Doctor.run ~home ~harness ~harness_command ~wt_command ~backend
         ~worktree_mode |> exit_code
  in
 let doctor_term =
@@ -1312,5 +1229,4 @@ let main_cmd =
  in
 main_cmd
 
-let eval ?getenv ?operations argv =
-  Cmdliner.Cmd.eval' ~argv (make_cmd ?getenv ?operations ())
+let eval ?getenv argv = Cmdliner.Cmd.eval' ~argv (make_cmd ?getenv ())

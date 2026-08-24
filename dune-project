@@ -11,7 +11,5 @@
   (dune (>= 3.20))
   cmdliner
   yojson
-  bos
   fpath
-  rresult
   fmt))

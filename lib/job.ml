@@ -52,13 +52,6 @@ let with_workspaces job (workspaces : workspace list) =
   | first :: _ ->
       { job with repo = first.repo; branch = first.branch; workspaces }
 
-let map_workspaces f job = with_workspaces job (List.map f job.workspaces)
-
-let branch_or_default ?(prefix = "monty") ?index job =
-  match job.branch with
-  | Some branch -> branch
-  | None -> Slug.branch ~prefix ?index job.title
-
 let workspaces_with_default_branches ?(prefix = "monty") ?index job =
   let default = Slug.branch ~prefix ?index job.title in
   job.workspaces

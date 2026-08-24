@@ -236,10 +236,3 @@ let write_json_atomic ~path json =
 
 let write_json ~home ~path json =
   with_lock ~home (fun () -> write_json_atomic ~path json)
-
-let update_json ~home ~path f =
-  with_lock ~home (fun () ->
-      let* current = read_json ~path in
-      let* json, result = f current in
-      let* () = write_json_atomic ~path json in
-      Ok result)

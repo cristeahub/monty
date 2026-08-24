@@ -1,9 +1,12 @@
 type captured = {
   stdout : string;
-  status : Bos.OS.Cmd.status;
+  status : [ `Exited of int | `Signaled of int | `Stopped of int ];
 }
 
-let status_to_string status = Fmt.str "%a" Bos.OS.Cmd.pp_status status
+let status_to_string = function
+  | `Exited code -> Printf.sprintf "exited with %d" code
+  | `Signaled signal -> Printf.sprintf "signaled with %d" signal
+  | `Stopped signal -> Printf.sprintf "stopped with %d" signal
 
 let run_capture ?cwd command =
   let command =
@@ -11,10 +14,22 @@ let run_capture ?cwd command =
     | None -> command
     | Some cwd -> Printf.sprintf "cd %s && %s" (Shell.quote cwd) command
   in
-  let cmd = Bos.Cmd.(v "/bin/sh" % "-c" % command) in
-  match Bos.OS.Cmd.(run_out ~err:err_run_out cmd |> out_string ~trim:false) with
-  | Ok (stdout, (_, status)) -> Ok { stdout; status }
-  | Error (`Msg msg) -> Error msg
+  try
+    let channel = Unix.open_process_in ("( " ^ command ^ " ) 2>&1") in
+    let stdout = In_channel.input_all channel in
+    let status =
+      match Unix.close_process_in channel with
+      | Unix.WEXITED code -> `Exited code
+      | Unix.WSIGNALED signal -> `Signaled signal
+      | Unix.WSTOPPED signal -> `Stopped signal
+    in
+    Ok { stdout; status }
+  with
+  | Sys_error message -> Error message
+  | Unix.Unix_error (error, operation, argument) ->
+      Error
+        (Printf.sprintf "%s(%s): %s" operation argument
+           (Unix.error_message error))
 
 let run_success ?cwd command =
   match run_capture ?cwd command with

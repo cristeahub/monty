@@ -15,17 +15,9 @@ let optional_string_field obj name =
 
 let ( let* ) = Result.bind
 
-let optional_worker_dir_field obj =
-  match Util.member "worker_dir" obj with
-  | `String _ as value -> optional_string_field (`Assoc [ ("worker_dir", value) ]) "worker_dir"
-  | `Null -> optional_string_field obj "memory_dir"
-  | _ -> optional_string_field obj "worker_dir"
-
-let optional_task_key_field obj =
-  match Util.member "task_key" obj with
-  | `String _ as value -> optional_string_field (`Assoc [ ("task_key", value) ]) "task_key"
-  | `Null -> optional_string_field obj "task"
-  | _ -> optional_string_field obj "task_key"
+let reject_legacy_field obj name =
+  if Util.member name obj = `Null then Ok ()
+  else Error (Printf.sprintf "legacy manifest field %S is unsupported" name)
 
 let parse_workspace json =
   let* repo = string_field json "repo" in
@@ -51,6 +43,8 @@ let parse_workspaces json =
   | _ -> Error "field \"workspaces\" must be an array when present"
 
 let parse_job index json =
+  let* () = reject_legacy_field json "memory_dir" in
+  let* () = reject_legacy_field json "task" in
   let* title = string_field json "title" in
   let* context = string_field json "context" in
   let* id =
@@ -63,9 +57,9 @@ let parse_job index json =
   in
   let* branch = optional_string_field json "branch" in
   let* workspaces = parse_workspaces json in
-  let* worker_dir = optional_worker_dir_field json in
+  let* worker_dir = optional_string_field json "worker_dir" in
   let* prompt = optional_string_field json "prompt" in
-  let* task_key = optional_task_key_field json in
+  let* task_key = optional_string_field json "task_key" in
   let* job =
     match workspaces with
     | None ->
@@ -93,8 +87,7 @@ let jobs_json json =
       | `List jobs -> Ok jobs
       | `Null -> Error "manifest must contain a \"jobs\" array"
       | _ -> Error "manifest field \"jobs\" must be an array")
-  | `List jobs -> Ok jobs
-  | _ -> Error "manifest must be an object with a \"jobs\" array or a jobs array"
+  | _ -> Error "manifest must be an object with a \"jobs\" array"
 
 let resolve_context ?home ~cwd ~manifest_dir path =
   if Filename.is_relative path |> not then Shell.normalize path

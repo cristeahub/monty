@@ -64,8 +64,3 @@ let read_file path =
       really_input_string ic len)
 
 let chmod_executable path = Unix.chmod path 0o755
-
-let last_non_empty_line text =
-  text |> String.split_on_char '\n' |> List.rev
-  |> List.find_opt (fun line -> String.trim line <> "")
-  |> Option.map String.trim

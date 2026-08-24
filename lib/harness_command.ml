@@ -32,7 +32,7 @@ let codex_prompt ~instructions ~context job =
       "Read the files below before acting. Treat the Monty instructions and task context as authoritative, and preserve important discoveries in durable worker memory.";
       inputs ]
 
-let build_command ~options ~instructions ~job ~context =
+let build_command ~codex_trusted_paths ~options ~instructions ~job ~context =
   match options.harness with
   | Harness.Pi ->
       let name = Shell.quote job.Job.title in
@@ -66,8 +66,8 @@ let build_command ~options ~instructions ~job ~context =
                      (index + 2))
             |> String.concat ""
       in
-      Printf.sprintf "exec %s%s%s%s -C .%s %s" options.command codex_effort_arg
-        codex_vim_arg yolo add_dirs
+      Printf.sprintf "exec %s%s%s%s%s -C .%s %s" options.command codex_effort_arg
+        codex_vim_arg (Codex_trust.arguments codex_trusted_paths) yolo add_dirs
         (Shell.quote (codex_prompt ~instructions ~context job))
 
 let rehydrate_lines ~monty_command ~wt_command ~branch ~source_repo =
@@ -126,10 +126,13 @@ let static_workspace_lines (job : Job.t) =
   @ [ "MONTY_JOB_WORKTREE=$MONTY_WORKSPACE_1";
       "cd \"$MONTY_JOB_WORKTREE\"" ]
 
-let launch_script_contents ~options ~job ~id ~branch ~source_repo
+let launch_script_contents ~codex_trusted_paths ~options ~job ~id ~branch ~source_repo
     ~initial_workdir ~home ~context ~instructions ~worker_dir ~worktree_mode
     ~wt_command =
-  let command = build_command ~options ~instructions:(Some instructions) ~job ~context in
+  let command =
+    build_command ~codex_trusted_paths ~options
+      ~instructions:(Some instructions) ~job ~context
+  in
   let setup_lines =
     match worktree_mode with
     | "always" -> (
@@ -178,7 +181,7 @@ let launch_script_contents ~options ~job ~id ~branch ~source_repo
           command;
           "" ])
 
-let write_launch_script ?path ~options ~job ~id ~branch ~source_repo
+let write_launch_script ?path ?(codex_trusted_paths = []) ~options ~job ~id ~branch ~source_repo
     ~initial_workdir ~home ~context ~instructions ~worker_dir ~worktree_mode
     ~wt_command () =
   Shell.ensure_dir options.script_dir;
@@ -188,7 +191,7 @@ let write_launch_script ?path ~options ~job ~id ~branch ~source_repo
       path
   in
   let contents =
-    launch_script_contents ~options ~job ~id ~branch ~source_repo
+    launch_script_contents ~codex_trusted_paths ~options ~job ~id ~branch ~source_repo
       ~initial_workdir ~home ~context ~instructions ~worker_dir ~worktree_mode
       ~wt_command
   in

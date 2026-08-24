@@ -4,10 +4,6 @@ let now_utc () =
     (tm.Unix.tm_mon + 1) tm.Unix.tm_mday tm.Unix.tm_hour tm.Unix.tm_min
     tm.Unix.tm_sec
 
-let default_worker_dir ~home ~id =
-  Filename.concat home (Filename.concat ".monty/runs/manual/workers" id)
-  |> Shell.normalize
-
 let worker_state ~home ~id job =
   let ( let* ) = Result.bind in
   let* id = State_path.safe_component ~label:"worker id" id in
@@ -74,12 +70,6 @@ let write_job_json_unlocked ?status ?launch_script ?launch_error ~worker_dir ~id
   State_store.write_json_atomic ~path:(job_file worker_dir)
     (job_json ?status ?launch_script ?launch_error ~worker_dir ~id ~job ~branch
        ~repo ~context ~worktree_mode ~last_known_worktree ())
-
-let write_job_json ?status ?launch_script ?launch_error ~home ~worker_dir ~id
-    ~job ~branch ~repo ~context ~worktree_mode ~last_known_worktree () =
-  State_store.with_lock ~home (fun () ->
-      write_job_json_unlocked ?status ?launch_script ?launch_error ~worker_dir
-        ~id ~job ~branch ~repo ~context ~worktree_mode ~last_known_worktree ())
 
 let init_memory ~worker_dir ~title =
   let path = memory_file worker_dir in

@@ -76,52 +76,6 @@ let test_shell_quote () =
   assert_equal "quote simple" "'hello'" (Shell.quote "hello");
   assert_equal "quote apostrophe" "'it'\\''s'" (Shell.quote "it's")
 
-let test_codex_trust_config () =
-  let root = temp_root "codex-trust" in
-  let project = Filename.concat root "repo.with-\"quote" in
-  let other_project = Filename.concat root "other-repo" in
-  let config_dir = Filename.concat root "codex-home" in
-  let config = Filename.concat config_dir "config.toml" in
-  Shell.ensure_dir project;
-  Shell.ensure_dir other_project;
-  Shell.ensure_dir config_dir;
-  let project = Unix.realpath project in
-  Shell.write_file config
-    (String.concat "\n"
-       [ "model = \"fixed\"";
-         Codex_trust.project_header project;
-         "trust_level = \"untrusted\"";
-         "" ]);
-  Unix.chmod config 0o640;
-  must (Codex_trust.ensure_file ~config_path:config ~path:project);
-  let trusted = Shell.read_file config in
-  assert_contains "Codex project is trusted" trusted
-    (Codex_trust.project_header project ^ "\ntrust_level = \"trusted\"");
-  assert_not_contains "Codex untrusted value is replaced" trusted
-    "trust_level = \"untrusted\"";
-  assert_bool "Codex config permissions are preserved"
-    ((Unix.stat config).Unix.st_perm land 0o777 = 0o640);
-  must (Codex_trust.ensure_file ~config_path:config ~path:project);
-  assert_equal "Codex trust update is idempotent" trusted (Shell.read_file config);
-  must (Codex_trust.ensure_file ~config_path:config ~path:other_project);
-  assert_contains "second Codex project is appended" (Shell.read_file config)
-    (Codex_trust.project_header (Unix.realpath other_project)
-    ^ "\ntrust_level = \"trusted\"");
-  let symlink = Filename.concat config_dir "linked-config.toml" in
-  Unix.symlink config symlink;
-  must (Codex_trust.ensure_file ~config_path:symlink ~path:project);
-  assert_bool "Codex config symlink is preserved"
-    ((Unix.lstat symlink).Unix.st_kind = Unix.S_LNK);
-  let dangling = Filename.concat config_dir "dangling-config.toml" in
-  Unix.symlink (Filename.concat config_dir "missing.toml") dangling;
-  (match Codex_trust.ensure_file ~config_path:dangling ~path:project with
-  | Ok () -> failwith "dangling Codex config symlink was replaced"
-  | Error message ->
-      assert_contains "dangling Codex config diagnostic" message
-        "resolve Codex config symlink");
-  assert_bool "dangling Codex config symlink remains untouched"
-    ((Unix.lstat dangling).Unix.st_kind = Unix.S_LNK)
-
 let test_manifest () =
   let root = temp_root "manifest" in
   let run_dir = Filename.concat root ".monty/runs/test" in
@@ -191,6 +145,25 @@ let test_manifest () =
                   ( "workspaces",
                     `List [ `Assoc [ ("repo", `String admin) ] ] ) ] ] ) ])
     "either top-level repo/branch or workspaces";
+  rejects "bare manifest array" (`List []) "object with a \"jobs\" array";
+  rejects "legacy memory directory"
+    (`Assoc
+      [ ( "jobs",
+          `List
+            [ `Assoc
+                [ ("title", `String "Legacy"); ("repo", `String backend);
+                  ("context", `String context);
+                  ("memory_dir", `String "/tmp/legacy") ] ] ) ])
+    "legacy manifest field \"memory_dir\"";
+  rejects "legacy task key"
+    (`Assoc
+      [ ( "jobs",
+          `List
+            [ `Assoc
+                [ ("title", `String "Legacy"); ("repo", `String backend);
+                  ("context", `String context);
+                  ("task", `String "local:local-001") ] ] ) ])
+    "legacy manifest field \"task\"";
   rejects "relative workspace repo"
     (`Assoc
       [ ( "jobs",
@@ -374,25 +347,25 @@ let test_done_closes_linked_local_task () =
       (Project_overview.add_local_task ~home ~project:"repo" ~title:"Fix local task" ())
   in
   let job =
-    Job.make ~id:(task.Project_overview.id ^ "-fix-local-task")
-      ~task_key:("local:" ^ task.Project_overview.id)
+    Job.make ~id:(task.Overview_types.id ^ "-fix-local-task")
+      ~task_key:("local:" ^ task.Overview_types.id)
       ~branch:"cto/fix-local-task" ~title:"Fix local task" ~repo ~context ()
   in
   let _id, worker_dir, _instructions =
     Worker_memory.ensure ~home ~job ~branch:"cto/fix-local-task" ~repo ~context
       ~worktree_mode:"never" ~last_known_worktree:None
   in
-  must (Done.complete ~worker:(task.Project_overview.id ^ "-fix-local-task") ~home
+  must (Done.complete ~worker:(task.Overview_types.id ^ "-fix-local-task") ~home
           ~wt_command:"wt" ~force:false ());
   let archive_dir =
     Filename.concat
       (Filename.concat (Filename.dirname (Filename.dirname worker_dir)) "archive")
-      (task.Project_overview.id ^ "-fix-local-task")
+      (task.Overview_types.id ^ "-fix-local-task")
   in
   assert_bool "worker dir moved" (not (Sys.file_exists worker_dir));
   assert_bool "archive dir exists" (Sys.file_exists archive_dir);
   let archived = must (Job_store.parse_job_file (Filename.concat archive_dir "job.json")) in
-  assert_equal "archived task key" ("local:" ^ task.Project_overview.id)
+  assert_equal "archived task key" ("local:" ^ task.Overview_types.id)
     (Option.value ~default:"" archived.Job_store.job.Job.task_key);
   let open_tasks = must (Project_overview.load_tasks ~home ()) in
   assert_bool "linked local task hidden after archive" (open_tasks = []);
@@ -413,7 +386,7 @@ let test_done_does_not_infer_legacy_local_task_by_title () =
       (Project_overview.add_local_task ~home ~project:"repo" ~title:"Continue cto/legacy" ())
   in
   let job =
-    Job.make ~id:"legacy-worker" ~branch:"cto/legacy" ~title:task.Project_overview.title
+    Job.make ~id:"legacy-worker" ~branch:"cto/legacy" ~title:task.Overview_types.title
       ~repo ~context ()
   in
   let _id, worker_dir, _instructions =
@@ -424,7 +397,7 @@ let test_done_does_not_infer_legacy_local_task_by_title () =
   assert_bool "worker dir moved" (not (Sys.file_exists worker_dir));
   let open_tasks = must (Project_overview.load_tasks ~home ()) in
   assert_equal "legacy task remains open without explicit repair" "open"
-    (List.hd open_tasks).Project_overview.status;
+    (List.hd open_tasks).Overview_types.status;
   let archived = must (Job_store.find ~home ~scope:Job_store.Archived "legacy-worker") in
   assert_bool "ordinary done leaves legacy worker unlinked"
     (archived.Job_store.job.Job.task_key = None)
@@ -535,7 +508,7 @@ let test_tasks_sync_jobs_to_local_source () =
   in
   assert_bool "worker memory created" (Sys.file_exists worker_dir);
   let result = must (Project_overview.sync_jobs_to_local_tasks ~home) in
-  assert_equal "sync created" "1" (string_of_int result.Project_overview.created);
+  assert_equal "sync created" "1" (string_of_int result.Overview_types.created);
   assert_equal "sync linked" "1" (string_of_int result.linked_jobs);
   let tasks = must (Project_overview.load_tasks ~home ()) in
   let rendered = Project_overview.render_tasks tasks in
@@ -546,7 +519,7 @@ let test_tasks_sync_jobs_to_local_source () =
   assert_equal "job task key" "local:local-001"
     (Option.value ~default:"" record.Job_store.job.Job.task_key);
   let second = must (Project_overview.sync_jobs_to_local_tasks ~home) in
-  assert_equal "second sync created" "0" (string_of_int second.Project_overview.created);
+  assert_equal "second sync created" "0" (string_of_int second.Overview_types.created);
   assert_equal "second sync updated" "0" (string_of_int second.updated);
   assert_equal "second sync linked" "0" (string_of_int second.linked_jobs)
 
@@ -556,7 +529,7 @@ let test_project_overview_local_tasks () =
   let repo = Filename.concat root "monty" in
   Shell.ensure_dir repo;
   let project = must (Project_overview.add_project ~home ~repo ()) in
-  assert_equal "project id" "monty" project.Project_overview.id;
+  assert_equal "project id" "monty" project.Overview_types.id;
   assert_bool "project memory exists"
     (Sys.file_exists (Project_overview.project_memory_file ~home "monty"));
   let task =
@@ -564,7 +537,7 @@ let test_project_overview_local_tasks () =
       (Project_overview.add_local_task ~home ~project:"monty"
          ~title:"Design overview" ())
   in
-  assert_equal "local task id" "local-001" task.Project_overview.id;
+  assert_equal "local task id" "local-001" task.Overview_types.id;
   let tasks = must (Project_overview.load_tasks ~home ()) in
   let rendered = Project_overview.render_tasks tasks in
   assert_contains "local task rendered" rendered "local:local-001";
@@ -747,17 +720,13 @@ let test_job_store_rejects_symlink_escape () =
 
 let test_doctor_typed_checks_and_configuration () =
   let home = temp_root "doctor" in
-  let operations =
-    Doctor.
-      {
-        find_command =
-          (fun command ->
-            if List.mem command [ "pi --fixed"; "codex --fixed"; "gh" ] then Ok ("/fake/" ^ command)
-            else Error ("missing " ^ command));
-      }
+  let find_command command =
+    if List.mem command [ "pi --fixed"; "codex --fixed"; "gh" ] then
+      Ok ("/fake/" ^ command)
+    else Error ("missing " ^ command)
   in
   let dry_checks =
-    Doctor.checks ~operations ~home ~harness:Harness.Pi
+    Doctor.checks ~find_command ~home ~harness:Harness.Pi
       ~harness_command:"pi --fixed" ~wt_command:"missing-wt"
       ~backend:Terminal.Dry_run ~worktree_mode:Launcher.Never ()
   in
@@ -768,7 +737,7 @@ let test_doctor_typed_checks_and_configuration () =
   assert_contains "doctor warn" dry_output "WARN";
   assert_not_contains "doctor dry-run ignores wt" dry_output "missing-wt";
   let codex_checks =
-    Doctor.checks ~operations ~home ~harness:Harness.Codex
+    Doctor.checks ~find_command ~home ~harness:Harness.Codex
       ~harness_command:"codex --fixed" ~wt_command:"missing-wt"
       ~backend:Terminal.Dry_run ~worktree_mode:Launcher.Never ()
   in
@@ -778,7 +747,7 @@ let test_doctor_typed_checks_and_configuration () =
   assert_contains "Codex doctor names selected harness" codex_output "codex";
   assert_not_contains "Codex doctor does not require Pi" codex_output "pi --fixed";
   let real_checks =
-    Doctor.checks ~operations ~home ~harness:Harness.Pi
+    Doctor.checks ~find_command ~home ~harness:Harness.Pi
       ~harness_command:"pi --fixed" ~wt_command:"missing-wt"
       ~backend:Terminal.Ghostty ~worktree_mode:Launcher.Always ()
   in
@@ -788,132 +757,6 @@ let test_doctor_typed_checks_and_configuration () =
   assert_contains "doctor fail" real_output "FAIL";
   assert_contains "doctor configured wt" real_output "missing-wt";
   assert_contains "doctor recovery" real_output "Recovery:"
-
-let test_cli_factory_injects_environment_and_dispatch () =
-  let captured = ref [] in
-  let operations =
-    Cli.
-      {
-        default_operations with
-        launch_one =
-          (fun options job ->
-            captured := (options, job) :: !captured;
-            Ok ());
-      }
-  in
-  let getenv values name = List.assoc_opt name values in
-  let run ?(harness = "pi") ?(codex_yolo = "false") suffix backend target worktree =
-    let home = temp_root ("cli-factory-" ^ suffix) in
-    let values =
-      [ ("MONTY_HOME", home);
-        ("MONTY_TERMINAL", backend);
-        ("MONTY_TARGET", target);
-        ("MONTY_WORKTREE", worktree);
-        ("MONTY_HARNESS", harness);
-        ("MONTY_PI_COMMAND", "pi-" ^ suffix ^ " --fixed");
-        ("MONTY_CODEX_COMMAND", "codex-" ^ suffix ^ " --fixed");
-        ("MONTY_CODEX_YOLO", codex_yolo);
-        ("MONTY_WT_COMMAND", "wt-" ^ suffix ^ " --fixed");
-        ("MONTY_BRANCH_PREFIX", "branch-" ^ suffix) ]
-    in
-    let argv =
-      [| "monty"; "launch"; "--repo"; "/tmp/repo"; "--title";
-         ("Task " ^ suffix); "--context"; "/tmp/context.md" |]
-    in
-    assert_bool ("injected CLI dispatch " ^ suffix)
-      (Cli.eval ~getenv:(getenv values) ~operations argv = 0)
-  in
-  run "one" "dry-run" "split" "never";
-  run ~harness:"codex" ~codex_yolo:"true" "two" "ghostty" "window" "always";
-  let settings_home = temp_root "cli-factory-settings" in
-  must (Settings.set_branch_prefix ~home:settings_home "saved-prefix");
-  let settings_values =
-    [ ("MONTY_HOME", settings_home); ("MONTY_TERMINAL", "dry-run") ]
-  in
-  let settings_argv extra =
-    Array.of_list
-      ([ "monty"; "launch"; "--repo"; "/tmp/repo"; "--title";
-         "Settings task"; "--context"; "/tmp/context.md" ]
-      @ extra)
-  in
-  assert_bool "persisted prefix CLI dispatch"
-    (Cli.eval ~getenv:(getenv settings_values) ~operations (settings_argv []) = 0);
-  assert_bool "explicit prefix CLI dispatch"
-    (Cli.eval ~getenv:(getenv settings_values) ~operations
-       (settings_argv [ "--branch-prefix"; "explicit-prefix" ])
-    = 0);
-  match List.rev !captured with
-  | [ (one, _); (two, _); (saved, _); (explicit, _) ] ->
-      assert_contains "factory first home" one.Launcher.home "monty-cli-factory-one";
-      assert_contains "factory second home" two.Launcher.home "monty-cli-factory-two";
-      assert_bool "factory first harness" (one.harness = Harness.Pi);
-      assert_bool "factory second harness" (two.harness = Harness.Codex);
-      assert_equal "factory first pi" "pi-one --fixed" one.harness_command;
-      assert_equal "factory second codex" "codex-two --fixed" two.harness_command;
-      assert_bool "factory first Codex YOLO off" (not one.codex_yolo);
-      assert_bool "factory second Codex YOLO on" two.codex_yolo;
-      assert_equal "factory first wt" "wt-one --fixed" one.wt_command;
-      assert_equal "factory second wt" "wt-two --fixed" two.wt_command;
-      assert_equal "factory first prefix" "branch-one" one.branch_prefix;
-      assert_equal "factory second prefix" "branch-two" two.branch_prefix;
-      assert_equal "factory persisted prefix" "saved-prefix" saved.branch_prefix;
-      assert_equal "factory explicit prefix" "explicit-prefix"
-        explicit.branch_prefix;
-      assert_bool "factory first backend" (one.backend = Terminal.Dry_run);
-      assert_bool "factory second backend" (two.backend = Terminal.Ghostty);
-      assert_bool "factory first target" (one.target = Terminal.Split);
-      assert_bool "factory second target" (two.target = Terminal.Window);
-      assert_bool "factory first worktree" (one.worktree_mode = Launcher.Never);
-      assert_bool "factory second worktree" (two.worktree_mode = Launcher.Always)
-  | _ -> failwith "injected CLI launch operation was not called four times"
-
-let test_cli_continue_dispatch () =
-  let captured = ref [] in
-  let operations =
-    Cli.
-      {
-        default_operations with
-        continue =
-          (fun ~continuation ~home ~harness ~harness_command ~codex_yolo ->
-            captured :=
-              (continuation, home, harness, harness_command, codex_yolo)
-              :: !captured;
-            Ok ());
-      }
-  in
-  let home = temp_root "cli-continue" in
-  let getenv name =
-    match name with
-    | "MONTY_HOME" -> Some home
-    | "MONTY_HARNESS" -> Some "pi"
-    | "MONTY_PI_COMMAND" -> Some "pi --fixed"
-    | "MONTY_CODEX_COMMAND" -> Some "codex --fixed"
-    | _ -> None
-  in
-  let run args =
-    Cli.eval ~getenv ~operations (Array.of_list ("monty" :: args))
-  in
-  assert_bool "continue picker dispatch" (run [ "continue" ] = 0);
-  assert_bool "continue last dispatch"
-    (run [ "continue"; "--last"; "--harness"; "codex"; "--codex-yolo" ]
-    = 0);
-  assert_bool "continue exact dispatch"
-    (run [ "continue"; "design notes" ] = 0);
-  assert_bool "continue rejects last plus exact session"
-    (run [ "continue"; "design notes"; "--last" ] = 1);
-  match List.rev !captured with
-  | [ (Head_butler.Picker, picker_home, Harness.Pi, picker_command, false);
-      (Head_butler.Last, last_home, Harness.Codex, last_command, true);
-      (Head_butler.Session session, session_home, Harness.Pi, session_command, false)
-    ] ->
-      assert_equal "continue picker home" home picker_home;
-      assert_equal "continue last home" home last_home;
-      assert_equal "continue session home" home session_home;
-      assert_equal "continue picker command" "pi --fixed" picker_command;
-      assert_equal "continue last command" "codex --fixed" last_command;
-      assert_equal "continue session command" "pi --fixed" session_command;
-      assert_equal "continue exact selector" "design notes" session
-  | _ -> failwith "continue CLI did not dispatch the expected native selections"
 
 let test_head_butler_continuation_commands () =
   let command harness continuation =
@@ -939,6 +782,8 @@ let test_head_butler_continuation_commands () =
     "model_reasoning_effort=\"xhigh\"";
   assert_contains "continued Codex Vim mode" codex_picker
     "tui.vim_mode_default=true";
+  assert_contains "continued Codex command-local trust" codex_picker
+    (String.trim (Codex_trust.argument "/monty home"));
   assert_contains "continued Codex YOLO" codex_picker
     "--dangerously-bypass-approvals-and-sandbox";
   let codex_safe =
@@ -971,7 +816,7 @@ let test_codex_harness_command () =
         monty_command = "monty" }
   in
   let command =
-    Harness_command.build_command ~options
+    Harness_command.build_command ~codex_trusted_paths:[ "/repo" ] ~options
       ~instructions:(Some "/monty/MONTY.md") ~job ~context:job.context
   in
   assert_contains "codex executable and fixed args" command
@@ -979,6 +824,8 @@ let test_codex_harness_command () =
   assert_contains "Codex xhigh reasoning effort" command
     "model_reasoning_effort=\"xhigh\"";
   assert_contains "Codex Vim mode default" command "tui.vim_mode_default=true";
+  assert_contains "Codex command-local trust" command
+    (String.trim (Codex_trust.argument "/repo"));
   assert_contains "codex instruction path" command "/monty/MONTY.md";
   assert_contains "codex context path" command "/monty/context.md";
   assert_contains "codex worker memory" command "/monty/workers/task-1/memory.md";
@@ -986,7 +833,7 @@ let test_codex_harness_command () =
   assert_not_contains "Codex YOLO defaults off" command
     "--dangerously-bypass-approvals-and-sandbox";
   let single_always_script =
-    Harness_command.launch_script_contents ~options ~job ~id:"task-1"
+    Harness_command.launch_script_contents ~codex_trusted_paths:[] ~options ~job ~id:"task-1"
       ~branch:"cto/task-1" ~source_repo:"/repo" ~initial_workdir:"/repo"
       ~home:"/monty" ~context:job.context ~instructions:"/monty/MONTY.md"
       ~worker_dir:"/monty/workers/task-1" ~worktree_mode:"always"
@@ -1007,14 +854,14 @@ let test_codex_harness_command () =
       ~context:"/monty/context.md" ~task_key:"local:local-005" ()
   in
   let multi_command =
-    Harness_command.build_command ~options
+    Harness_command.build_command ~codex_trusted_paths:[] ~options
       ~instructions:(Some "/monty/MONTY.md") ~job:multi_job
       ~context:multi_job.context
   in
   assert_contains "Codex secondary workspace permission" multi_command
     "--add-dir \"$MONTY_WORKSPACE_2\"";
   let never_script =
-    Harness_command.launch_script_contents ~options ~job:multi_job ~id:"task-1"
+    Harness_command.launch_script_contents ~codex_trusted_paths:[] ~options ~job:multi_job ~id:"task-1"
       ~branch:"cto/task-1" ~source_repo:"/repo" ~initial_workdir:"/repo"
       ~home:"/monty" ~context:multi_job.context ~instructions:"/monty/MONTY.md"
       ~worker_dir:"/monty/workers/task-1" ~worktree_mode:"never"
@@ -1025,7 +872,7 @@ let test_codex_harness_command () =
   assert_contains "multi never second workspace" never_script
     "MONTY_WORKSPACE_2='/admin'";
   let always_script =
-    Harness_command.launch_script_contents ~options ~job:multi_job ~id:"task-1"
+    Harness_command.launch_script_contents ~codex_trusted_paths:[] ~options ~job:multi_job ~id:"task-1"
       ~branch:"cto/task-1" ~source_repo:"/repo" ~initial_workdir:"/repo"
       ~home:"/monty" ~context:multi_job.context ~instructions:"/monty/MONTY.md"
       ~worker_dir:"/monty/workers/task-1" ~worktree_mode:"always"
@@ -1043,7 +890,7 @@ let test_codex_harness_command () =
       ~context:"/monty/context.md" ()
   in
   let unlinked_always_script =
-    Harness_command.launch_script_contents ~options ~job:unlinked_multi_job
+    Harness_command.launch_script_contents ~codex_trusted_paths:[] ~options ~job:unlinked_multi_job
       ~id:"task-1" ~branch:"cto/task-1" ~source_repo:"/repo"
       ~initial_workdir:"/repo" ~home:"/monty"
       ~context:unlinked_multi_job.context ~instructions:"/monty/MONTY.md"
@@ -1057,7 +904,7 @@ let test_codex_harness_command () =
     unlinked_always_script
     "ensure-worktree --repo '/admin' --branch 'cto/admin-task-1' --home";
   let yolo_command =
-    Harness_command.build_command
+    Harness_command.build_command ~codex_trusted_paths:[]
       ~options:{ options with codex_yolo = true }
       ~instructions:(Some "/monty/MONTY.md") ~job ~context:job.context
   in
@@ -1072,7 +919,9 @@ let test_codex_harness_command () =
   assert_contains "head-butler Codex xhigh reasoning effort" head_butler
     "model_reasoning_effort=\"xhigh\"";
   assert_contains "head-butler Codex Vim mode default" head_butler
-    "tui.vim_mode_default=true"
+    "tui.vim_mode_default=true";
+  assert_contains "head-butler Codex command-local trust" head_butler
+    (String.trim (Codex_trust.argument "/monty"))
 
 let test_codex_harness_rejects_fork () =
   let options =
@@ -1259,7 +1108,6 @@ let run_named name test =
 let () =
   [ ("slug", test_slug);
     ("shell_quote", test_shell_quote);
-    ("codex_trust_config", test_codex_trust_config);
     ("manifest", test_manifest);
     ("worker_memory_and_resume", test_worker_memory_and_resume);
     ("wt_repo_disambiguation", test_wt_disambiguates_repo_when_branch_name_collides);
@@ -1283,8 +1131,6 @@ let () =
     ("transition_task_key_mismatch", test_transition_task_key_mismatch_is_rejected);
     ("job_symlink_escape", test_job_store_rejects_symlink_escape);
     ("doctor_typed_configuration", test_doctor_typed_checks_and_configuration);
-    ("cli_factory_injection", test_cli_factory_injects_environment_and_dispatch);
-    ("cli_continue_dispatch", test_cli_continue_dispatch);
     ("head_butler_continuation_commands", test_head_butler_continuation_commands);
     ("codex_harness_command", test_codex_harness_command);
     ("codex_harness_rejects_fork", test_codex_harness_rejects_fork);

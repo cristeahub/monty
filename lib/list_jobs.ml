@@ -7,26 +7,7 @@ let run_matches run record =
       || String.equal value record.Job_store.run_dir
       || String.equal value (Filename.basename record.Job_store.run_dir)
 
-let status_label record = if Job_store.is_archived record then "DONE" else "ACTIVE"
-
-let line record =
-  Printf.sprintf "%-16s %-7s %-32s %-24s %s" record.Job_store.id
-    (status_label record)
-    record.Job_store.job.Job.title
-    (Option.value ~default:"<no-branch>" record.Job_store.job.Job.branch)
-    record.Job_store.worker_dir
-
-let compare_records left right =
-  match String.compare left.Job_store.run_dir right.Job_store.run_dir with
-  | 0 -> String.compare left.Job_store.id right.Job_store.id
-  | value -> value
-
-let render records =
-  let records = List.sort compare_records records in
-  let header = Printf.sprintf "%-16s %-7s %-32s %-24s %s" "ID" "STATUS" "TITLE" "BRANCH" "DIR" in
-  String.concat "\n" (header :: List.map line records) ^ "\n"
-
-let task_done task = String.equal (String.lowercase_ascii task.Project_overview.status) "done"
+let task_done task = String.equal (String.lowercase_ascii task.Overview_types.status) "done"
 
 let task_in_scope scope task =
   match scope with
@@ -48,23 +29,23 @@ let task_keys_for_run records run =
 let task_matches_run task_keys task =
   match task_keys with
   | None -> true
-  | Some keys -> List.exists (String.equal task.Project_overview.key) keys
+  | Some keys -> List.exists (String.equal task.Overview_types.key) keys
 
 let print_warnings warnings =
   List.iter (fun warning -> Fmt.epr "monty: warning: %s\n" warning) warnings
 
-let run ~home ~scope ?run ?(sync = true) () =
+let run ~home ~scope ?run ?project ?(sync = true) () =
   let ( let* ) = Result.bind in
   let* sync_warnings =
     if sync then
       Project_overview.sync_jobs_to_local_tasks ~home
-      |> Result.map (fun result -> result.Project_overview.warnings)
+      |> Result.map (fun result -> result.Overview_types.warnings)
     else Ok []
   in
   let* scan = Job_store.scan ~home in
   let task_keys = task_keys_for_run scan.records run in
   let* tasks, inventory_warnings =
-    Project_overview.load_tasks_with_warnings ~home ~all:true ()
+    Project_overview.load_tasks_with_warnings ~home ?project ~all:true ()
   in
   print_warnings
     (List.sort_uniq String.compare (sync_warnings @ scan.warnings @ inventory_warnings));

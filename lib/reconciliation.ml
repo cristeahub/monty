@@ -88,11 +88,9 @@ let fetch_github_tasks ~project { repo; query } =
       |> Result.map List.rev)
 
 let fetch_project_tasks (project : project) =
-  let fetch_source = function
-    | Github_issues source -> fetch_github_tasks ~project source
-  in
   fold_results project.sources ~init:[] ~f:(fun acc source ->
-      fetch_source source |> Result.map (fun tasks -> acc @ tasks))
+      fetch_github_tasks ~project source
+      |> Result.map (fun tasks -> acc @ tasks))
 
 type job_patch = Job_store.record * string
 
@@ -841,91 +839,6 @@ let reserve_launch_task_links_unlocked ~home jobs =
   let* tasks, planned, changed = plan_launch_task_links ~home jobs in
   let* () = if changed then save_local_tasks_unlocked ~home tasks else Ok () in
   Ok planned
-
-let ensure_worker_task_link ~home ~worker_id (job : Job.t) =
-  State_store.with_lock ~home (fun () ->
-      let ( let* ) = Result.bind in
-      let* projects = load_projects ~home in
-      let* job_projects = projects_for_job ~home projects job in
-      let* project =
-        match job_projects with
-        | first :: _ -> Ok first
-        | [] -> Error "a Monty job needs at least one registered workspace"
-      in
-      let* tasks = load_local_tasks ~home in
-      let stable_key = worker_key_for_job ~id:worker_id job in
-      let job_workspaces = task_workspaces_of_job job in
-      match job.task_key with
-      | Some key -> (
-          match Job_store.local_task_id_of_key (Some key) with
-          | Error msg -> Error msg
-          | Ok None -> Error (Printf.sprintf "worker task key must be local:<id>, got %S" key)
-          | Ok (Some id) -> (
-              match find_local_task_by_id tasks id with
-              | None -> Error (Printf.sprintf "linked local Monty task is missing: %s" id)
-              | Some task
-                when not
-                       (List.exists
-                          (fun (project : project) ->
-                            String.equal task.project project.id)
-                          job_projects) ->
-                  Error
-                    (Printf.sprintf
-                       "linked task %s belongs to project %s, which is absent from the worker workspace set"
-                       key task.project)
-              | Some task
-                when task.workspaces <> []
-                     && not
-                          (workspace_sets_equal task.workspaces job_workspaces) ->
-                  Error
-                    (Printf.sprintf
-                       "linked local Monty task %s workspace set does not match the worker"
-                       task.id)
-              | Some task ->
-                  let linked =
-                    { task with
-                      worker_id = Some worker_id;
-                      worker_key = Some stable_key;
-                      workspaces = job_workspaces }
-                  in
-                  let* () =
-                    if linked = task then Ok ()
-                    else
-                      let linked = { linked with updated_at = Some (now_utc ()) } in
-                      save_local_tasks_unlocked ~home
-                        (replace_local_task tasks linked)
-                  in
-                  Ok job))
-      | None -> (
-          match find_tasks_by_worker tasks stable_key with
-          | [ task ] -> Ok { job with Job.task_key = Some (local_task_key task.id) }
-          | [] ->
-              let now = now_utc () in
-              let task =
-                {
-                  id = next_local_id tasks;
-                  project = project.id;
-                  title = job.title;
-                  status = "open";
-                  branch = job.branch;
-                  workspaces = task_workspaces_of_job job;
-                  notes = None;
-                  worker_id = Some worker_id;
-                  worker_key = Some stable_key;
-                  external_key = None;
-                  external_url = None;
-                  external_source = None;
-                  created_at = Some now;
-                  updated_at = Some now;
-                }
-              in
-              let* () = save_local_tasks_unlocked ~home (tasks @ [ task ]) in
-              Ok { job with Job.task_key = Some (local_task_key task.id) }
-          | _ ->
-              Error
-                (Printf.sprintf
-                   "multiple local tasks store worker identity for %S; repair the ambiguity before launch"
-                   worker_id)))
 
 let repair_legacy_task_link ~home worker =
   State_store.with_lock ~home (fun () ->

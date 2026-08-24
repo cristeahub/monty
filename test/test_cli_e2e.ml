@@ -558,7 +558,7 @@ let test_external_terminal_request_runs_without_state_lock () =
       | `List [ _; _ ] -> ()
       | _ -> failwith "nested terminal task mutation did not complete outside the state lock")
 
-let test_codex_launch_trusts_project_before_terminal_request () =
+let test_codex_launch_uses_command_local_trust () =
   with_temp_root "codex-trust" (fun root ->
       let home, log, env = setup_environment root in
       let repo = Filename.concat root "repo" in
@@ -599,13 +599,23 @@ let test_codex_launch_trusts_project_before_terminal_request () =
         run ~root ~env 411 (common @ [ "--terminal"; "ghostty" ])
       in
       require_code 0 launched;
-      let config = Shell.read_file codex_config in
-      require_contains "Codex trusted project table" config
-        (Codex_trust.project_header (Unix.realpath repo));
-      require_contains "Codex trusted project value" config
-        "trust_level = \"trusted\"";
-      require_contains "Codex terminal requested after trust" (Shell.read_file log)
-        "osascript")
+      if Sys.file_exists codex_config then
+        failwith "Codex launch changed the Codex config";
+      let job_file =
+        Filename.concat home
+          ".monty/runs/manual/workers/codex-trusted-worker/job.json"
+      in
+      let launch_script =
+        match
+          Yojson.Safe.from_file job_file
+          |> Yojson.Safe.Util.member "launch_script"
+        with
+        | `String path -> path
+        | _ -> failwith "Codex worker did not record its launch script"
+      in
+      require_contains "Codex command-local trust" (Shell.read_file launch_script)
+        (String.trim (Codex_trust.argument repo));
+      require_contains "Codex terminal requested" (Shell.read_file log) "osascript")
 
 let local_task_status home =
   match
@@ -3554,6 +3564,8 @@ let test_codex_headless_uses_effective_settings_without_ghostty () =
       require_contains "Codex final memory" memory "fake Codex final handoff";
       if count_lines_containing log "/codex exec" <> 4 then
         failwith "single Codex headless chain did not run four Codex phases";
+      if count_lines_containing log "trust_level" <> 4 then
+        failwith "Codex headless phases did not use command-local trust";
       if count_lines_containing log "--sandbox workspace-write" <> 2 then
         failwith "Codex writers did not use workspace-write";
       if count_lines_containing log "--sandbox read-only" <> 2 then
@@ -4407,8 +4419,8 @@ let () =
     ("cli_rejects_state_parent_and_lock_symlinks", test_cli_rejects_state_parent_and_lock_symlinks);
     ( "cli_external_terminal_request_runs_without_state_lock",
       test_external_terminal_request_runs_without_state_lock );
-    ( "cli_codex_launch_trusts_project_before_terminal_request",
-      test_codex_launch_trusts_project_before_terminal_request );
+    ( "cli_codex_launch_uses_command_local_trust",
+      test_codex_launch_uses_command_local_trust );
     ( "cli_lifecycle_faults_recover_from_both_locations",
       test_lifecycle_faults_recover_from_both_locations );
     ( "cli_completion_persists_force_and_never_creates_worktree",

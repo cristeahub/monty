@@ -7,21 +7,10 @@ type check = {
   recovery : string list;
 }
 
-type operations = { find_command : string -> (string, string) result }
-
-let default_operations =
-  {
-    find_command =
-      (fun command ->
-        match Process.command_exists_with_arguments command with
-        | Ok path -> Ok path
-        | Error message -> Error message);
-  }
-
 let level_to_string = function Pass -> "PASS" | Warn -> "WARN" | Fail -> "FAIL"
 
-let check_command operations ~required ~name ~command ~recovery =
-  match operations.find_command command with
+let check_command find_command ~required ~name ~command ~recovery =
+  match find_command command with
   | Ok path -> { name; level = Pass; message = path; recovery = [] }
   | Error message ->
       {
@@ -165,12 +154,12 @@ let state_checks ~home ~wt_command =
         [ { name = "worker state"; level = Pass; message = "records are readable and no recovery is pending"; recovery = [] } ]
       else warning_checks @ identity_checks @ record_checks
 
-let checks ?(operations = default_operations) ~home ~harness ~harness_command ~wt_command ~backend
+let checks ?(find_command = Process.command_exists_with_arguments) ~home ~harness ~harness_command ~wt_command ~backend
     ~worktree_mode () =
   let home = Shell.normalize (Shell.abs_path home) in
   let required =
     [
-      check_command operations ~required:true ~name:(Harness.to_string harness)
+      check_command find_command ~required:true ~name:(Harness.to_string harness)
         ~command:harness_command
         ~recovery:
           [ Printf.sprintf "Install the configured %s executable or pass --%s-command COMMAND."
@@ -183,7 +172,7 @@ let checks ?(operations = default_operations) ~home ~harness ~harness_command ~w
     | Launcher.Always ->
         required
         @ [
-            check_command operations ~required:true ~name:"wt" ~command:wt_command
+            check_command find_command ~required:true ~name:"wt" ~command:wt_command
               ~recovery:[ "Install the configured wt executable or pass --wt-command COMMAND." ];
           ]
   in
@@ -193,17 +182,17 @@ let checks ?(operations = default_operations) ~home ~harness ~harness_command ~w
     | Terminal.Ghostty ->
         required
         @ [
-            check_command operations ~required:true ~name:"ghostty" ~command:"ghostty"
+            check_command find_command ~required:true ~name:"ghostty" ~command:"ghostty"
               ~recovery:[ "Install Ghostty or use --terminal dry-run." ];
-            check_command operations ~required:true ~name:"osascript" ~command:"osascript"
+            check_command find_command ~required:true ~name:"osascript" ~command:"osascript"
               ~recovery:[ "Install osascript or use --terminal dry-run." ];
           ]
   in
   required
   @ [
-      check_command operations ~required:false ~name:"gh" ~command:"gh"
+      check_command find_command ~required:false ~name:"gh" ~command:"gh"
         ~recovery:[ "Install gh to use GitHub issue metadata." ];
-      check_command operations ~required:false ~name:"sdef" ~command:"sdef"
+      check_command find_command ~required:false ~name:"sdef" ~command:"sdef"
         ~recovery:[ "Install sdef to inspect the Ghostty AppleScript dictionary." ];
     ]
   @ state_checks ~home ~wt_command
