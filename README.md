@@ -396,6 +396,11 @@ memory.md
 artifacts/
 ```
 
+Interactive Codex workers also get `codex-session-id` after Codex runs Monty's
+command-local `SessionStart` hook. The plain-text sidecar is durable worker
+memory; the session id never enters `job.json`, and headless Codex runs do not
+write it.
+
 Workers are instructed to write important discoveries, blockers, and handoff notes back to this folder.
 The wt worktrees are treated as ephemeral and can be recreated from the durable workspace array in `job.json`.
 
@@ -405,7 +410,13 @@ Resume a worker by id, branch leaf, branch, or title slug:
 dune exec -- monty resume issue-123
 ```
 
-`resume` reads `job.json`, recreates or reuses every repo-scoped worktree, and opens a new session in the selected harness with the same durable worker memory.
+`resume` reads `job.json`, recreates or reuses every repo-scoped worktree, and reopens the selected harness with the same durable worker memory.
+For an interactive Codex worker, Monty resumes the exact recorded sidecar id
+without `--last` or the original task prompt. A missing sidecar opens Codex's
+cwd-scoped native picker for legacy or headless-only workers. Use `--fresh` to
+start a new Codex conversation with the normal task prompt; the prior sidecar
+is replaced only after the new `SessionStart` hook runs. `open --fresh` is the
+same operation.
 Resume always derives worktree mode from the durable record rather than a current CLI default, so a `never` worker cannot accidentally create an unmanaged worktree.
 Open jobs are found from worker `job.json` files.
 The original `jobs.json` manifest is launch input and a safe batch-retry contract.
@@ -722,6 +733,8 @@ Unsafe legacy records require explicit repair and are never silently migrated.
 Launch-state changes use locked compare-and-update and refuse to overwrite a concurrent completion or reopening transition.
 Persisted launch-script paths are accepted only when the complete script bytes prove ownership or an absent destination remains under an explicitly trusted script root.
 Scripts are published through same-directory atomic replacement so a destination symlink swap cannot redirect the write.
+Interactive Codex session sidecars use the same home lock and atomic file
+replacement while remaining separate from lifecycle `job.json` state.
 
 ## Tests
 

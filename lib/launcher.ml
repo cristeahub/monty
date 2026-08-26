@@ -188,6 +188,7 @@ let prepare_identity ?index options manifest_index job =
     let* state_path = Worker_memory.worker_state ~home:options.home ~id job in
     let* () = State_path.ensure_contained_for_mutation state_path in
     let worker_dir = state_path.State_path.worker_dir in
+    let job = { job with Job.worker_dir = Some worker_dir } in
     let instructions = Worker_memory.instructions_file worker_dir in
     let* script_path = script_path options id in
     Ok
@@ -299,10 +300,11 @@ let script_has_owner_marker (options : options) (prepared : prepared)
           branch_prefix = options.branch_prefix;
           monty_command = options.monty_command }
     in
-    let expected codex_trusted_paths =
+    let expected ?(codex_hook = true) ?(job = prepared.job) codex_mode
+        codex_trusted_paths =
       Harness_command.launch_script_contents ~options:harness_options
-        ~codex_trusted_paths
-        ~job:prepared.job ~id:prepared.id ~branch:prepared.branch
+        ~codex_hook ~codex_mode ~codex_trusted_paths ~job ~id:prepared.id
+        ~branch:prepared.branch
         ~source_repo:prepared.repo ~initial_workdir:prepared.repo
         ~home:options.home ~context:prepared.context
         ~instructions:prepared.instructions
@@ -324,15 +326,110 @@ let script_has_owner_marker (options : options) (prepared : prepared)
         without_lines [ job_file ] expected;
         without_lines [ marker; job_file ] expected ]
     in
+    let decode_generated_shell_quote value =
+      let length = String.length value in
+      if length < 2 || value.[0] <> '\'' || value.[length - 1] <> '\'' then
+        None
+      else
+        let decoded = Buffer.create length in
+        let rec loop index =
+          if index = length - 1 then Some (Buffer.contents decoded)
+          else if value.[index] <> '\'' then (
+            Buffer.add_char decoded value.[index];
+            loop (index + 1))
+          else if
+            index + 4 < length
+            && value.[index + 1] = '\\'
+            && value.[index + 2] = '\''
+            && value.[index + 3] = '\''
+          then (
+            Buffer.add_char decoded '\'';
+            loop (index + 4))
+          else None
+        in
+        loop 1
+    in
+    let exact_template_matches contents template =
+      let sentinel = "monty-codex-session-id-sentinel" in
+      let suffix = Shell.quote sentinel ^ "\n" in
+      if not (String.ends_with ~suffix template) then false
+      else
+        let prefix =
+          String.sub template 0 (String.length template - String.length suffix)
+        in
+        if
+          not
+            (String.starts_with ~prefix contents
+            && String.ends_with ~suffix:"\n" contents)
+        then false
+        else
+          let value =
+            String.sub contents (String.length prefix)
+              (String.length contents - String.length prefix - 1)
+          in
+          match decode_generated_shell_quote value with
+          | None -> false
+          | Some session_id -> (
+              match
+                Codex_session.validate_id ~label:"Codex launch script session id"
+                  session_id
+              with
+              | Error _ -> false
+              | Ok session_id -> String.equal value (Shell.quote session_id))
+    in
     let trusted_paths =
       record.workspaces
       |> List.filter_map (fun (workspace : Job_store.workspace_state) ->
              workspace.worktree)
     in
-    let accepted = variants (expected trusted_paths) @ variants (expected [])
+    let modes =
+      match Codex_session.read record.worker_dir with
+      | Ok (Some session_id) ->
+          [ Codex_session.Fresh; Codex_session.Picker;
+            Codex_session.Exact session_id ]
+      | Ok None | Error _ ->
+          [ Codex_session.Fresh; Codex_session.Picker ]
+    in
+    let accepted =
+      modes
+      |> List.concat_map (fun mode ->
+             variants (expected mode trusted_paths)
+             @ variants (expected mode []))
+    in
+    let legacy_worker_dirs =
+      [ None; Some prepared.worker_dir ]
+      @
+      match State_path.canonicalize options.home with
+      | Error _ -> []
+      | Ok physical_home -> (
+          match
+            State_path.split_relative ~root:physical_home prepared.worker_dir
+          with
+          | None -> []
+          | Some parts ->
+              [ Some
+                  (List.fold_left Filename.concat
+                     (Shell.normalize (Shell.abs_path options.home))
+                     parts) ])
+    in
+    let legacy =
+      legacy_worker_dirs
+      |> List.concat_map (fun worker_dir ->
+             let job = { prepared.job with Job.worker_dir = worker_dir } in
+             variants
+               (expected ~codex_hook:false ~job Codex_session.Fresh
+                  trusted_paths)
+             @ variants
+                 (expected ~codex_hook:false ~job Codex_session.Fresh []))
+    in
+    let sentinel = "monty-codex-session-id-sentinel" in
+    let exact_templates =
+      variants (expected (Codex_session.Exact sentinel) trusted_paths)
+      @ variants (expected (Codex_session.Exact sentinel) [])
     in
     let contents = Shell.read_file path in
-    List.exists (String.equal contents) accepted
+    List.exists (String.equal contents) (accepted @ legacy)
+    || List.exists (exact_template_matches contents) exact_templates
   with Sys_error _ -> false
 
 let trusted_script_destination options path =
@@ -979,7 +1076,8 @@ let reserve_batch ?(reject_requested = false) options prepared =
           let* () = reservation_fault "reserve-after-install" in
           Ok installed)))
 
-let dry_run options (prepared : prepared) =
+let dry_run ?(codex_mode = Codex_session.Fresh) options
+    (prepared : prepared) =
   Fmt.pr "[dry-run] job: %s\n" prepared.job.Job.title;
   Fmt.pr "[dry-run] id: %s\n" prepared.id;
   prepared.workspaces
@@ -1019,10 +1117,20 @@ let dry_run options (prepared : prepared) =
         monty_command = options.monty_command }
   in
   Fmt.pr "[dry-run] harness: %s\n" (Harness.to_string options.harness);
+  (match options.harness with
+  | Harness.Pi -> ()
+  | Codex ->
+      Fmt.pr "[dry-run] Codex session: %s%s\n"
+        (Harness_command.codex_mode_name codex_mode)
+        (match codex_mode with
+        | Codex_session.Exact session_id -> " " ^ session_id
+        | _ -> ""));
   Fmt.pr "[dry-run] command: %s\n"
-    (Harness_command.build_command ~options:harness_options
+    (Harness_command.build_command ~codex_hook:true ~codex_mode
+       ~options:harness_options
        ~codex_trusted_paths:[]
-       ~instructions:(Some prepared.instructions) ~job:prepared.job
+       ~home:options.home ~instructions:(Some prepared.instructions)
+       ~job:prepared.job
        ~context:prepared.context)
 
 let fault checkpoint =
@@ -1190,8 +1298,9 @@ let materialize_workspaces ?expected_statuses options (prepared : prepared) =
   in
   loop [] prepared.workspaces
 
-let begin_request ?(persist_failure = true) ?(write_script = true) options
-    (prepared : prepared) ~expected_statuses =
+let begin_request ?(persist_failure = true) ?(write_script = true)
+    ?(codex_mode = Codex_session.Fresh) options (prepared : prepared)
+    ~expected_statuses =
   let fail message =
     if persist_failure then mark_failed options prepared ~expected_statuses message
     else message
@@ -1215,6 +1324,7 @@ let begin_request ?(persist_failure = true) ?(write_script = true) options
               try
                 ignore
                   (Harness_command.write_launch_script ~path:prepared.script_path
+                     ~codex_mode
                      ~codex_trusted_paths:
                        (workspace_states
                        |> List.filter_map
@@ -1252,8 +1362,9 @@ let begin_request ?(persist_failure = true) ?(write_script = true) options
                   | Error message -> `Failed message
                   | Ok () -> `Ready { workdir; initial_workdir })))
 
-let request_one options (prepared : prepared) ~expected_statuses =
-  match begin_request options prepared ~expected_statuses with
+let request_one ?(codex_mode = Codex_session.Fresh) options
+    (prepared : prepared) ~expected_statuses =
+  match begin_request ~codex_mode options prepared ~expected_statuses with
   | `Failed message -> `Failed message
   | `Ready request -> (
       match fault "launch-after-request-state" with
@@ -1469,8 +1580,8 @@ let script_for_resume options prepared (record : Job_store.record) =
             in
             Ok prepared)
 
-let resume_job ?(validate_open_task = true) ~persisted_worktree_mode options
-    job =
+let resume_job ?(validate_open_task = true) ?(fresh = false)
+    ?(codex_mode = Codex_session.Fresh) ~persisted_worktree_mode options job =
   let* options =
     options_with_persisted_worktree_mode options persisted_worktree_mode
   in
@@ -1494,7 +1605,7 @@ let resume_job ?(validate_open_task = true) ~persisted_worktree_mode options
   in
   match options.backend with
   | Terminal.Dry_run ->
-      dry_run options prepared;
+      dry_run ~codex_mode options prepared;
       Ok ()
   | Terminal.Ghostty ->
       let* record =
@@ -1528,11 +1639,12 @@ let resume_job ?(validate_open_task = true) ~persisted_worktree_mode options
       let* prepared = script_for_resume options prepared record in
       let retry =
         String.concat " "
-          [ Shell.quote options.monty_command; "resume";
-            Shell.quote prepared.id; common_retry_options options ]
+          ([ Shell.quote options.monty_command; "resume" ]
+          @ (if fresh then [ "--fresh" ] else [])
+          @ [ Shell.quote prepared.id; common_retry_options options ])
       in
       let result =
-        match request_one options prepared
+        match request_one ~codex_mode options prepared
                 ~expected_statuses:[ record.Job_store.status ]
         with
         | `Requested ->

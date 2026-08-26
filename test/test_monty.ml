@@ -816,7 +816,9 @@ let test_codex_harness_command () =
         monty_command = "monty" }
   in
   let command =
-    Harness_command.build_command ~codex_trusted_paths:[ "/repo" ] ~options
+    Harness_command.build_command ~codex_hook:true
+      ~codex_mode:Codex_session.Fresh
+      ~codex_trusted_paths:[ "/repo" ] ~options ~home:"/monty"
       ~instructions:(Some "/monty/MONTY.md") ~job ~context:job.context
   in
   assert_contains "codex executable and fixed args" command
@@ -826,14 +828,53 @@ let test_codex_harness_command () =
   assert_contains "Codex Vim mode default" command "tui.vim_mode_default=true";
   assert_contains "Codex command-local trust" command
     (String.trim (Codex_trust.argument "/repo"));
+  assert_contains "Codex command-local SessionStart hook" command
+    "hooks.SessionStart";
+  assert_contains "Codex hook capture command" command
+    "codex-session-capture";
+  assert_contains "Codex hook explicit Monty home" command "/monty";
+  let relative_home_command =
+    Harness_command.build_command ~codex_hook:true
+      ~codex_mode:Codex_session.Fresh ~codex_trusted_paths:[] ~options
+      ~home:"." ~instructions:(Some "/monty/MONTY.md") ~job
+      ~context:job.context
+  in
+  assert_contains "Codex hook resolves relative Monty home"
+    relative_home_command (Unix.realpath ".");
+  assert_contains "Codex hook feature" command "--enable 'hooks'";
+  assert_contains "Codex scoped hook trust bypass" command
+    "--dangerously-bypass-hook-trust";
   assert_contains "codex instruction path" command "/monty/MONTY.md";
   assert_contains "codex context path" command "/monty/context.md";
   assert_contains "codex worker memory" command "/monty/workers/task-1/memory.md";
   assert_not_contains "codex does not use pi file syntax" command "@/monty";
   assert_not_contains "Codex YOLO defaults off" command
     "--dangerously-bypass-approvals-and-sandbox";
+  let picker_command =
+    Harness_command.build_command ~codex_hook:true
+      ~codex_mode:Codex_session.Picker
+      ~codex_trusted_paths:[] ~options ~home:"/monty"
+      ~instructions:(Some "/monty/MONTY.md") ~job ~context:job.context
+  in
+  assert_contains "Codex worker native picker" picker_command " resume -C .";
+  assert_not_contains "Codex picker omits original prompt" picker_command
+    "Read the files below before acting";
+  assert_not_contains "Codex picker never uses last" picker_command "--last";
+  let exact_command =
+    Harness_command.build_command ~codex_hook:true
+      ~codex_mode:(Codex_session.Exact "thread's exact id")
+      ~codex_trusted_paths:[] ~options ~home:"/monty"
+      ~instructions:(Some "/monty/MONTY.md") ~job ~context:job.context
+  in
+  assert_contains "Codex worker exact resume" exact_command
+    (" resume -C . -- " ^ Shell.quote "thread's exact id");
+  assert_not_contains "Codex exact resume omits original prompt" exact_command
+    "Read the files below before acting";
+  assert_not_contains "Codex exact resume never uses last" exact_command "--last";
   let single_always_script =
-    Harness_command.launch_script_contents ~codex_trusted_paths:[] ~options ~job ~id:"task-1"
+    Harness_command.launch_script_contents ~codex_hook:true
+      ~codex_mode:Codex_session.Fresh
+      ~codex_trusted_paths:[] ~options ~job ~id:"task-1"
       ~branch:"cto/task-1" ~source_repo:"/repo" ~initial_workdir:"/repo"
       ~home:"/monty" ~context:job.context ~instructions:"/monty/MONTY.md"
       ~worker_dir:"/monty/workers/task-1" ~worktree_mode:"always"
@@ -854,14 +895,18 @@ let test_codex_harness_command () =
       ~context:"/monty/context.md" ~task_key:"local:local-005" ()
   in
   let multi_command =
-    Harness_command.build_command ~codex_trusted_paths:[] ~options
+    Harness_command.build_command ~codex_hook:true
+      ~codex_mode:Codex_session.Fresh
+      ~codex_trusted_paths:[] ~options ~home:"/monty"
       ~instructions:(Some "/monty/MONTY.md") ~job:multi_job
       ~context:multi_job.context
   in
   assert_contains "Codex secondary workspace permission" multi_command
     "--add-dir \"$MONTY_WORKSPACE_2\"";
   let never_script =
-    Harness_command.launch_script_contents ~codex_trusted_paths:[] ~options ~job:multi_job ~id:"task-1"
+    Harness_command.launch_script_contents ~codex_hook:true
+      ~codex_mode:Codex_session.Fresh
+      ~codex_trusted_paths:[] ~options ~job:multi_job ~id:"task-1"
       ~branch:"cto/task-1" ~source_repo:"/repo" ~initial_workdir:"/repo"
       ~home:"/monty" ~context:multi_job.context ~instructions:"/monty/MONTY.md"
       ~worker_dir:"/monty/workers/task-1" ~worktree_mode:"never"
@@ -872,7 +917,9 @@ let test_codex_harness_command () =
   assert_contains "multi never second workspace" never_script
     "MONTY_WORKSPACE_2='/admin'";
   let always_script =
-    Harness_command.launch_script_contents ~codex_trusted_paths:[] ~options ~job:multi_job ~id:"task-1"
+    Harness_command.launch_script_contents ~codex_hook:true
+      ~codex_mode:Codex_session.Fresh
+      ~codex_trusted_paths:[] ~options ~job:multi_job ~id:"task-1"
       ~branch:"cto/task-1" ~source_repo:"/repo" ~initial_workdir:"/repo"
       ~home:"/monty" ~context:multi_job.context ~instructions:"/monty/MONTY.md"
       ~worker_dir:"/monty/workers/task-1" ~worktree_mode:"always"
@@ -890,7 +937,9 @@ let test_codex_harness_command () =
       ~context:"/monty/context.md" ()
   in
   let unlinked_always_script =
-    Harness_command.launch_script_contents ~codex_trusted_paths:[] ~options ~job:unlinked_multi_job
+    Harness_command.launch_script_contents ~codex_hook:true
+      ~codex_mode:Codex_session.Fresh
+      ~codex_trusted_paths:[] ~options ~job:unlinked_multi_job
       ~id:"task-1" ~branch:"cto/task-1" ~source_repo:"/repo"
       ~initial_workdir:"/repo" ~home:"/monty"
       ~context:unlinked_multi_job.context ~instructions:"/monty/MONTY.md"
@@ -904,9 +953,12 @@ let test_codex_harness_command () =
     unlinked_always_script
     "ensure-worktree --repo '/admin' --branch 'cto/admin-task-1' --home";
   let yolo_command =
-    Harness_command.build_command ~codex_trusted_paths:[]
+    Harness_command.build_command ~codex_hook:true
+      ~codex_mode:Codex_session.Fresh
+      ~codex_trusted_paths:[]
       ~options:{ options with codex_yolo = true }
-      ~instructions:(Some "/monty/MONTY.md") ~job ~context:job.context
+      ~home:"/monty" ~instructions:(Some "/monty/MONTY.md") ~job
+      ~context:job.context
   in
   assert_contains "Codex YOLO flag" yolo_command
     "--dangerously-bypass-approvals-and-sandbox";
