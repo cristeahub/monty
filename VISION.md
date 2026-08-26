@@ -45,7 +45,8 @@ Codex.
 Headless execution is a head-butler-only alternative to terminal workers.
 Monty generates complete arguments for the harness's existing subagent tool and gives every child a Monty-owned repo-scoped worktree rather than requesting a Pi-managed worktree.
 Monty does not need its own Pi extension or a second agent runtime.
-Each task chain uses a fresh implementer, two mutually isolated fresh reviewers in parallel, and a fresh fixer.
+Each task chain uses a pinned agent profile: a fresh implementer, zero or more mutually isolated fresh reviewers in parallel, and an optional fresh fixer.
+The bundled `reviewed` profile preserves the two-reviewer-plus-fixer default, while `solo` provides a single self-validating implementation phase.
 Separate task chains are independent and may run concurrently.
 Reviewers can write their assigned reports outside the worktree but must otherwise remain read-only.
 The chain must not stage, commit, push, post remotely, manage worktrees, or complete the Monty task automatically.

@@ -2,9 +2,11 @@ type t = {
   harness : Harness.t option;
   codex_yolo : bool;
   branch_prefix : string option;
+  agent_profile : string option;
 }
 
-let empty = { harness = None; codex_yolo = false; branch_prefix = None }
+let empty =
+  { harness = None; codex_yolo = false; branch_prefix = None; agent_profile = None }
 let path ~home = Filename.concat (Filename.concat home ".monty") "settings.json"
 
 let parse json =
@@ -31,7 +33,15 @@ let parse json =
     | `String value -> Ok (Some value)
     | _ -> Error "settings field \"branch_prefix\" must be a string"
   in
-  Ok { harness; codex_yolo; branch_prefix }
+  let* agent_profile =
+    match member "agent_profile" json with
+    | `Null -> Ok None
+    | `String value ->
+        State_path.safe_component ~label:"agent profile setting" value
+        |> Result.map Option.some
+    | _ -> Error "settings field \"agent_profile\" must be a string"
+  in
+  Ok { harness; codex_yolo; branch_prefix; agent_profile }
 
 let load ~home =
   let settings_path = path ~home in
@@ -68,7 +78,11 @@ let to_json settings =
       ( "branch_prefix",
         match settings.branch_prefix with
         | None -> `Null
-        | Some branch_prefix -> `String branch_prefix ) ]
+        | Some branch_prefix -> `String branch_prefix );
+      ( "agent_profile",
+        match settings.agent_profile with
+        | None -> `Null
+        | Some agent_profile -> `String agent_profile ) ]
 
 let set_harness ~home harness =
   State_store.with_lock ~home (fun () ->
@@ -90,6 +104,13 @@ let set_branch_prefix ~home branch_prefix =
       let* settings = load ~home in
       State_store.write_json_atomic ~path:(path ~home)
         (to_json { settings with branch_prefix = Some branch_prefix }))
+
+let set_agent_profile ~home agent_profile =
+  State_store.with_lock ~home (fun () ->
+      let ( let* ) = Result.bind in
+      let* settings = load ~home in
+      State_store.write_json_atomic ~path:(path ~home)
+        (to_json { settings with agent_profile = Some agent_profile }))
 
 let effective_harness ~getenv ~home override =
   match override with
@@ -130,6 +151,14 @@ let effective_branch_prefix ~getenv ~home override =
                  | Some value when String.trim value <> "" -> value
                  | _ -> "monty"))
 
+let effective_agent_profile ~home override =
+  match override with
+  | Some agent_profile -> Ok agent_profile
+  | None ->
+      load ~home
+      |> Result.map (fun settings ->
+             Option.value ~default:Agent_profile.default_id settings.agent_profile)
+
 let render settings =
   let harness =
     settings.harness |> Option.value ~default:Harness.Pi |> Harness.to_string
@@ -140,5 +169,7 @@ let render settings =
       "harness       " ^ harness;
       "codex-yolo    " ^ if settings.codex_yolo then "true" else "false";
       "branch-prefix "
-      ^ Option.value ~default:"monty" settings.branch_prefix ]
+      ^ Option.value ~default:"monty" settings.branch_prefix;
+      "agent-profile "
+      ^ Option.value ~default:Agent_profile.default_id settings.agent_profile ]
   ^ "\n"

@@ -31,10 +31,8 @@ Use a short run id such as `2026-06-27-issues` or `run-001`.
 When the user chooses tasks to execute, create one Markdown context file per worker task.
 Each context file should be specific enough that a fresh worker agent can start without reading the whole planning conversation.
 Include the task summary, repo path, issue or PR links, relevant constraints, acceptance criteria, and any important planning notes.
-For implementation jobs that will run in Ghostty, include a `Review loop` section in the context file.
-That section must instruct the worker to run `/review` after the initial implementation and focused validation, verify each concrete finding, fix valid findings, rerun affected tests, and record the review findings plus fixes in worker memory.
-For explicitly headless jobs, use a `Headless review chain` section instead.
-State that Monty's fixed chain supplies one implementer, two independent parallel reviewers, and one fixer, so the implementer must not invoke `/review` or launch subagents itself.
+Do not duplicate interactive review wording or hard-code a headless phase count in task context; the selected agent profile supplies those role instructions.
+Use the default `reviewed` profile unless the user selects another profile for the invocation or manifest job.
 Workers must not post review comments, push, or open PRs unless explicitly approved.
 
 Create `.monty/runs/<run-id>/jobs.json` with this shape:
@@ -163,7 +161,8 @@ synchronously poll, or babysit the run unless the user explicitly asks for
 monitoring. Let the process finish independently and recover its result from the
 durable handoff inbox at the next safe message boundary.
 
-Each chain gets fresh minimal context and runs one implementer, two mutually isolated reviewers in parallel, and one fixer.
+Each chain gets fresh minimal context and follows its pinned agent profile: one implementer, zero or more mutually isolated reviewers in parallel, then an optional fixer.
+The built-in `reviewed` profile retains the one-implementer, two-reviewer, one-fixer default; `solo` runs only the implementer with self-validation.
 Reviewers may write only their separate reports outside the worktree.
 No child may create worktrees, stage, commit, push, open a PR, post remotely, or run `monty done`.
 A successful chain leaves the task open and its worktree intact.

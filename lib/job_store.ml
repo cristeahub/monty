@@ -240,6 +240,14 @@ let parse_job_file ?home path =
     let* persisted_worker_dir = optional_string json "worker_dir" in
     let* prompt = optional_string json "prompt" in
     let* task_key = optional_string json "task_key" in
+    let* agent_profile = optional_string json "agent_profile" in
+    let* agent_profile =
+      match agent_profile with
+      | None -> Ok None
+      | Some value ->
+          State_path.safe_component ~label:"persisted agent profile" value
+          |> Result.map Option.some
+    in
     let* persisted_status = optional_string json "status" in
     let* persisted_run_dir = optional_string json "run_dir" in
     let* worktree_mode = optional_string json "worktree_mode" in
@@ -375,7 +383,7 @@ let parse_job_file ?home path =
     in
     let job =
       Job.make ~id ?branch ~workspaces:job_workspaces ~worker_dir ?prompt
-        ?task_key ~title ~repo ~context ()
+        ?task_key ?agent_profile ~title ~repo ~context ()
     in
     Ok
       {

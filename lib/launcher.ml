@@ -9,6 +9,7 @@ type options = {
   wt_command : string;
   worktree_mode : worktree_mode;
   branch_prefix : string;
+  agent_profile : string;
   fork : string option;
   home : string;
   script_dir : string;
@@ -37,6 +38,7 @@ type prepared = {
   instructions : string;
   script_path : string;
   requested_task_key : string option;
+  profile : Agent_profile.t;
   existing : existing;
 }
 
@@ -127,7 +129,23 @@ let script_path options id =
   if State_path.is_contained ~root:directory path then Ok path
   else Error (Printf.sprintf "unsafe launch script path escapes %s: %s" directory path)
 
-let prepare_identity ?index options manifest_index job =
+let prepare_identity ?index ?profile options manifest_index job =
+  let* profile =
+    match profile with
+    | Some profile -> (
+        match job.Job.agent_profile with
+        | None -> Ok profile
+        | Some selected when String.equal profile.Agent_profile.id selected ->
+            Ok profile
+        | Some selected ->
+            Error
+              (Printf.sprintf
+                 "pinned agent profile %S does not match persisted profile %S"
+                 profile.Agent_profile.id selected))
+    | None ->
+        Agent_profile.find ~home:options.home
+          (Option.value ~default:options.agent_profile job.Job.agent_profile)
+  in
   let context_path = Shell.normalize (Shell.abs_path job.Job.context) in
   let* context = canonical_existing "context" context_path in
   let job_workspaces =
@@ -182,7 +200,11 @@ let prepare_identity ?index options manifest_index job =
         workspaces
     in
     let job =
-      Job.with_workspaces { job with Job.id = Some id; context }
+      Job.with_workspaces
+        { job with
+          Job.id = Some id;
+          context;
+          agent_profile = Some profile.Agent_profile.id }
         resolved_job_workspaces
     in
     let* state_path = Worker_memory.worker_state ~home:options.home ~id job in
@@ -205,6 +227,7 @@ let prepare_identity ?index options manifest_index job =
         instructions;
         script_path;
         requested_task_key = job.Job.task_key;
+        profile;
         existing = New }
 
 let duplicate_error label identity left right =
@@ -566,6 +589,17 @@ let classify_existing options records (prepared : prepared) =
            "existing worker state conflicts with manifest job %d (%S): %s"
            prepared.index prepared.job.Job.title record.path)
   | [ record ] ->
+      let* profile =
+        Agent_profile.load_pinned ~home:options.home ~worker_dir:record.worker_dir
+          record.job.Job.agent_profile
+      in
+      let prepared =
+        { prepared with
+          profile;
+          job =
+            { prepared.job with
+              Job.agent_profile = Some profile.Agent_profile.id } }
+      in
       let* () =
         if String.equal record.worktree_mode (worktree_mode_string options) then
           Ok ()
@@ -673,7 +707,10 @@ let rec remove_staging_tree path =
   with Unix.Unix_error ((Unix.ENOENT | Unix.ENOTDIR), _, _) -> ()
 
 let validate_staged_reservation options (item : prepared) staging_dir =
-  let expected_entries = [ "MONTY.md"; "artifacts"; "job.json"; "memory.md" ] in
+  let expected_entries =
+    [ "MONTY.md"; Agent_profile.snapshot_name; "artifacts"; "job.json";
+      "memory.md" ]
+  in
   let* entries =
     try Ok (Sys.readdir staging_dir |> Array.to_list |> List.sort String.compare)
     with Sys_error msg -> Error msg
@@ -703,6 +740,7 @@ let validate_staged_reservation options (item : prepared) staging_dir =
     let* () = regular "MONTY.md" in
     let* () = regular "memory.md" in
     let* () = regular "job.json" in
+    let* () = regular Agent_profile.snapshot_name in
     let artifacts = Filename.concat staging_dir "artifacts" in
     let* () =
       try
@@ -726,7 +764,12 @@ let validate_staged_reservation options (item : prepared) staging_dir =
     let* record =
       Job_store.parse_job_file (Filename.concat staging_dir "job.json")
     in
-    if not (same_record item record) then
+    let* snapshot = Agent_profile.load_snapshot staging_dir in
+    if snapshot <> item.profile then
+      Error "staged agent profile snapshot does not match the prepared launch"
+    else if record.job.Job.agent_profile <> Some item.profile.id then
+      Error "staged job agent profile does not match its snapshot"
+    else if not (same_record item record) then
       let workspace_text workspaces =
         workspaces
         |> List.map (fun (repo, branch) -> repo ^ "@" ^ branch)
@@ -799,6 +842,8 @@ let fsync_staged_reservation staging_dir =
       (fun name ->
         State_store.fsync_regular_file (Filename.concat staging_dir name))
       [ "MONTY.md"; "memory.md"; "job.json" ];
+    State_store.fsync_regular_file
+      (Filename.concat staging_dir Agent_profile.snapshot_name);
     State_store.fsync_directory (Filename.concat staging_dir "artifacts");
     State_store.fsync_directory staging_dir;
     State_store.fsync_directory (Filename.dirname staging_dir);
@@ -824,8 +869,10 @@ let stage_reservation options (item : prepared) =
         try
           Worker_memory.write_instructions ~destination_dir:staging_dir
             ~worker_dir:item.worker_dir ~id:item.id ~job:item.job
+            ~profile:item.profile
             ~branch:item.branch ~repo:item.repo ~context:item.context
             ~worktree_mode:(worktree_mode_string options) ();
+          let* () = Agent_profile.write_snapshot ~worker_dir:staging_dir item.profile in
           State_store.write_json_atomic
             ~path:(Filename.concat staging_dir "job.json")
             (Worker_memory.job_json ~status:"prepared"
@@ -1080,6 +1127,9 @@ let dry_run ?(codex_mode = Codex_session.Fresh) options
     (prepared : prepared) =
   Fmt.pr "[dry-run] job: %s\n" prepared.job.Job.title;
   Fmt.pr "[dry-run] id: %s\n" prepared.id;
+  Fmt.pr "[dry-run] agent profile: %s\n" prepared.profile.id;
+  Fmt.pr "[dry-run] agent stages: %s\n"
+    (Agent_profile.stage_summary prepared.profile);
   prepared.workspaces
   |> List.iteri (fun index (workspace : prepared_workspace) ->
          Fmt.pr "[dry-run] workspace %d repo: %s\n" (index + 1) workspace.repo;
@@ -1388,6 +1438,7 @@ let common_retry_options options =
        "--target"; Terminal.target_to_string options.target;
        "--worktree"; worktree_mode_string options;
        "--branch-prefix"; Shell.quote options.branch_prefix;
+       "--agent-profile"; Shell.quote options.agent_profile;
        "--harness"; Harness.to_string options.harness;
        (match options.harness with Harness.Pi -> "--pi-command" | Harness.Codex -> "--codex-command");
        Shell.quote options.harness_command;
@@ -1581,12 +1632,13 @@ let script_for_resume options prepared (record : Job_store.record) =
             Ok prepared)
 
 let resume_job ?(validate_open_task = true) ?(fresh = false)
-    ?(codex_mode = Codex_session.Fresh) ~persisted_worktree_mode options job =
+    ?(codex_mode = Codex_session.Fresh) ~persisted_worktree_mode ~profile options
+    job =
   let* options =
     options_with_persisted_worktree_mode options persisted_worktree_mode
   in
   let* () = check_dependencies options in
-  let* prepared = prepare_identity options 1 job in
+  let* prepared = prepare_identity ~profile options 1 job in
   let* prepared =
     match (validate_open_task, prepared.job.Job.task_key) with
     | true, Some _ ->

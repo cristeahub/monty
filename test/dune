@@ -1,7 +1,8 @@
 (test
  (name test_monty)
  (modules test_monty)
- (libraries monty unix yojson))
+ (libraries monty unix yojson)
+ (deps (source_tree ../agent-profiles)))
 
 (test
  (name test_cli_e2e)

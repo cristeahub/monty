@@ -51,6 +51,60 @@ let executable =
 
 let read_file path = if Sys.file_exists path then Shell.read_file path else ""
 
+let reviewed_profile =
+  Agent_profile.
+    { id = "reviewed";
+      description = "test reviewed profile";
+      interactive = "Run /review.";
+      implementation = "Implement and validate the task.";
+      reviews =
+        [ { id = "correctness";
+            title = "Correctness review";
+            instructions = "Review correctness." };
+          { id = "quality";
+            title = "Quality and tests review";
+            instructions = "Review quality and tests." } ];
+      fix = Some "Verify findings and fix valid issues." }
+
+let solo_profile =
+  Agent_profile.
+    { id = "solo";
+      description = "test solo profile";
+      interactive = "Self-validate the task.";
+      implementation = "Implement, self-validate, and report the task.";
+      reviews = [];
+      fix = None }
+
+let install_profile home (profile : Agent_profile.t) =
+  let directory = Filename.concat (Filename.concat home "agent-profiles") profile.id in
+  Shell.ensure_dir directory;
+  let instruction name contents =
+    Shell.write_file (Filename.concat directory name) contents;
+    `String name
+  in
+  let reviews =
+    profile.reviews
+    |> List.map (fun (review : Agent_profile.review) ->
+           let name = review.id ^ ".md" in
+           `Assoc
+             [ ("id", `String review.id); ("title", `String review.title);
+               ("instructions", instruction name review.instructions) ])
+  in
+  Yojson.Safe.to_file (Filename.concat directory "profile.json")
+    (`Assoc
+      [ ("schema", `String Agent_profile.schema); ("id", `String profile.id);
+        ("description", `String profile.description);
+        ("interactive", instruction "interactive.md" profile.interactive);
+        ( "headless",
+          `Assoc
+            [ ("implementation",
+               instruction "implementation.md" profile.implementation);
+              ("reviews", `List reviews);
+              ( "fix",
+                match profile.fix with
+                | None -> `Null
+                | Some fix -> instruction "fix.md" fix ) ] ) ])
+
 let replace_env base overrides =
   let overridden key =
     List.exists (fun (name, _) -> String.equal key name) overrides
@@ -132,6 +186,8 @@ let setup_environment root =
   let fake_bin = Filename.concat root "fake-bin" in
   let log = Filename.concat root "fake-tools.log" in
   Shell.ensure_dir fake_bin;
+  install_profile home reviewed_profile;
+  install_profile home solo_profile;
   List.iter
     (fun name ->
       let path = Filename.concat fake_bin name in
@@ -234,7 +290,7 @@ let write_manifest path jobs =
   Shell.ensure_dir (Filename.dirname path);
   Yojson.Safe.to_file path (`Assoc [ ("jobs", `List jobs) ])
 
-let manifest_job ?id ?branch ?task_key ~title ~repo ~context () =
+let manifest_job ?id ?branch ?task_key ?agent_profile ~title ~repo ~context () =
   `Assoc
     ([ ("title", `String title); ("repo", `String repo);
        ("context", `String context) ]
@@ -245,7 +301,11 @@ let manifest_job ?id ?branch ?task_key ~title ~repo ~context () =
     @
     (match task_key with
     | None -> []
-    | Some value -> [ ("task_key", `String value) ]))
+    | Some value -> [ ("task_key", `String value) ])
+    @
+    match agent_profile with
+    | None -> []
+    | Some value -> [ ("agent_profile", `String value) ])
 
 let count_lines_containing path needle =
   read_file path |> String.split_on_char '\n'
@@ -868,9 +928,10 @@ let install_codex_exec ~root ~log =
          "    ;;";
          "  final)";
          "    root=$(dirname \"$output\")";
-         "    test -f \"$root/implementation.md\"";
-         "    test -f \"$root/reviews/correctness.md\"";
-         "    test -f \"$root/reviews/quality.md\"";
+         "    if [ -f \"$root/implementation.md\" ]; then";
+         "      test -f \"$root/reviews/correctness.md\"";
+         "      test -f \"$root/reviews/quality.md\"";
+         "    fi";
          "    ;;";
          "esac";
          "printf 'fake Codex %s handoff\\n' \"$phase\" > \"$output\"";
@@ -3466,6 +3527,7 @@ let test_headless_prepare_begin_and_resume () =
             wt_command = Filename.concat root "fake-bin/wt";
             worktree_mode = Always;
             branch_prefix = "monty";
+            agent_profile = "reviewed";
             fork = None;
             home;
             script_dir = Home.runtime_script_dir ~home ();
@@ -3726,6 +3788,201 @@ let test_headless_prepare_begin_and_resume () =
       then failwith "headless execution completed a local task automatically";
       if string_contains (read_file log) "osascript" then
         failwith "headless begin or resume opened Ghostty")
+
+let test_agent_profiles_selection_snapshot_and_solo () =
+  with_temp_root "agent-profiles" (fun root ->
+      let home, log, env = setup_environment root in
+      let repo = Filename.concat root "repo" in
+      let context = Filename.concat root "context.md" in
+      let mixed_manifest =
+        Filename.concat home ".monty/runs/run-profiles/jobs.json"
+      in
+      let solo_manifest =
+        Filename.concat home ".monty/runs/run-solo-codex/jobs.json"
+      in
+      init_git_repo repo;
+      add_project ~root ~home ~env repo;
+      install_create_wt ~root ~log;
+      Shell.write_file context "# Agent profile task\n";
+      let listed =
+        run ~root ~env 1970 [ "agent-profiles"; "list"; "--home"; home ]
+      in
+      require_code 0 listed;
+      require_contains "profile list reviewed" listed.stdout "reviewed";
+      require_contains "profile list solo" listed.stdout "solo";
+      let shown =
+        run ~root ~env 1971
+          [ "agent-profiles"; "show"; "solo"; "--home"; home ]
+      in
+      require_code 0 shown;
+      require_contains "profile show schema" shown.stdout
+        Agent_profile.snapshot_schema;
+      let selected =
+        run ~root ~env 1972
+          [ "settings"; "set"; "agent-profile"; "solo"; "--home"; home ]
+      in
+      require_code 0 selected;
+      write_manifest mixed_manifest
+        [ manifest_job ~id:"profile-reviewed" ~branch:"cto/profile-reviewed"
+            ~title:"Profile reviewed" ~repo ~context ();
+          manifest_job ~id:"profile-solo" ~branch:"cto/profile-solo"
+            ~agent_profile:"solo" ~title:"Profile solo" ~repo ~context ();
+          manifest_job ~id:"profile-legacy" ~branch:"cto/profile-legacy"
+            ~agent_profile:"reviewed" ~title:"Profile legacy" ~repo ~context () ];
+      let dry =
+        run ~root ~env 1973
+          [ "headless"; "prepare-many"; "--dry-run"; "--manifest";
+            mixed_manifest; "--agent-profile"; "reviewed"; "--home"; home ]
+      in
+      require_code 0 dry;
+      let jobs =
+        Yojson.Safe.Util.(
+          Yojson.Safe.from_string dry.stdout |> member "jobs" |> to_list)
+      in
+      let profile id =
+        jobs
+        |> List.find (fun json ->
+               Yojson.Safe.Util.(json |> member "id" |> to_string) = id)
+        |> fun json ->
+        Yojson.Safe.Util.(json |> member "agent_profile" |> to_string)
+      in
+      if profile "profile-reviewed" <> "reviewed" then
+        failwith "CLI agent profile override did not beat the persisted setting";
+      if profile "profile-solo" <> "solo" then
+        failwith "manifest agent profile did not beat the CLI override";
+      let prepared =
+        run ~root ~env 1974
+          [ "headless"; "prepare-many"; "--manifest"; mixed_manifest;
+            "--agent-profile"; "reviewed"; "--home"; home ]
+      in
+      require_code 0 prepared;
+      let worker_dir id =
+        Filename.concat home (".monty/runs/run-profiles/workers/" ^ id)
+      in
+      List.iter
+        (fun (id, expected) ->
+          let directory = worker_dir id in
+          let job = Yojson.Safe.from_file (Filename.concat directory "job.json") in
+          if Yojson.Safe.Util.(job |> member "agent_profile" |> to_string) <> expected
+          then failf "worker %s did not persist profile %s" id expected;
+          let snapshot = Agent_profile.load_snapshot directory in
+          match snapshot with
+          | Ok profile when profile.id = expected -> ()
+          | Ok profile ->
+              failf "worker %s pinned profile %s instead of %s" id profile.id expected
+          | Error message -> failwith message)
+        [ ("profile-reviewed", "reviewed"); ("profile-solo", "solo") ];
+      require_contains "reviewed interactive profile"
+        (read_file (Filename.concat (worker_dir "profile-reviewed") "MONTY.md"))
+        reviewed_profile.interactive;
+      require_contains "solo interactive profile"
+        (read_file (Filename.concat (worker_dir "profile-solo") "MONTY.md"))
+        solo_profile.interactive;
+      let legacy_dir = worker_dir "profile-legacy" in
+      let legacy_job_path = Filename.concat legacy_dir "job.json" in
+      let legacy_job = Yojson.Safe.from_file legacy_job_path in
+      let legacy_job =
+        match legacy_job with
+        | `Assoc fields ->
+            `Assoc (List.remove_assoc "agent_profile" fields)
+        | _ -> failwith "legacy job fixture was not an object"
+      in
+      Yojson.Safe.to_file legacy_job_path legacy_job;
+      Unix.unlink (Agent_profile.snapshot_path legacy_dir);
+      let set_solo =
+        run ~root ~env 1975
+          [ "settings"; "set"; "agent-profile"; "solo"; "--home"; home ]
+      in
+      require_code 0 set_solo;
+      let reviewed_begin =
+        run ~root ~env 1976
+          [ "headless"; "begin"; "profile-reviewed"; "--home"; home ]
+      in
+      require_code 0 reviewed_begin;
+      let reviewed_chain =
+        Yojson.Safe.Util.(
+          Yojson.Safe.from_string reviewed_begin.stdout |> member "harness_call"
+          |> member "arguments" |> member "chain" |> to_list)
+      in
+      if List.length reviewed_chain <> 3 then
+        failwith "reviewed worker did not resume with its pinned 1-2-1 profile";
+      let legacy_begin =
+        run ~root ~env 19765
+          [ "headless"; "begin"; "profile-legacy"; "--home"; home ]
+      in
+      require_code 0 legacy_begin;
+      let legacy_chain =
+        Yojson.Safe.Util.(
+          Yojson.Safe.from_string legacy_begin.stdout |> member "harness_call"
+          |> member "arguments" |> member "chain" |> to_list)
+      in
+      if List.length legacy_chain <> 3 then
+        failwith "legacy worker without profile metadata did not use reviewed";
+      let set_reviewed =
+        run ~root ~env 1977
+          [ "settings"; "set"; "agent-profile"; "reviewed"; "--home"; home ]
+      in
+      require_code 0 set_reviewed;
+      let solo_begin =
+        run ~root ~env 1978
+          [ "headless"; "begin"; "profile-solo"; "--home"; home ]
+      in
+      require_code 0 solo_begin;
+      let solo_chain =
+        Yojson.Safe.Util.(
+          Yojson.Safe.from_string solo_begin.stdout |> member "harness_call"
+          |> member "arguments" |> member "chain" |> to_list)
+      in
+      if List.length solo_chain <> 1 then
+        failwith "solo worker did not resume with its pinned single phase";
+      if
+        Yojson.Safe.Util.(List.hd solo_chain |> member "output" |> to_string)
+        |> Filename.basename <> "final.md"
+      then failwith "solo Pi phase did not write the final handoff artifact";
+      install_codex_exec ~root ~log;
+      let set_codex =
+        run ~root ~env 1979
+          [ "settings"; "set"; "harness"; "codex"; "--home"; home ]
+      in
+      require_code 0 set_codex;
+      let set_solo =
+        run ~root ~env 1980
+          [ "settings"; "set"; "agent-profile"; "solo"; "--home"; home ]
+      in
+      require_code 0 set_solo;
+      write_manifest solo_manifest
+        [ manifest_job ~id:"solo-codex" ~branch:"cto/solo-codex"
+            ~title:"Solo Codex" ~repo ~context () ];
+      let prepared_solo =
+        run ~root ~env 1981
+          [ "headless"; "prepare-many"; "--manifest"; solo_manifest;
+            "--home"; home ]
+      in
+      require_code 0 prepared_solo;
+      let before = count_lines_containing log "/codex exec" in
+      let ran =
+        run ~root ~env 1982
+          [ "headless"; "run"; "solo-codex"; "--home"; home ]
+      in
+      require_code 0 ran;
+      if count_lines_containing log "/codex exec" - before <> 1 then
+        failwith "solo Codex profile did not run exactly one phase";
+      let result = Yojson.Safe.from_string ran.stdout in
+      if Yojson.Safe.Util.(result |> member "agent_profile" |> to_string) <> "solo"
+      then failwith "solo Codex result omitted its pinned profile";
+      let artifacts =
+        Yojson.Safe.Util.(result |> member "artifact_dir" |> to_string)
+      in
+      if not (Sys.file_exists (Filename.concat artifacts "final.md")) then
+        failwith "solo Codex run omitted its final handoff";
+      if Sys.file_exists (Filename.concat artifacts "reviews") then
+        failwith "solo Codex run created reviewer artifacts";
+      let handoff =
+        Yojson.Safe.Util.(result |> member "handoff" |> to_string)
+        |> Yojson.Safe.from_file
+      in
+      if Yojson.Safe.Util.(handoff |> member "review" |> member "summary") <> `Null
+      then failwith "solo Codex handoff claimed reviews occurred")
 
 let test_codex_headless_uses_effective_settings_without_ghostty () =
   with_temp_root "headless-codex" (fun root ->
@@ -4754,6 +5011,8 @@ let () =
       test_multi_workspace_sonnet_task_lifecycle );
     ( "cli_headless_prepare_begin_and_resume",
       test_headless_prepare_begin_and_resume );
+    ( "cli_agent_profiles_selection_snapshot_and_solo",
+      test_agent_profiles_selection_snapshot_and_solo );
     ( "cli_codex_headless_uses_effective_settings_without_ghostty",
       test_codex_headless_uses_effective_settings_without_ghostty );
     ( "cli_run_handoff_publish_delivery_follow_up_and_lifecycle_race",

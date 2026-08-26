@@ -15,6 +15,7 @@ type prepared_job = {
   workspaces : Job_store.workspace_state list;
   worker_dir : string;
   status : string;
+  profile : Agent_profile.t;
 }
 
 type dispatch = {
@@ -28,14 +29,20 @@ type dispatch = {
   instructions : string;
   context : string;
   home : string;
+  profile : Agent_profile.t;
+}
+
+type review_path = {
+  review : Agent_profile.review;
+  output : string;
+  alias : string;
 }
 
 type attempt_paths = {
   id : string;
   root : string;
   implementation : string;
-  correctness : string;
-  quality : string;
+  reviews : review_path list;
   final : string;
   prompts : string;
   events : string;
@@ -56,13 +63,15 @@ type codex_inputs = {
 
 let prepared_job_json (job : prepared_job) =
   `Assoc
-    [ ("id", `String job.id);
-      ("title", `String job.title);
-      ("branch", `String job.branch);
-      ("worktree", Option.fold ~none:`Null ~some:(fun path -> `String path) job.worktree);
-      ("workspaces", `List (List.map Job_store.json_of_workspace job.workspaces));
-      ("worker_dir", `String job.worker_dir);
-      ("status", `String job.status) ]
+    ([ ("id", `String job.id);
+       ("title", `String job.title);
+       ("branch", `String job.branch);
+       ("worktree", Option.fold ~none:`Null ~some:(fun path -> `String path) job.worktree);
+       ("workspaces", `List (List.map Job_store.json_of_workspace job.workspaces));
+       ("worker_dir", `String job.worker_dir);
+       ("status", `String job.status) ]
+    @ [ ("agent_profile", `String job.profile.id);
+        ("stages", `String (Agent_profile.stage_summary job.profile)) ])
 
 let prepare_json ~harness ~codex_yolo jobs =
   `Assoc
@@ -75,18 +84,35 @@ let fresh_attempt_id () =
   let micros = Int64.of_float (Unix.gettimeofday () *. 1_000_000.) in
   Printf.sprintf "attempt-%Ld-%d" micros (Unix.getpid ())
 
+let output_alias id =
+  match id with
+  | "correctness" -> "correctnessReview"
+  | "quality" -> "qualityReview"
+  | id ->
+      let encoded =
+        id |> String.to_seq
+        |> Seq.map (fun char -> Printf.sprintf "%02x" (Char.code char))
+        |> List.of_seq |> String.concat ""
+      in
+      "review" ^ encoded
+
 let attempt_paths (dispatch : dispatch) attempt_id =
   let root =
     Filename.concat dispatch.worker_dir
       (Filename.concat "artifacts" (Filename.concat "headless" attempt_id))
   in
-  let reviews = Filename.concat root "reviews" in
+  let reviews_dir = Filename.concat root "reviews" in
   {
     id = attempt_id;
     root;
     implementation = Filename.concat root "implementation.md";
-    correctness = Filename.concat reviews "correctness.md";
-    quality = Filename.concat reviews "quality.md";
+    reviews =
+      List.map
+        (fun (review : Agent_profile.review) ->
+          { review;
+            output = Filename.concat reviews_dir (review.id ^ ".md");
+            alias = output_alias review.id })
+        dispatch.profile.reviews;
     final = Filename.concat root "final.md";
     prompts = Filename.concat root "prompts";
     events = Filename.concat root "events";
@@ -100,10 +126,12 @@ let ensure_attempt_directories (dispatch : dispatch) (paths : attempt_paths) =
       Filename.concat (Filename.concat dispatch.worker_dir "artifacts")
         "headless";
       paths.root;
-      Filename.dirname paths.correctness;
       paths.prompts;
       paths.events;
       paths.logs ]
+    @
+    (if paths.reviews = [] then []
+     else [ Filename.concat paths.root "reviews" ])
   in
   List.fold_left
     (fun result directory ->
@@ -114,11 +142,12 @@ let ensure_attempt_directories (dispatch : dispatch) (paths : attempt_paths) =
 
 let attempt_descriptor_json (dispatch : dispatch) (paths : attempt_paths) source =
   `Assoc
-    [ ("schema", `String attempt_schema);
-      ("attempt_id", `String paths.id);
-      ("worker_id", `String dispatch.id);
-      ("source", `String source);
-      ("created_at", `String (Worker_memory.now_utc ())) ]
+    ([ ("schema", `String attempt_schema);
+       ("attempt_id", `String paths.id);
+       ("worker_id", `String dispatch.id);
+       ("source", `String source);
+       ("created_at", `String (Worker_memory.now_utc ())) ]
+    @ [ ("agent_profile", `String dispatch.profile.id) ])
 
 let prepare_attempt (plan : begin_plan) (dispatch : dispatch)
     (paths : attempt_paths) source =
@@ -151,6 +180,7 @@ let prepare_attempt (plan : begin_plan) (dispatch : dispatch)
 let mutation_prohibitions =
   String.concat "\n"
     [ "Do not run monty done.";
+      "Do not invoke /review or launch subagents.";
       "Do not create, switch, or remove worktrees.";
       "Do not modify job.json or Monty task, settings, or project state.";
       "Do not stage or commit changes.";
@@ -170,20 +200,18 @@ let implementation_task (dispatch : dispatch) =
       "Read only the supplied Monty instructions and task context before inspecting the repository.";
       "Use the absolute MONTY_JOB_FILE path in the instructions to read the persisted workspace map; its workspaces array is authoritative.";
       "You are the only writer in this phase.";
-      "Implement the requested scope completely and follow repository-local instructions.";
-      "Do not invoke /review or spawn subagents; two independent reviewers run after this phase.";
-      "Run relevant non-destructive validation and self-review the resulting diff.";
+      dispatch.profile.implementation;
       Printf.sprintf "Append important implementation discoveries and handoff notes to %s."
         (Filename.concat dispatch.worker_dir "memory.md");
       mutation_prohibitions;
       "Finish with a compact handoff containing changed files, validation commands and results, unresolved risks, and a concise diff summary." ]
 
-let reviewer_task (dispatch : dispatch) focus =
+let reviewer_task (dispatch : dispatch) (review : Agent_profile.review) =
   String.concat "\n\n"
     [ Printf.sprintf "Independently review Monty worker %s: %s." dispatch.id
         dispatch.title;
       String.concat "\n" Reviewer_prompt.review_preamble;
-      focus;
+      review.instructions;
       Reviewer_prompt.read_only_worktree_rule;
       "Use shell commands only for read-only inspection and non-mutating validation.";
       mutation_prohibitions;
@@ -191,27 +219,28 @@ let reviewer_task (dispatch : dispatch) focus =
       "{previous}";
       String.concat "\n" Reviewer_prompt.review_output_requirements ]
 
-let fixer_task (dispatch : dispatch) =
+let fixer_task (dispatch : dispatch) (paths : review_path list) =
+  let reports =
+    paths
+    |> List.concat_map (fun path ->
+           [ path.review.title ^ ":"; "{outputs." ^ path.alias ^ "}" ])
+  in
   String.concat "\n\n"
-    [ Printf.sprintf "Finalize Monty worker %s: %s." dispatch.id dispatch.title;
-      "Read the supplied task context, inspect every supplied worktree, and review both independent reports below.";
+    ([ Printf.sprintf "Finalize Monty worker %s: %s." dispatch.id dispatch.title;
+      "Read the supplied task context, inspect every supplied worktree, and review every independent report below.";
       "Use the absolute MONTY_JOB_FILE path in the Monty instructions to resolve every persisted workspace path.";
       "You are the only writer in this phase.";
-      "Verify every finding against the code and requirements. Fix valid findings without widening scope and explicitly reject invalid findings.";
-      "Rerun affected validation plus any broader checks required by the repository.";
+      Option.value ~default:"" dispatch.profile.fix;
       Printf.sprintf "Append the verified findings, fixes, validation, and final handoff to %s."
         (Filename.concat dispatch.worker_dir "memory.md");
-      mutation_prohibitions;
-      "Correctness review:";
-      "{outputs.correctnessReview}";
-      "Quality and tests review:";
-      "{outputs.qualityReview}";
-      "Finish with changed files, accepted and rejected findings, validation commands and results, residual risks, and git status confirming nothing is staged." ]
+      mutation_prohibitions ]
+    @ reports
+    @ [ "Finish with changed files, accepted and rejected findings, validation commands and results, residual risks, and git status confirming nothing is staged." ])
 
 let reads_json paths = `List (List.map (fun path -> `String path) paths)
 
 let acceptance_reason =
-  "Monty's explicit 1-2-1 reviewers and fixer provide the review gate."
+  "Monty's selected agent profile explicitly defines the validation stages."
 
 let child_json ~phase ~agent ~label ~as_name ~task ~cwd ~reads ~output =
   let fields =
@@ -234,48 +263,48 @@ let child_json ~phase ~agent ~label ~as_name ~task ~cwd ~reads ~output =
 
 let harness_arguments_json (dispatch : dispatch) attempt_id =
   let paths = attempt_paths dispatch attempt_id in
+  let implementation_is_final = dispatch.profile.fix = None in
   let implementation =
     child_json ~phase:(Some "Implementation") ~agent:"worker"
-      ~label:(dispatch.title ^ " implementation") ~as_name:"implementation"
+      ~label:(dispatch.title ^ " implementation")
+      ~as_name:(if implementation_is_final then "final" else "implementation")
       ~task:(implementation_task dispatch) ~cwd:dispatch.worktree
       ~reads:[ dispatch.instructions; dispatch.context ]
-      ~output:paths.implementation
+      ~output:(if implementation_is_final then paths.final else paths.implementation)
   in
-  let correctness_review =
-    child_json ~phase:None ~agent:"monty-headless-reviewer"
-      ~label:"Correctness review"
-      ~as_name:"correctnessReview"
-      ~task:
-        (reviewer_task dispatch
-           "Focus on correctness, regressions, edge cases, data integrity, security, and exact requirement compliance.")
-      ~cwd:dispatch.worktree ~reads:[ dispatch.instructions; dispatch.context ]
-      ~output:paths.correctness
+  let reviewers =
+    paths.reviews
+    |> List.map (fun path ->
+           child_json ~phase:None ~agent:"monty-headless-reviewer"
+             ~label:path.review.title ~as_name:path.alias
+             ~task:(reviewer_task dispatch path.review) ~cwd:dispatch.worktree
+             ~reads:[ dispatch.instructions; dispatch.context ]
+             ~output:path.output)
   in
-  let quality_review =
-    child_json ~phase:None ~agent:"monty-headless-reviewer"
-      ~label:"Quality and tests review" ~as_name:"qualityReview"
-      ~task:
-        (reviewer_task dispatch
-           "Focus on tests, failure handling, maintainability, simplicity, architectural fit, and missing validation.")
-      ~cwd:dispatch.worktree ~reads:[ dispatch.instructions; dispatch.context ]
-      ~output:paths.quality
-  in
-  let reviews =
+  let review_phase =
     `Assoc
       [ ("phase", `String "Review");
         ("label", `String (dispatch.title ^ " independent reviews"));
-        ("parallel", `List [ correctness_review; quality_review ]);
-        ("concurrency", `Int 2);
+        ("parallel", `List reviewers);
+        ("concurrency", `Int (List.length reviewers));
         ("failFast", `Bool false) ]
   in
   let fixer =
-    child_json ~phase:(Some "Fix") ~agent:"worker"
-      ~label:(dispatch.title ^ " verified fixes") ~as_name:"final"
-      ~task:(fixer_task dispatch) ~cwd:dispatch.worktree
-      ~reads:[ dispatch.instructions; dispatch.context ] ~output:paths.final
+    Option.map
+      (fun _ ->
+        child_json ~phase:(Some "Fix") ~agent:"worker"
+          ~label:(dispatch.title ^ " verified fixes") ~as_name:"final"
+          ~task:(fixer_task dispatch paths.reviews) ~cwd:dispatch.worktree
+          ~reads:[ dispatch.instructions; dispatch.context ] ~output:paths.final)
+      dispatch.profile.fix
+  in
+  let chain =
+    [ implementation ]
+    @ (if reviewers = [] then [] else [ review_phase ])
+    @ Option.to_list fixer
   in
   `Assoc
-    [ ("chain", `List [ implementation; reviews; fixer ]);
+    [ ("chain", `List chain);
       ("context", `String "fresh");
       ("async", `Bool true);
       ("clarify", `Bool false);
@@ -316,7 +345,8 @@ let dispatch_json ?attempt_id (dispatch : dispatch) =
              `List (List.map Job_store.json_of_workspace dispatch.workspaces));
             ("worker_dir", `String dispatch.worker_dir);
             ("instructions", `String dispatch.instructions);
-            ("context", `String dispatch.context) ] );
+            ("context", `String dispatch.context);
+            ("agent_profile", `String dispatch.profile.id) ] );
       ( "harness_call",
         `Assoc
           [ ("tool", `String "subagent");
@@ -358,6 +388,7 @@ let planned_job (prepared : Launcher.prepared) =
         prepared.workspaces;
     worker_dir = prepared.worker_dir;
     status = "planned";
+    profile = prepared.profile;
   }
 
 let ensure_worktree options (prepared : Launcher.prepared) =
@@ -387,6 +418,7 @@ let ensure_worktree options (prepared : Launcher.prepared) =
           workspaces;
           worker_dir = prepared.worker_dir;
           status = "prepared";
+          profile = prepared.profile;
         }
 
 let prepare_many ~dry_run options indexed_jobs =
@@ -465,7 +497,11 @@ let prepare_existing options (record : Job_store.record) =
     Launcher.options_with_persisted_worktree_mode options record.worktree_mode
   in
   let* () = Launcher.check_worktree_dependency options in
-  let* prepared = Launcher.prepare_identity options 1 record.job in
+  let* profile =
+    Agent_profile.load_pinned ~home:options.home ~worker_dir:record.worker_dir
+      record.job.Job.agent_profile
+  in
+  let* prepared = Launcher.prepare_identity ~profile options 1 record.job in
   let* _ = Project_overview.validate_worker_task_link ~home:options.home record in
   let* () =
     match record.transition with
@@ -512,6 +548,7 @@ let claim_begin (plan : begin_plan) =
           instructions = plan.prepared.instructions;
           context = plan.prepared.context;
           home = plan.options.home;
+          profile = plan.prepared.profile;
         }
 
 let begin_worker ~explicit_resume options worker =
@@ -534,6 +571,7 @@ let begin_worker ~explicit_resume options worker =
         instructions = plan.prepared.instructions;
         context = plan.prepared.context;
         home = plan.options.home;
+        profile = plan.prepared.profile;
       }
     in
     let attempt_id = fresh_attempt_id () in
@@ -601,6 +639,7 @@ let provisional_dispatch (plan : begin_plan) =
     instructions = plan.prepared.instructions;
     context = plan.prepared.context;
     home = plan.options.home;
+    profile = plan.prepared.profile;
   }
 
 let source_section label path contents =
@@ -651,30 +690,35 @@ let implementation_prompt dispatch inputs =
         inputs.instructions_contents;
       source_section "Task context" dispatch.context inputs.context_contents ]
 
-let reviewer_prompt dispatch inputs focus implementation_handoff =
+let reviewer_prompt dispatch inputs review implementation_handoff =
   let task =
-    reviewer_task dispatch focus
+    reviewer_task dispatch review
     |> replace_literal ~pattern:"{previous}"
          ~replacement:implementation_handoff
   in
   String.concat "\n\n"
     [ task;
+      source_section "Monty instructions" dispatch.instructions
+        inputs.instructions_contents;
       source_section "Task context" dispatch.context inputs.context_contents ]
 
-let fixer_prompt dispatch inputs correctness quality =
+let fixer_prompt dispatch inputs paths reports =
   let memory_instruction =
     Printf.sprintf
       "Append the verified findings, fixes, validation, and final handoff to %s."
       (Worker_memory.memory_file dispatch.worker_dir)
   in
   let task =
-    fixer_task dispatch
+    fixer_task dispatch paths
     |> replace_literal ~pattern:memory_instruction
          ~replacement:
            "Include the verified findings, fixes, validation, and final handoff in the final response so Monty can persist them."
-    |> replace_literal ~pattern:"{outputs.correctnessReview}"
-         ~replacement:correctness
-    |> replace_literal ~pattern:"{outputs.qualityReview}" ~replacement:quality
+    |> fun task ->
+    List.fold_left2
+      (fun task path report ->
+        replace_literal ~pattern:("{outputs." ^ path.alias ^ "}")
+          ~replacement:report task)
+      task paths reports
   in
   String.concat "\n\n"
     [ direct_memory_notice;
@@ -804,21 +848,30 @@ let await_result child =
   | Unix.WSTOPPED signal, _ ->
       Error (Printf.sprintf "headless child was stopped by signal %d" signal)
 
-let run_parallel left right =
-  let left_child = try_spawn_result left in
-  let right_child = try_spawn_result right in
-  let await = function Ok child -> await_result child | Error message -> Error message in
-  let left_result = await left_child in
-  let right_result = await right_child in
-  match (left_result, right_result) with
-  | Ok (), Ok () -> Ok ()
-  | Error left, Ok () -> Error left
-  | Ok (), Error right -> Error right
-  | Error left, Error right ->
-      Error (Printf.sprintf "both Codex review phases failed:\n- %s\n- %s" left right)
+let run_parallel operations =
+  let children = List.map try_spawn_result operations in
+  let errors =
+    children
+    |> List.filter_map (function
+         | Ok child -> (match await_result child with Ok () -> None | Error error -> Some error)
+         | Error error -> Some error)
+  in
+  match errors with
+  | [] -> Ok ()
+  | errors ->
+      Error
+        ("Codex review phases failed:\n- " ^ String.concat "\n- " errors)
 
 let codex_run_result_json (options : Launcher.options) (dispatch : dispatch)
     (paths : attempt_paths) (published : Run_handoff.published) =
+  let implementation =
+    if dispatch.profile.fix = None then paths.final else paths.implementation
+  in
+  let review_outputs =
+    paths.reviews
+    |> List.map (fun path ->
+           (path.review.id ^ "_review", `String path.output))
+  in
   `Assoc
     [ ("schema", `String codex_run_schema);
       ("harness", `String "codex");
@@ -831,12 +884,28 @@ let codex_run_result_json (options : Launcher.options) (dispatch : dispatch)
       ("artifact_dir", `String paths.root);
       ("handoff", `String published.handoff.evidence.handoff);
       ("notice_id", `String published.notice.id);
+      ("agent_profile", `String dispatch.profile.id);
       ( "outputs",
         `Assoc
-          [ ("implementation", `String paths.implementation);
-            ("correctness_review", `String paths.correctness);
-            ("quality_review", `String paths.quality);
-            ("final", `String paths.final) ] ) ]
+          ([ ("implementation", `String implementation) ] @ review_outputs
+          @ [ ("final", `String paths.final) ]) ) ]
+
+let review_summary profile =
+  match profile.Agent_profile.reviews with
+  | [] -> None
+  | reviews ->
+      Some
+        (Printf.sprintf "%d independent reviewer%s completed%s."
+           (List.length reviews)
+           (if List.length reviews = 1 then "" else "s")
+           (if profile.fix = None then ""
+            else " and the fixer verified their reports"))
+
+let validation_summary profile =
+  if profile.Agent_profile.fix = None then
+    "Exact validation commands and results are recorded in the final implementation handoff."
+  else
+    "Exact validation commands and results are recorded in the final fixer handoff."
 
 let preflight_codex_worker ~explicit_resume options worker =
   let* () = require_codex_harness options in
@@ -852,6 +921,9 @@ let run_codex_worker ~explicit_resume options worker =
   let* dispatch = claim_begin plan in
   let phase = ref "implementation" in
   let execution =
+    let implementation_output =
+      if dispatch.profile.fix = None then paths.final else paths.implementation
+    in
     let* implementation_prompt_path =
       write_phase_prompt paths "implementation"
         (implementation_prompt dispatch inputs)
@@ -859,62 +931,70 @@ let run_codex_worker ~explicit_resume options worker =
     let* () =
       run_codex_phase plan.options dispatch paths ~name:"implementation"
         ~writable:true ~prompt:implementation_prompt_path
-        ~output:paths.implementation
+        ~output:implementation_output
     in
     let* implementation_handoff =
       read_required_file ~label:"Codex implementation handoff"
-        paths.implementation
+        implementation_output
     in
     let* () =
       append_codex_memory dispatch paths ~phase:"implementation"
         implementation_handoff
     in
-    phase := "review";
-    let* correctness_prompt_path =
-      write_phase_prompt paths "correctness-review"
-        (reviewer_prompt dispatch inputs
-           "Focus on correctness, regressions, edge cases, data integrity, security, and exact requirement compliance."
-           implementation_handoff)
-    in
-    let* quality_prompt_path =
-      write_phase_prompt paths "quality-review"
-        (reviewer_prompt dispatch inputs
-           "Focus on tests, failure handling, maintainability, simplicity, architectural fit, and missing validation."
-           implementation_handoff)
-    in
-    let* () =
-      run_parallel
-        (fun () ->
-          run_codex_phase plan.options dispatch paths ~name:"correctness-review"
-            ~writable:false ~prompt:correctness_prompt_path
-            ~output:paths.correctness)
-        (fun () ->
-          run_codex_phase plan.options dispatch paths ~name:"quality-review"
-            ~writable:false ~prompt:quality_prompt_path ~output:paths.quality)
-    in
-    let* correctness =
-      read_required_file ~label:"Codex correctness review" paths.correctness
-    in
-    let* quality =
-      read_required_file ~label:"Codex quality review" paths.quality
-    in
-    phase := "fixer";
-    let* fixer_prompt_path =
-      write_phase_prompt paths "fixer"
-        (fixer_prompt dispatch inputs correctness quality)
+    if paths.reviews <> [] then phase := "review";
+    let* review_prompts =
+      List.fold_left
+        (fun result path ->
+          let* prompts = result in
+          let name = path.review.id ^ "-review" in
+          let* prompt =
+            write_phase_prompt paths name
+              (reviewer_prompt dispatch inputs path.review
+                 implementation_handoff)
+          in
+          Ok ((path, name, prompt) :: prompts))
+        (Ok []) paths.reviews
+      |> Result.map List.rev
     in
     let* () =
-      run_codex_phase plan.options dispatch paths ~name:"fixer" ~writable:true
-        ~prompt:fixer_prompt_path ~output:paths.final
+      review_prompts
+      |> List.map (fun (path, name, prompt) () ->
+             run_codex_phase plan.options dispatch paths ~name ~writable:false
+               ~prompt ~output:path.output)
+      |> run_parallel
     in
-    let* final_handoff =
-      read_required_file ~label:"Codex final handoff" paths.final
+    let* reports =
+      List.fold_left
+        (fun result path ->
+          let* reports = result in
+          let* report =
+            read_required_file
+              ~label:("Codex " ^ path.review.title) path.output
+          in
+          Ok (report :: reports))
+        (Ok []) paths.reviews
+      |> Result.map List.rev
     in
-    phase := "durable-memory";
-    let* () =
-      append_codex_memory dispatch paths ~phase:"final" final_handoff
-    in
-    Ok final_handoff
+    match dispatch.profile.fix with
+    | None -> Ok implementation_handoff
+    | Some _ ->
+        phase := "fixer";
+        let* fixer_prompt_path =
+          write_phase_prompt paths "fixer"
+            (fixer_prompt dispatch inputs paths.reviews reports)
+        in
+        let* () =
+          run_codex_phase plan.options dispatch paths ~name:"fixer" ~writable:true
+            ~prompt:fixer_prompt_path ~output:paths.final
+        in
+        let* final_handoff =
+          read_required_file ~label:"Codex final handoff" paths.final
+        in
+        phase := "durable-memory";
+        let* () =
+          append_codex_memory dispatch paths ~phase:"final" final_handoff
+        in
+        Ok final_handoff
   in
   (match execution with
   | Error message ->
@@ -939,19 +1019,18 @@ let run_codex_worker ~explicit_resume options worker =
   | Ok final_handoff ->
       phase := "handoff";
       let* published =
+        let review_summary = review_summary dispatch.profile in
         Run_handoff.publish ~home:plan.options.home ~record:plan.record
           ~handoff_id:paths.id ~source:Run_handoff.Headless_codex
           ~outcome:Run_handoff.Ready_for_review
           ~summary:(Run_handoff.compact_summary final_handoff)
-          ~validation:
-            [ "Exact validation commands and results are recorded in the final fixer handoff." ]
-          ~review_summary:
-            "Two independent reviewers completed and the fixer verified their reports."
+          ~validation:[ validation_summary dispatch.profile ]
+          ?review_summary
           ~artifacts:[ paths.root ] ()
       in
       Ok (codex_run_result_json plan.options dispatch paths published))
 
-let read_attempt_descriptor ~record paths ~expected_source =
+let read_attempt_descriptor ~record ~profile paths ~expected_source =
   let* () = Run_handoff.require_regular_file paths.descriptor in
   let* json = State_store.read_json ~path:paths.descriptor in
   match json with
@@ -966,6 +1045,12 @@ let read_attempt_descriptor ~record paths ~expected_source =
       let* attempt_id = string "attempt_id" in
       let* worker_id = string "worker_id" in
       let* source = string "source" in
+      let* agent_profile =
+        match Yojson.Safe.Util.member "agent_profile" json with
+        | `Null -> Ok Agent_profile.default_id
+        | `String value -> Ok value
+        | _ -> Error "headless attempt descriptor has invalid agent_profile"
+      in
       if schema <> attempt_schema then Error "unsupported headless attempt descriptor"
       else if attempt_id <> paths.id || worker_id <> record.Job_store.id then
         Error "headless attempt descriptor identity does not match the requested worker"
@@ -973,6 +1058,11 @@ let read_attempt_descriptor ~record paths ~expected_source =
         Error
           (Printf.sprintf "headless attempt source is %S, expected %S" source
              expected_source)
+      else if agent_profile <> profile.Agent_profile.id then
+        Error
+          (Printf.sprintf
+             "headless attempt agent profile is %S, pinned snapshot is %S"
+             agent_profile profile.id)
       else Ok ()
 
 let require_attempt_hierarchy (record : Job_store.record) paths =
@@ -1007,6 +1097,10 @@ let require_attempt_hierarchy (record : Job_store.record) paths =
 let finish_pi_worker ~home ~worker ~attempt_id ~success ?last_phase ?error () =
   let* attempt_id = State_path.safe_component ~label:"headless attempt id" attempt_id in
   let* record = Job_store.find ~home ~scope:Job_store.All worker in
+  let* profile =
+    Agent_profile.load_pinned ~home ~worker_dir:record.worker_dir
+      record.job.Job.agent_profile
+  in
   let dispatch =
     {
       id = record.id;
@@ -1019,11 +1113,14 @@ let finish_pi_worker ~home ~worker ~attempt_id ~success ?last_phase ?error () =
       instructions = Worker_memory.instructions_file record.worker_dir;
       context = record.job.context;
       home;
+      profile;
     }
   in
   let paths = attempt_paths dispatch attempt_id in
   let* () = require_attempt_hierarchy record paths in
-  let* () = read_attempt_descriptor ~record paths ~expected_source:"headless-pi" in
+  let* () =
+    read_attempt_descriptor ~record ~profile paths ~expected_source:"headless-pi"
+  in
   let publish ~outcome ~summary ~validation ?review_summary ~risks ?last_phase
       ?error () =
     Run_handoff.publish ~home ~record ~handoff_id:attempt_id
@@ -1059,12 +1156,10 @@ let finish_pi_worker ~home ~worker ~attempt_id ~success ?last_phase ?error () =
     with
     | Ok final ->
         let outcome = Run_handoff.Ready_for_review in
+        let review_summary = review_summary profile in
         let* published =
           publish ~outcome ~summary:(Run_handoff.compact_summary final)
-            ~validation:
-              [ "Exact validation commands and results are recorded in the final fixer handoff." ]
-            ~review_summary:
-              "Two independent reviewers completed and the fixer verified their reports."
+            ~validation:[ validation_summary profile ] ?review_summary
             ~risks:[] ()
         in
         finish outcome published
@@ -1131,6 +1226,10 @@ let recover_finished_pi ~home =
   |> List.fold_left
        (fun result (record : Job_store.record) ->
          let* recovered = result in
+         let* profile =
+           Agent_profile.load_pinned ~home ~worker_dir:record.worker_dir
+             record.job.Job.agent_profile
+         in
          let artifacts = Filename.concat record.worker_dir "artifacts" in
          let root =
            Filename.concat artifacts "headless"
@@ -1167,6 +1266,7 @@ let recover_finished_pi ~home =
                           Worker_memory.instructions_file record.worker_dir;
                         context = record.job.context;
                         home;
+                        profile;
                       }
                     in
                     let paths = attempt_paths dispatch attempt_id in

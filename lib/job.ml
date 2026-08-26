@@ -13,6 +13,7 @@ type t = {
   worker_dir : string option;
   prompt : string option;
   task_key : string option;
+  agent_profile : string option;
 }
 
 let workspace ?branch repo = { repo; branch }
@@ -21,8 +22,8 @@ let normalize_workspaces ~repo ~branch = function
   | [] -> [ { repo; branch } ]
   | workspaces -> workspaces
 
-let make ?id ?branch ?(workspaces = []) ?worker_dir ?prompt ?task_key ~title
-    ~repo ~context () =
+let make ?id ?branch ?(workspaces = []) ?worker_dir ?prompt ?task_key
+    ?agent_profile ~title ~repo ~context () =
   let workspaces = normalize_workspaces ~repo ~branch workspaces in
   let first = List.hd workspaces in
   {
@@ -35,15 +36,16 @@ let make ?id ?branch ?(workspaces = []) ?worker_dir ?prompt ?task_key ~title
     worker_dir;
     prompt;
     task_key;
+    agent_profile;
   }
 
-let make_with_workspaces ?id ?worker_dir ?prompt ?task_key ~title
+let make_with_workspaces ?id ?worker_dir ?prompt ?task_key ?agent_profile ~title
     ~(workspaces : workspace list)
     ~context () =
   match workspaces with
   | [] -> invalid_arg "a Monty job needs at least one workspace"
   | first :: _ ->
-      make ?id ?worker_dir ?prompt ?task_key ~title ~repo:first.repo
+      make ?id ?worker_dir ?prompt ?task_key ?agent_profile ~title ~repo:first.repo
         ?branch:first.branch ~workspaces ~context ()
 
 let with_workspaces job (workspaces : workspace list) =

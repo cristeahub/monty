@@ -1,0 +1,22 @@
+{
+  "schema": "monty:agent-profile:v1",
+  "id": "reviewed",
+  "description": "Implementation followed by independent correctness and quality review, then verified fixes",
+  "interactive": "interactive.md",
+  "headless": {
+    "implementation": "implementation.md",
+    "reviews": [
+      {
+        "id": "correctness",
+        "title": "Correctness review",
+        "instructions": "correctness.md"
+      },
+      {
+        "id": "quality",
+        "title": "Quality and tests review",
+        "instructions": "quality.md"
+      }
+    ],
+    "fix": "fix.md"
+  }
+}

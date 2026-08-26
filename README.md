@@ -179,7 +179,8 @@ Example manifest:
       "branch": "monty/issue-123",
       "context": ".monty/runs/run-1/issue-123.md",
       "worker_dir": ".monty/runs/run-1/workers/issue-123",
-      "task_key": "local:local-001"
+      "task_key": "local:local-001",
+      "agent_profile": "reviewed"
     }
   ]
 }
@@ -239,6 +240,26 @@ Rerunning the printed batch command safely continues prepared and definitely fai
 It skips `launch-requested` jobs because another automatic request could duplicate a session.
 Use the printed `monty resume <worker-id>` command when you intentionally want another request for such a worker.
 
+## Agent profiles
+
+Agent profiles keep interactive and headless role instructions together with a deliberately limited execution shape: one implementer, zero or more parallel reviewers, and an optional fixer. Monty ships two profiles under `agent-profiles/`:
+
+- `reviewed` is the default and preserves the existing implementer, correctness reviewer, quality reviewer, and fixer behavior.
+- `solo` runs one implementer with self-validation and no reviewer or fixer phases.
+
+Personal profiles live under `.monty/agent-profiles/`. Duplicate IDs across bundled and personal profiles are rejected.
+
+```sh
+monty agent-profiles list
+monty agent-profiles show reviewed
+monty settings get agent-profile
+monty settings set agent-profile solo
+```
+
+Use `--agent-profile NAME` for one launch or headless preparation. A manifest job's optional `agent_profile` wins over that CLI option, followed by the persisted setting and the built-in `reviewed` default. Dry-run output shows the resolved profile and stage summary for every job.
+
+Monty fully validates and snapshots the expanded profile into durable worker memory before state is installed. Resume always uses that pinned snapshot, so later setting or profile-file changes affect only new workers. Legacy workers without profile metadata retain `reviewed` behavior.
+
 ## Headless worker chains
 
 Headless execution is an explicit alternative to Ghostty-backed worker sessions.
@@ -272,8 +293,8 @@ monty headless run-many \
 ```
 
 `run-many` completes a full read-only batch preflight before starting any worker, then runs the independent worker chains concurrently.
-Each chain uses four non-interactive `codex exec` processes: one implementer, two parallel reviewers, and one fixer.
-With Codex YOLO disabled, implementer and fixer processes use `workspace-write`, while reviewers use `read-only`.
+The number of non-interactive `codex exec` processes comes from the pinned profile. The default `reviewed` profile uses four: one implementer, two parallel reviewers, and one fixer; `solo` uses one.
+With Codex YOLO disabled, implementer and optional fixer processes use `workspace-write`, while reviewers use `read-only`.
 `monty settings set codex-yolo true` applies the configured unrestricted Codex mode to every phase and must be treated as a high-risk choice.
 
 Codex progress, JSONL events, prompts, and final phase messages are kept under the worker's durable `artifacts/headless/<attempt-id>/` directory.
@@ -298,7 +319,7 @@ The envelope also includes a versioned completion contract.
 After the asynchronous callback, run the exact `success_command`, or fill the concrete phase and message into the `failure_command`.
 `monty headless finish` normalizes Pi's callback into the same durable handoff and inbox used by Codex and interactive workers.
 
-Each Pi or Codex chain starts in its first supplied Monty worktree and can inspect every declared workspace:
+Each Pi or Codex chain starts in its first supplied Monty worktree and can inspect every declared workspace. The default `reviewed` profile runs:
 
 1. One fresh implementer changes the worktree and runs focused validation.
 2. Two mutually isolated fresh reviewers inspect the same worktree concurrently and write only their separate reports outside it.
@@ -610,6 +631,7 @@ The most important options are available as CLI flags.
 --target tab|window|split
 --worktree always|never
 --branch-prefix PREFIX
+--agent-profile NAME
 --harness pi|codex
 --pi-command COMMAND
 --codex-command COMMAND
@@ -718,6 +740,13 @@ Branch-prefix selection uses this precedence:
 
 The persisted setting precedes the environment fallback because installed
 wrappers export their install-time branch prefix on every invocation.
+
+Agent-profile selection uses this precedence:
+
+1. The manifest job's `agent_profile`
+2. `--agent-profile NAME`
+3. The persisted `agent-profile` setting
+4. The `reviewed` default
 
 Settings mutations use Monty's state lock and atomic JSON replacement.
 
