@@ -72,7 +72,8 @@ must not interrupt an unrelated response in progress.
 
 Follow-up has two valid routes.
 A still-addressable native runner may answer directly; otherwise Monty constructs a fresh read-only dispatch from the canonical handoff, task context, worker memory, attempt artifacts, and current workspaces.
-Read-only drill-down never resumes implementation implicitly and never depends on a persisted Pi run ID or Codex session ID.
+Read-only drill-down never resumes implementation implicitly and never depends
+on a Pi run ID or the interactive Codex session sidecar.
 
 ## Durable memory beats ephemeral worktrees
 
@@ -120,6 +121,9 @@ Monty atomically claims one worker as `launch-requested` and emits the complete 
 Any later ambiguity requires an explicit successor-chain resume and must never trigger automatic replay.
 A finished headless chain remains open and `launch-requested` until the user intentionally runs the existing completion lifecycle.
 Pi run IDs, backend choice, and runtime status remain ephemeral and never enter `job.json`.
+Interactive Codex workers may keep their exact conversation id in a plain-text
+sidecar beside `job.json`; that durable resume aid is not headless runtime state
+and must never become a `job.json` field.
 
 This avoids split-brain state and duplicate recovery requests.
 It also lets `monty list`, `monty resume`, `monty done`, and future lifecycle commands operate from one durable record.

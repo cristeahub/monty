@@ -11,6 +11,11 @@ type options = {
 let codex_effort_arg = " -c " ^ Shell.quote "model_reasoning_effort=\"xhigh\""
 let codex_vim_arg = " -c " ^ Shell.quote "tui.vim_mode_default=true"
 
+let codex_mode_name = function
+  | Codex_session.Fresh -> "fresh"
+  | Codex_session.Picker -> "picker"
+  | Codex_session.Exact _ -> "exact"
+
 let script_filename ~script_dir ~title =
   let slug = Slug.of_title title in
   let stamp = Unix.gettimeofday () |> Int64.of_float |> Int64.to_string in
@@ -32,7 +37,28 @@ let codex_prompt ~instructions ~context job =
       "Read the files below before acting. Treat the Monty instructions and task context as authoritative, and preserve important discoveries in durable worker memory.";
       inputs ]
 
-let build_command ~codex_trusted_paths ~options ~instructions ~job ~context =
+let codex_hook_args ~home options =
+  let home =
+    try Unix.realpath home
+    with Unix.Unix_error _ -> Shell.normalize (Shell.abs_path home)
+  in
+  let hook_command =
+    String.concat " "
+      [ Shell.quote options.monty_command;
+        "codex-session-capture";
+        "--home";
+        Shell.quote home ]
+  in
+  let hook_config =
+    "hooks.SessionStart=[{matcher=\"startup|resume\",hooks=[{type=\"command\",command="
+    ^ Codex_trust.toml_basic_string hook_command
+    ^ "}]}]"
+  in
+  " --enable " ^ Shell.quote "hooks" ^ " --dangerously-bypass-hook-trust -c "
+  ^ Shell.quote hook_config
+
+let build_command ~codex_hook ~codex_mode ~codex_trusted_paths ~options ~home
+    ~instructions ~job ~context =
   match options.harness with
   | Harness.Pi ->
       let name = Shell.quote job.Job.title in
@@ -66,9 +92,19 @@ let build_command ~codex_trusted_paths ~options ~instructions ~job ~context =
                      (index + 2))
             |> String.concat ""
       in
-      Printf.sprintf "exec %s%s%s%s%s -C .%s %s" options.command codex_effort_arg
-        codex_vim_arg (Codex_trust.arguments codex_trusted_paths) yolo add_dirs
-        (Shell.quote (codex_prompt ~instructions ~context job))
+      let base =
+        Printf.sprintf "exec %s%s%s%s%s%s" options.command codex_effort_arg
+          codex_vim_arg (Codex_trust.arguments codex_trusted_paths)
+          (if codex_hook then codex_hook_args ~home options else "") yolo
+      in
+      (match codex_mode with
+      | Codex_session.Fresh ->
+          Printf.sprintf "%s -C .%s %s" base add_dirs
+            (Shell.quote (codex_prompt ~instructions ~context job))
+      | Codex_session.Picker -> Printf.sprintf "%s resume -C .%s" base add_dirs
+      | Codex_session.Exact session_id ->
+          Printf.sprintf "%s resume -C .%s -- %s" base add_dirs
+            (Shell.quote session_id))
 
 let rehydrate_lines ~monty_command ~wt_command ~branch ~source_repo =
   [ "MONTY_JOB_WORKTREE=$("
@@ -126,11 +162,11 @@ let static_workspace_lines (job : Job.t) =
   @ [ "MONTY_JOB_WORKTREE=$MONTY_WORKSPACE_1";
       "cd \"$MONTY_JOB_WORKTREE\"" ]
 
-let launch_script_contents ~codex_trusted_paths ~options ~job ~id ~branch ~source_repo
-    ~initial_workdir ~home ~context ~instructions ~worker_dir ~worktree_mode
-    ~wt_command =
+let launch_script_contents ~codex_hook ~codex_mode ~codex_trusted_paths ~options
+    ~job ~id ~branch ~source_repo ~initial_workdir ~home ~context ~instructions
+    ~worker_dir ~worktree_mode ~wt_command =
   let command =
-    build_command ~codex_trusted_paths ~options
+    build_command ~codex_hook ~codex_mode ~codex_trusted_paths ~options ~home
       ~instructions:(Some instructions) ~job ~context
   in
   let setup_lines =
@@ -181,7 +217,8 @@ let launch_script_contents ~codex_trusted_paths ~options ~job ~id ~branch ~sourc
           command;
           "" ])
 
-let write_launch_script ?path ?(codex_trusted_paths = []) ~options ~job ~id ~branch ~source_repo
+let write_launch_script ?path ?(codex_trusted_paths = []) ?(codex_hook = true)
+    ?(codex_mode = Codex_session.Fresh) ~options ~job ~id ~branch ~source_repo
     ~initial_workdir ~home ~context ~instructions ~worker_dir ~worktree_mode
     ~wt_command () =
   Shell.ensure_dir options.script_dir;
@@ -191,9 +228,9 @@ let write_launch_script ?path ?(codex_trusted_paths = []) ~options ~job ~id ~bra
       path
   in
   let contents =
-    launch_script_contents ~codex_trusted_paths ~options ~job ~id ~branch ~source_repo
-      ~initial_workdir ~home ~context ~instructions ~worker_dir ~worktree_mode
-      ~wt_command
+    launch_script_contents ~codex_hook ~codex_mode ~codex_trusted_paths ~options
+      ~job ~id ~branch ~source_repo ~initial_workdir ~home ~context
+      ~instructions ~worker_dir ~worktree_mode ~wt_command
   in
   (match State_store.write_file_atomic ~path ~perm:0o700 contents with
   | Ok () -> ()

@@ -173,6 +173,8 @@ If a Pi harness call fails after `begin`, or a Codex process fails after the wor
 Run `monty headless resume <worker-id>` only when the user intentionally requests a fresh successor chain.
 With Pi selected, pass the resumed `harness_call.arguments` unchanged to the harness tool; with Codex selected, `resume` directly runs the successor chain.
 Never persist a backend, Pi run ID, Codex session ID, async status, or runtime state in `job.json`.
+Interactive Codex workers record their exact conversation only in the durable
+`codex-session-id` sidecar; headless Codex chains must not claim or update it.
 Never automatically run `monty done` after a headless chain.
 
 At the start of a day or planning session, review active jobs with:
@@ -222,6 +224,11 @@ Resume an existing worker with:
 ```sh
 monty resume <worker-id>
 ```
+
+Interactive Codex resume uses the worker's exact `codex-session-id` sidecar,
+or Codex's cwd-scoped picker when that sidecar is absent. Use `--fresh` only
+when the user deliberately wants a new Codex conversation; it replaces the old
+sidecar only after Codex actually starts the new session.
 
 Resume uses the durable worker's persisted worktree mode even when current CLI or environment defaults differ.
 

@@ -81,7 +81,7 @@ type result = {
   argv : string array;
 }
 
-let spawn ~root ~env index args =
+let spawn ?(stdin_path = "/dev/null") ~root ~env index args =
   let stdout_path = Filename.concat root (Printf.sprintf "stdout-%d" index) in
   let stderr_path = Filename.concat root (Printf.sprintf "stderr-%d" index) in
   let stdout_fd =
@@ -90,7 +90,7 @@ let spawn ~root ~env index args =
   let stderr_fd =
     Unix.openfile stderr_path [ Unix.O_WRONLY; Unix.O_CREAT; Unix.O_TRUNC ] 0o600
   in
-  let stdin_fd = Unix.openfile "/dev/null" [ Unix.O_RDONLY ] 0 in
+  let stdin_fd = Unix.openfile stdin_path [ Unix.O_RDONLY ] 0 in
   let argv = Array.of_list (executable :: args) in
   let pid = Unix.create_process_env executable argv env stdin_fd stdout_fd stderr_fd in
   Unix.close stdin_fd;
@@ -114,6 +114,11 @@ let await child =
   }
 
 let run ~root ~env index args = spawn ~root ~env index args |> await
+
+let run_with_stdin ~root ~env index input args =
+  let stdin_path = Filename.concat root (Printf.sprintf "stdin-%d" index) in
+  Shell.write_file stdin_path input;
+  spawn ~stdin_path ~root ~env index args |> await
 
 let command result = result.argv |> Array.to_list |> String.concat " "
 
@@ -1673,6 +1678,280 @@ let replace_assoc_field name value = function
   | `Assoc fields ->
       `Assoc ((name, value) :: List.remove_assoc name fields)
   | _ -> failwith "expected a JSON object"
+
+let test_codex_session_capture_and_resume_modes () =
+  with_temp_root "codex-session-resume" (fun root ->
+      let home, log, env = setup_environment root in
+      let repo = Filename.concat root "repo" in
+      let context = Filename.concat root "context.md" in
+      let id = "codex-session-worker" in
+      add_project ~root ~home ~env repo;
+      Shell.write_file context "# Exact Codex session resume\n";
+      let osascript = Filename.concat root "fake-bin/osascript" in
+      Shell.write_file osascript
+        (String.concat "\n"
+           [ "#!/bin/sh";
+             "printf 'codex-session-osascript\\n' >> " ^ Shell.quote log;
+             "exit 0";
+             "" ]);
+      Shell.chmod_executable osascript;
+      let codex_options terminal =
+        [ "--home"; home; "--terminal"; terminal; "--harness"; "codex";
+          "--codex-command"; "codex --fixed value" ]
+      in
+      let launched =
+        run ~root ~env 878
+          ([ "launch"; "--repo"; repo; "--title"; "Codex session worker";
+             "--context"; context; "--branch"; "cto/codex-session-worker";
+             "--worktree"; "never" ]
+          @ codex_options "ghostty")
+      in
+      require_code 0 launched;
+      let worker_dir =
+        Filename.concat home (".monty/runs/manual/workers/" ^ id)
+      in
+      let job_file = Filename.concat worker_dir "job.json" in
+      let sidecar = Filename.concat worker_dir "codex-session-id" in
+      if Sys.file_exists sidecar then
+        failwith "initial Codex launch wrote a session id before SessionStart";
+      let launch_script =
+        Yojson.Safe.from_file job_file |> json_string "launch_script"
+      in
+      let initial_script = Shell.read_file launch_script in
+      require_contains "initial Codex capture hook" initial_script
+        "hooks.SessionStart";
+      require_contains "initial Codex capture command" initial_script
+        "codex-session-capture";
+      require_contains "initial Codex hook trust scope" initial_script
+        "--dangerously-bypass-hook-trust";
+      require_contains "initial Codex prompt" initial_script
+        "Read the files below before acting";
+      let capture_env = replace_env env [ ("MONTY_WORKER_DIR", worker_dir) ] in
+      let payload source session_id =
+        `Assoc
+          [ ("session_id", `String session_id);
+            ("cwd", `String repo);
+            ("hook_event_name", `String "SessionStart");
+            ("source", `String source) ]
+        |> Yojson.Safe.to_string
+      in
+      let exact_one = "-thread/name with spaces" in
+      let captured =
+        run_with_stdin ~root ~env:capture_env 879 (payload "startup" exact_one)
+          [ "codex-session-capture"; "--home"; home ]
+      in
+      require_code 0 captured;
+      if captured.stdout <> "" then failwith "successful Codex hook printed output";
+      if Shell.read_file sidecar <> exact_one then
+        failwith "Codex hook did not persist the exact session id";
+      let before_invalid = Shell.read_file sidecar in
+      let invalid =
+        run_with_stdin ~root ~env:capture_env 880 (payload "compact" "wrong")
+          [ "codex-session-capture"; "--home"; home ]
+      in
+      if invalid.code = 0 then failwith "invalid Codex hook source was accepted";
+      require_contains "invalid Codex hook source" invalid.stderr
+        "startup or resume";
+      if Shell.read_file sidecar <> before_invalid then
+        failwith "invalid Codex hook payload changed the sidecar";
+      let exact_dry =
+        run ~root ~env 881
+          ([ "resume"; id ] @ codex_options "dry-run")
+      in
+      require_code 0 exact_dry;
+      require_contains "exact Codex dry-run mode" exact_dry.stdout
+        ("[dry-run] Codex session: exact " ^ exact_one);
+      require_contains "exact Codex resume selector" exact_dry.stdout
+        (" resume -C . -- " ^ Shell.quote exact_one);
+      if string_contains exact_dry.stdout "--last" then
+        failwith "exact Codex resume used --last";
+      if string_contains exact_dry.stdout "Read the files below before acting" then
+        failwith "exact Codex resume resent the original worker prompt";
+      let exact_resume =
+        run ~root ~env 882
+          ([ "resume"; id ] @ codex_options "ghostty")
+      in
+      require_code 0 exact_resume;
+      require_contains "exact Codex launch script" (Shell.read_file launch_script)
+        (" resume -C . -- " ^ Shell.quote exact_one);
+      let failed_fresh =
+        run ~root
+          ~env:
+            (replace_env env
+               [ ("MONTY_FAULT_INJECT", "launch-before-request-state") ])
+          883
+          ([ "resume"; "--fresh"; id ] @ codex_options "ghostty")
+      in
+      if failed_fresh.code = 0 then
+        failwith "fault-injected fresh Codex resume unexpectedly succeeded";
+      require_contains "fresh Codex retry preserves intent" failed_fresh.stdout
+        " resume --fresh ";
+      let fresh_resume =
+        run ~root ~env 884
+          ([ "resume"; "--fresh"; id ] @ codex_options "ghostty")
+      in
+      require_code 0 fresh_resume;
+      if Shell.read_file sidecar <> exact_one then
+        failwith "fresh resume erased the old Codex session before SessionStart";
+      require_contains "fresh Codex resume prompt" (Shell.read_file launch_script)
+        "Read the files below before acting";
+      Sys.remove sidecar;
+      let picker_resume =
+        run ~root ~env 885
+          ([ "resume"; id ] @ codex_options "ghostty")
+      in
+      require_code 0 picker_resume;
+      let picker_script = Shell.read_file launch_script in
+      require_contains "Codex native picker" picker_script " resume -C .";
+      if string_contains picker_script "--last"
+         || string_contains picker_script "Read the files below before acting"
+      then failwith "Codex picker used --last or resent the original prompt";
+      let exact_two = "thread's-second" in
+      require_code 0
+        (run_with_stdin ~root ~env:capture_env 886
+           (payload "resume" exact_two)
+           [ "codex-session-capture"; "--home"; home ]);
+      require_code 0
+        (run ~root ~env 887
+           ([ "resume"; id ] @ codex_options "ghostty"));
+      require_contains "picker capture became exact resume"
+        (Shell.read_file launch_script)
+        (" resume -C . -- " ^ Shell.quote exact_two);
+      Sys.remove sidecar;
+      require_code 0
+        (run ~root ~env 888
+           ([ "resume"; id ] @ codex_options "ghostty"));
+      let missing_sidecar_script = Shell.read_file launch_script in
+      require_contains "missing sidecar rewrote exact script to picker"
+        missing_sidecar_script " resume -C .";
+      if string_contains missing_sidecar_script exact_two then
+        failwith "missing sidecar retained the old exact Codex selector";
+      require_code 0
+        (run_with_stdin ~root ~env:capture_env 889
+           (payload "resume" exact_two)
+           [ "codex-session-capture"; "--home"; home ]);
+      require_code 0
+        (run ~root ~env 890
+           ([ "resume"; id ] @ codex_options "ghostty"));
+      Shell.write_file sidecar "invalid\n";
+      let invalid_sidecar =
+        run ~root ~env 891
+          ([ "resume"; id ] @ codex_options "dry-run")
+      in
+      if invalid_sidecar.code = 0 then
+        failwith "resume accepted a control character in the Codex sidecar";
+      require_contains "invalid Codex sidecar" invalid_sidecar.stderr
+        "control characters";
+      let fresh_dry =
+        run ~root ~env 892
+          ([ "open"; "--fresh"; id ] @ codex_options "dry-run")
+      in
+      require_code 0 fresh_dry;
+      require_contains "open alias fresh mode" fresh_dry.stdout
+        "[dry-run] Codex session: fresh";
+      if Shell.read_file sidecar <> "invalid\n" then
+        failwith "fresh dry-run mutated the invalid old sidecar";
+      require_code 0
+        (run ~root ~env 893
+           ([ "open"; "--fresh"; id ] @ codex_options "ghostty"));
+      if Shell.read_file sidecar <> "invalid\n" then
+        failwith "fresh resume mutated the invalid old sidecar";
+      require_code 0
+        (run_with_stdin ~root ~env:capture_env 894
+           (payload "resume" exact_two)
+           [ "codex-session-capture"; "--home"; home ]);
+      let job_json = Yojson.Safe.from_file job_file in
+      [ "codex_session_id"; "backend"; "session_id" ]
+      |> List.iter (fun field ->
+             if Yojson.Safe.Util.member field job_json <> `Null then
+               failf "forbidden runtime field %s entered job.json" field);
+      require_code 0
+        (run ~root ~env 895 [ "done"; id; "--home"; home ]);
+      let archived_dir =
+        Filename.concat home (".monty/runs/manual/archive/" ^ id)
+      in
+      let archived_sidecar = Filename.concat archived_dir "codex-session-id" in
+      if Shell.read_file archived_sidecar <> exact_two then
+        failwith "archiving did not preserve the Codex session sidecar";
+      let archived_dry =
+        run ~root ~env 896
+          ([ "resume"; "--archived"; id ] @ codex_options "dry-run")
+      in
+      require_code 0 archived_dry;
+      require_contains "archived exact Codex resume" archived_dry.stdout
+        ("[dry-run] Codex session: exact " ^ exact_two);
+      if not (Sys.file_exists archived_dir) || Sys.file_exists worker_dir then
+        failwith "archived resume dry-run moved durable worker memory";
+      let legacy_id = "legacy-codex-worker" in
+      let legacy_title = "Legacy Codex worker" in
+      let legacy_branch = "cto/legacy-codex-worker" in
+      let legacy_run_dir = Filename.concat home ".monty/runs/legacy" in
+      let legacy_worker_dir =
+        Filename.concat legacy_run_dir ("workers/" ^ legacy_id)
+      in
+      let legacy_script =
+        Filename.concat (Home.runtime_script_dir ~home ())
+          ("monty-" ^ legacy_id ^ "-launch.sh")
+      in
+      Shell.ensure_dir legacy_worker_dir;
+      Shell.write_file (Filename.concat legacy_worker_dir "MONTY.md")
+        "# Legacy worker instructions\n";
+      let legacy_worker_path = Unix.realpath legacy_worker_dir in
+      let legacy_context = Unix.realpath context in
+      let legacy_job =
+        Job.make ~id:legacy_id ~title:legacy_title ~repo
+          ~branch:legacy_branch ~worker_dir:legacy_worker_path ~context ()
+      in
+      let harness_options =
+        Harness_command.
+          { harness = Harness.Codex;
+            command = "codex --fixed value";
+            codex_yolo = false;
+            fork = None;
+            script_dir = Home.runtime_script_dir ~home ();
+            branch_prefix = "monty";
+            monty_command = executable }
+      in
+      let old_path = Sys.getenv_opt "PATH" in
+      let legacy_contents =
+        Fun.protect
+          ~finally:(fun () ->
+            Unix.putenv "PATH" (Option.value ~default:"" old_path))
+          (fun () ->
+            Unix.putenv "PATH"
+              (Filename.concat root "fake-bin" ^ ":/usr/bin:/bin");
+            Harness_command.launch_script_contents ~codex_hook:false
+              ~codex_mode:Codex_session.Fresh ~codex_trusted_paths:[]
+              ~options:harness_options ~job:legacy_job ~id:legacy_id
+              ~branch:legacy_branch ~source_repo:repo ~initial_workdir:repo ~home
+              ~context:legacy_context
+              ~instructions:(Filename.concat legacy_worker_path "MONTY.md")
+              ~worker_dir:legacy_worker_path ~worktree_mode:"never"
+              ~wt_command:"wt")
+      in
+      Shell.write_file legacy_script legacy_contents;
+      let legacy_json =
+        match
+          lifecycle_job_json ~id:legacy_id ~title:legacy_title
+            ~branch:legacy_branch ~repo ~context ~worker_dir:legacy_worker_dir
+            ~run_dir:legacy_run_dir ()
+        with
+        | `Assoc fields ->
+            `Assoc (("launch_script", `String legacy_script) :: fields)
+        | _ -> assert false
+      in
+      Yojson.Safe.to_file (Filename.concat legacy_worker_dir "job.json")
+        legacy_json;
+      let legacy_resume =
+        run ~root ~env 897
+          ([ "resume"; legacy_id ] @ codex_options "ghostty")
+      in
+      require_code 0 legacy_resume;
+      let rewritten_legacy = Shell.read_file legacy_script in
+      require_contains "legacy Codex worker gained capture hook" rewritten_legacy
+        "codex-session-capture";
+      require_contains "legacy Codex worker opened picker" rewritten_legacy
+        " resume -C .")
 
 let test_invalid_links_duplicate_ids_and_ambiguous_workers () =
   with_temp_root "invalid-links" (fun root ->
@@ -4421,6 +4700,8 @@ let () =
       test_external_terminal_request_runs_without_state_lock );
     ( "cli_codex_launch_uses_command_local_trust",
       test_codex_launch_uses_command_local_trust );
+    ( "cli_codex_session_capture_and_resume_modes",
+      test_codex_session_capture_and_resume_modes );
     ( "cli_lifecycle_faults_recover_from_both_locations",
       test_lifecycle_faults_recover_from_both_locations );
     ( "cli_completion_persists_force_and_never_creates_worktree",

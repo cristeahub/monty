@@ -610,7 +610,7 @@ let headless_finish_term =
   in
   Cmdliner.Term.(const headless_finish $ worker $ attempt $ outcome $ last_phase $ error $ home_arg)
  in
-let resume archived worker options =
+let resume archived fresh worker options =
   match options with
   | Error message -> exit_code (Error message)
   | Ok options ->
@@ -621,6 +621,16 @@ let resume archived worker options =
   match record with
   | Error msg -> exit_code (Error msg)
   | Ok record -> (
+      let codex_mode =
+        match options.Launcher.harness with
+        | Harness.Pi -> Ok Codex_session.Fresh
+        | Codex ->
+            Codex_session.resume_mode ~fresh
+              ~worker_dir:record.Job_store.worker_dir
+      in
+      match codex_mode with
+      | Error msg -> exit_code (Error msg)
+      | Ok codex_mode ->
       let job =
         if archived then
           match options.Launcher.backend with
@@ -635,7 +645,7 @@ let resume archived worker options =
             (not archived)
             || options.Launcher.backend <> Terminal.Dry_run
           in
-          Launcher.resume_job ~validate_open_task
+          Launcher.resume_job ~validate_open_task ~fresh ~codex_mode
             ~persisted_worktree_mode:record.Job_store.worktree_mode options job
           |> exit_code)
  in
@@ -648,7 +658,17 @@ let resume_term =
     let doc = "Resume an archived job and move it back to active workers." in
     Cmdliner.Arg.(value & flag & info [ "archived" ] ~doc)
   in
-  Cmdliner.Term.(const resume $ archived $ worker $ options_term)
+  let fresh =
+    let doc = "Start a fresh Codex conversation instead of resuming the recorded session." in
+    Cmdliner.Arg.(value & flag & info [ "fresh" ] ~doc)
+  in
+  Cmdliner.Term.(const resume $ archived $ fresh $ worker $ options_term)
+ in
+let codex_session_capture home =
+  In_channel.input_all stdin |> Codex_session.capture ~home |> exit_code
+ in
+let codex_session_capture_term =
+  Cmdliner.Term.(const codex_session_capture $ home_arg)
  in
 let complete worker force home wt_command =
   Done.complete ?worker ~home ~wt_command ~force () |> exit_code
@@ -1053,6 +1073,11 @@ let open_cmd =
   let doc = "Open a worker agent session from durable Monty memory. Alias for resume." in
   Cmdliner.Cmd.v (Cmdliner.Cmd.info "open" ~doc) resume_term
  in
+let codex_session_capture_cmd =
+  let doc = "Record a Codex SessionStart hook payload for the current worker." in
+  Cmdliner.Cmd.v (Cmdliner.Cmd.info "codex-session-capture" ~doc)
+    codex_session_capture_term
+ in
 let done_cmd =
   let doc = "Mark a worker job done, close its linked local task, delete its worktree and branch, and archive its memory." in
   Cmdliner.Cmd.v (Cmdliner.Cmd.info "done" ~doc) complete_term
@@ -1214,6 +1239,7 @@ let main_cmd =
       launch_many_cmd;
       open_cmd;
       resume_cmd;
+      codex_session_capture_cmd;
       done_cmd;
       list_cmd;
       overview_cmd;
