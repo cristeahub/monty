@@ -60,6 +60,7 @@ let job_json ?(status = "active") ?launch_script ?launch_error ~worker_dir ~id
        ("workspaces", `List (workspace_jsons job last_known_worktree)) ]
     @ maybe_assoc "prompt" job.Job.prompt
     @ maybe_assoc "task_key" job.Job.task_key
+    @ maybe_assoc "agent_profile" job.Job.agent_profile
     @ maybe_assoc "last_known_worktree" last_known_worktree
     @ maybe_assoc "launch_script" launch_script
     @ maybe_assoc "launch_error" launch_error)
@@ -83,8 +84,8 @@ let init_memory ~worker_dir ~title =
            "Keep durable notes here, not only in the worktree, because wt worktrees may be deleted and recreated.";
            "" ])
 
-let write_instructions ?destination_dir ~worker_dir ~id ~job ~branch ~repo
-    ~context ~worktree_mode () =
+let write_instructions ?destination_dir ~worker_dir ~id ~job ~profile ~branch
+    ~repo ~context ~worktree_mode () =
   let destination_dir = Option.value ~default:worker_dir destination_dir in
   Shell.ensure_dir (artifacts_dir destination_dir);
   init_memory ~worker_dir:destination_dir ~title:job.Job.title;
@@ -159,10 +160,20 @@ let write_instructions ?destination_dir ~worker_dir ~id ~job ~branch ~repo
         "Read the task context file passed after this instructions file.";
         "Write back important session memory to the durable worker folder above.";
         "";
-        "## Review posture";
-        String.concat "\n" Reviewer_prompt.review_posture_header;
-        String.concat "\n" Reviewer_prompt.review_preamble;
+        "## Agent profile";
         "";
+        "Selected profile: `" ^ profile.Agent_profile.id ^ "`";
+        "";
+        profile.interactive;
+        "";
+        "### Safety envelope";
+        "";
+        "Do not run `monty done`, create, switch, or remove worktrees, or modify `job.json` or Monty task, settings, or project state.";
+        "Do not stage, commit, push, open a pull request, submit a review, post comments, or perform any other remote write unless explicitly approved.";
+        "";
+        "### Review safety envelope";
+        "";
+        String.concat "\n" Reviewer_prompt.review_preamble;
         Reviewer_prompt.read_only_worktree_rule;
         "Use shell commands only for read-only inspection and non-mutating validation.";
         String.concat "\n" Reviewer_prompt.review_output_requirements;
@@ -198,9 +209,10 @@ let write_instructions ?destination_dir ~worker_dir ~id ~job ~branch ~repo
   in
   Shell.write_file (instructions_file destination_dir) text
 
-let ensure_prepared_result ~home ~state ~id ~job ~branch ~repo ~context
+let ensure_prepared_result ~home ~state ~id ~job ~profile ~branch ~repo ~context
     ~worktree_mode ~last_known_worktree =
   let ( let* ) = Result.bind in
+  let job = { job with Job.agent_profile = Some profile.Agent_profile.id } in
   let* id = State_path.safe_component ~label:"worker id" id in
   if not (String.equal state.State_path.id id) then
     Error
@@ -212,8 +224,9 @@ let ensure_prepared_result ~home ~state ~id ~job ~branch ~repo ~context
       State_store.with_lock ~home (fun () ->
           let* () = State_path.ensure_contained_for_mutation state in
           try
-            write_instructions ~worker_dir ~id ~job ~branch ~repo ~context
+            write_instructions ~worker_dir ~id ~job ~profile ~branch ~repo ~context
               ~worktree_mode ();
+            let* () = Agent_profile.write_snapshot ~worker_dir profile in
             let* () =
               write_job_json_unlocked ~worker_dir ~id ~job ~branch ~repo ~context
                 ~worktree_mode ~last_known_worktree ()
@@ -229,18 +242,19 @@ let ensure_prepared_result ~home ~state ~id ~job ~branch ~repo ~context
     in
     Ok (id, worker_dir, instructions_file worker_dir)
 
-let ensure_result ~home ~job ~branch ~repo ~context ~worktree_mode
+let ensure_result ~home ~job ~profile ~branch ~repo ~context ~worktree_mode
     ~last_known_worktree =
   let ( let* ) = Result.bind in
   let id = Job.id_or_default ~branch job in
   let* state = worker_state ~home ~id job in
   let* () = State_path.ensure_contained_for_mutation state in
-  ensure_prepared_result ~home ~state ~id ~job ~branch ~repo ~context
+  ensure_prepared_result ~home ~state ~id ~job ~profile ~branch ~repo ~context
     ~worktree_mode ~last_known_worktree
 
-let ensure ~home ~job ~branch ~repo ~context ~worktree_mode ~last_known_worktree =
+let ensure ~home ~job ~profile ~branch ~repo ~context ~worktree_mode
+    ~last_known_worktree =
   match
-    ensure_result ~home ~job ~branch ~repo ~context ~worktree_mode
+    ensure_result ~home ~job ~profile ~branch ~repo ~context ~worktree_mode
       ~last_known_worktree
   with
   | Ok value -> value

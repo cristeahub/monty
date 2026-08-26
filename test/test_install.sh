@@ -24,6 +24,9 @@ same_home_argument=$repo
 mkdir -p "$repo/.monty" "$fake_bin" "$home"
 cp "$installer" "$repo/install.sh"
 cp "$source_version" "$repo/.monty/version"
+mkdir -p "$repo/agent-profiles/reviewed" "$repo/agent-profiles/solo"
+printf '%s\n' '{"id":"reviewed"}' > "$repo/agent-profiles/reviewed/profile.json"
+printf '%s\n' '{"id":"solo"}' > "$repo/agent-profiles/solo/profile.json"
 chmod 600 "$repo/.monty/version"
 
 cat > "$fake_bin/dune" <<'EOF'
@@ -152,10 +155,17 @@ printf 'binary one\n' > "$repo/binary-release.txt"
 run_install
 assert_contents 'new state version' "$state_dir/version" '2'
 assert_contents 'new control room' "$installed_home/control-room.txt" 'release one'
+assert_contents 'installed reviewed profile' \
+  "$installed_home/agent-profiles/reviewed/profile.json" '{"id":"reviewed"}'
+assert_contents 'installed solo profile' \
+  "$installed_home/agent-profiles/solo/profile.json" '{"id":"solo"}'
 assert_release 'binary one'
 
 printf '{"tasks":[{"id":"keep-me"}]}\n' > "$state_dir/tasks.local.json"
 printf 'durable memory\n' > "$state_dir/memory.md"
+mkdir -p "$state_dir/agent-profiles/personal"
+printf '%s\n' '{"id":"personal"}' > \
+  "$state_dir/agent-profiles/personal/profile.json"
 # shellcheck disable=SC2012
 state_inode=$(ls -di "$state_dir" | awk '{ print $1 }')
 printf 'release two\n' > "$repo/control-room.txt"
@@ -164,6 +174,8 @@ run_install
 assert_contents 'preserved task state' "$state_dir/tasks.local.json" \
   '{"tasks":[{"id":"keep-me"}]}'
 assert_contents 'preserved worker memory' "$state_dir/memory.md" 'durable memory'
+assert_contents 'preserved personal profile' \
+  "$state_dir/agent-profiles/personal/profile.json" '{"id":"personal"}'
 assert_contents 'matching state version' "$state_dir/version" '2'
 # shellcheck disable=SC2012
 matching_inode=$(ls -di "$state_dir" | awk '{ print $1 }')

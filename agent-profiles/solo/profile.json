@@ -1,0 +1,11 @@
+{
+  "schema": "monty:agent-profile:v1",
+  "id": "solo",
+  "description": "One implementation phase with self-validation and no reviewer or fixer stages",
+  "interactive": "interactive.md",
+  "headless": {
+    "implementation": "implementation.md",
+    "reviews": [],
+    "fix": null
+  }
+}

@@ -27,6 +27,51 @@ let assert_not_contains label text unexpected =
 
 let must = function Ok value -> value | Error msg -> failwith msg
 
+let reviewed_profile =
+  Agent_profile.
+    { id = "reviewed";
+      description = "test reviewed profile";
+      interactive = "Run /review.";
+      implementation = "Implement and validate the task.";
+      reviews =
+        [ { id = "correctness";
+            title = "Correctness review";
+            instructions = "Review correctness." };
+          { id = "quality";
+            title = "Quality and tests review";
+            instructions = "Review quality and tests." } ];
+      fix = Some "Verify findings and fix valid issues." }
+
+let install_profile home (profile : Agent_profile.t) =
+  let directory = Filename.concat (Filename.concat home "agent-profiles") profile.id in
+  Shell.ensure_dir directory;
+  let instruction name contents =
+    Shell.write_file (Filename.concat directory name) contents;
+    `String name
+  in
+  let reviews =
+    profile.reviews
+    |> List.map (fun (review : Agent_profile.review) ->
+           let name = review.id ^ ".md" in
+           `Assoc
+             [ ("id", `String review.id); ("title", `String review.title);
+               ("instructions", instruction name review.instructions) ])
+  in
+  Yojson.Safe.to_file (Filename.concat directory "profile.json")
+    (`Assoc
+      [ ("schema", `String Agent_profile.schema); ("id", `String profile.id);
+        ("description", `String profile.description);
+        ("interactive", instruction "interactive.md" profile.interactive);
+        ( "headless",
+          `Assoc
+            [ ("implementation",
+               instruction "implementation.md" profile.implementation);
+              ("reviews", `List reviews);
+              ( "fix",
+                match profile.fix with
+                | None -> `Null
+                | Some fix -> instruction "fix.md" fix ) ] ) ])
+
 let capture_stdout f =
   let path = Filename.temp_file "monty-test-stdout" ".txt" in
   let original_stdout = Unix.dup Unix.stdout in
@@ -175,6 +220,69 @@ let test_manifest () =
                     `List [ `Assoc [ ("repo", `String "../admin") ] ] ) ] ] ) ])
     "must be an absolute path"
 
+let test_agent_profile_validation () =
+  let expect_error label needle = function
+    | Ok _ -> failwith (label ^ " unexpectedly succeeded")
+    | Error message -> assert_contains label message needle
+  in
+  let bundled_home =
+    Option.value ~default:(Sys.getcwd ()) (Sys.getenv_opt "DUNE_SOURCEROOT")
+  in
+  let bundled = must (Agent_profile.discover ~home:bundled_home) in
+  assert_bool "bundled reviewed profile"
+    (List.exists
+       (fun (profile : Agent_profile.t) -> profile.id = "reviewed") bundled);
+  assert_bool "bundled solo profile"
+    (List.exists
+       (fun (profile : Agent_profile.t) -> profile.id = "solo") bundled);
+  let valid = temp_root "profiles-valid" in
+  install_profile valid reviewed_profile;
+  let profiles = must (Agent_profile.discover ~home:valid) in
+  assert_equal "profile discovery count" "1"
+    (List.length profiles |> string_of_int);
+  let duplicate = temp_root "profiles-duplicate" in
+  install_profile duplicate reviewed_profile;
+  install_profile (Filename.concat duplicate ".monty") reviewed_profile;
+  expect_error "duplicate profile" "duplicate agent profile id"
+    (Agent_profile.discover ~home:duplicate);
+  let bad_schema = temp_root "profiles-schema" in
+  install_profile bad_schema reviewed_profile;
+  Shell.write_file
+    (Filename.concat bad_schema "agent-profiles/reviewed/profile.json")
+    "{\"schema\":\"bad\"}\n";
+  expect_error "profile schema" "unsupported agent profile schema"
+    (Agent_profile.discover ~home:bad_schema);
+  let missing = temp_root "profiles-missing" in
+  install_profile missing reviewed_profile;
+  Unix.unlink
+    (Filename.concat missing "agent-profiles/reviewed/implementation.md");
+  expect_error "missing profile instruction" "instruction is missing"
+    (Agent_profile.discover ~home:missing);
+  let symlink = temp_root "profiles-symlink" in
+  install_profile symlink reviewed_profile;
+  let interactive =
+    Filename.concat symlink "agent-profiles/reviewed/interactive.md"
+  in
+  Unix.unlink interactive;
+  Unix.symlink "/tmp" interactive;
+  expect_error "profile instruction symlink" "instruction is a symlink"
+    (Agent_profile.discover ~home:symlink);
+  let duplicate_reviewer = temp_root "profiles-reviewer" in
+  let duplicate_reviews =
+    { reviewed_profile with
+      reviews =
+        [ List.hd reviewed_profile.reviews;
+          List.hd reviewed_profile.reviews ] }
+  in
+  install_profile duplicate_reviewer duplicate_reviews;
+  expect_error "duplicate reviewer" "duplicate reviewer ids"
+    (Agent_profile.discover ~home:duplicate_reviewer);
+  let invalid_stages = temp_root "profiles-stages" in
+  install_profile invalid_stages
+    { reviewed_profile with reviews = []; fix = Some "Fix without reviews." };
+  expect_error "invalid profile stages" "fix stage without reviewers"
+    (Agent_profile.discover ~home:invalid_stages)
+
 let setup_worker ?(last_known_worktree = None) root =
   let home = Filename.concat root "home" in
   let repo = Filename.concat root "repo" in
@@ -187,7 +295,8 @@ let setup_worker ?(last_known_worktree = None) root =
       ~repo ~context ()
   in
   let _id, worker_dir, instructions =
-    Worker_memory.ensure ~home ~job ~branch:"cto/issue-123" ~repo ~context
+    Worker_memory.ensure ~home ~job ~profile:reviewed_profile
+      ~branch:"cto/issue-123" ~repo ~context
       ~worktree_mode:"always" ~last_known_worktree
   in
   (home, repo, context, worker_dir, instructions)
@@ -298,7 +407,8 @@ let setup_git_worker root =
     Job.make ~id:"issue-123" ~branch ~title:"Fix issue 123" ~repo ~context ()
   in
   let _id, worker_dir, instructions =
-    Worker_memory.ensure ~home ~job ~branch ~repo ~context ~worktree_mode:"always"
+    Worker_memory.ensure ~home ~job ~profile:reviewed_profile ~branch ~repo
+      ~context ~worktree_mode:"always"
       ~last_known_worktree:(Some worktree)
   in
   (home, repo, branch, worktree, worker_dir, instructions, wt_command)
@@ -352,7 +462,8 @@ let test_done_closes_linked_local_task () =
       ~branch:"cto/fix-local-task" ~title:"Fix local task" ~repo ~context ()
   in
   let _id, worker_dir, _instructions =
-    Worker_memory.ensure ~home ~job ~branch:"cto/fix-local-task" ~repo ~context
+    Worker_memory.ensure ~home ~job ~profile:reviewed_profile
+      ~branch:"cto/fix-local-task" ~repo ~context
       ~worktree_mode:"never" ~last_known_worktree:None
   in
   must (Done.complete ~worker:(task.Overview_types.id ^ "-fix-local-task") ~home
@@ -390,7 +501,8 @@ let test_done_does_not_infer_legacy_local_task_by_title () =
       ~repo ~context ()
   in
   let _id, worker_dir, _instructions =
-    Worker_memory.ensure ~home ~job ~branch:"cto/legacy" ~repo ~context
+    Worker_memory.ensure ~home ~job ~profile:reviewed_profile
+      ~branch:"cto/legacy" ~repo ~context
       ~worktree_mode:"never" ~last_known_worktree:None
   in
   must (Done.complete ~worker:"legacy-worker" ~home ~wt_command:"wt" ~force:false ());
@@ -418,6 +530,7 @@ let test_resume_archived_reactivates () =
 
 let test_launch_many_single_job_uses_single_job_defaults () =
   let root = temp_root "launch-many-single" in
+  install_profile root reviewed_profile;
   Shell.ensure_dir root;
   let context = Filename.concat root "context.md" in
   Shell.write_file context "# Task\n";
@@ -433,6 +546,7 @@ let test_launch_many_single_job_uses_single_job_defaults () =
       wt_command = "/usr/bin/true --wt-test";
       worktree_mode = Always;
       branch_prefix = "cto";
+      agent_profile = "reviewed";
       fork = None;
       home = root;
       script_dir = root;
@@ -445,6 +559,7 @@ let test_launch_many_single_job_uses_single_job_defaults () =
 
 let test_launch_many_multiple_jobs_keeps_numbered_defaults () =
   let root = temp_root "launch-many-multiple" in
+  install_profile root reviewed_profile;
   Shell.ensure_dir root;
   let context = Filename.concat root "context.md" in
   Shell.write_file context "# Task\n";
@@ -461,6 +576,7 @@ let test_launch_many_multiple_jobs_keeps_numbered_defaults () =
       wt_command = "/usr/bin/true --wt-test";
       worktree_mode = Always;
       branch_prefix = "cto";
+      agent_profile = "reviewed";
       fork = None;
       home = root;
       script_dir = root;
@@ -503,7 +619,8 @@ let test_tasks_sync_jobs_to_local_source () =
       ~title:"Issue 5250 - Localize invoice to English" ~repo ~context ()
   in
   let _id, worker_dir, _instructions =
-    Worker_memory.ensure ~home ~job ~branch:"cto/5250-localize-invoice-english" ~repo
+    Worker_memory.ensure ~home ~job ~profile:reviewed_profile
+      ~branch:"cto/5250-localize-invoice-english" ~repo
       ~context ~worktree_mode:"never" ~last_known_worktree:None
   in
   assert_bool "worker memory created" (Sys.file_exists worker_dir);
@@ -986,6 +1103,7 @@ let test_codex_harness_rejects_fork () =
         wt_command = "/usr/bin/true";
         worktree_mode = Never;
         branch_prefix = "monty";
+        agent_profile = "reviewed";
         fork = Some "pi-session";
         home = "/tmp";
         script_dir = "/tmp";
@@ -1072,7 +1190,8 @@ let test_headless_json_contract () =
         instructions =
           "/monty/.monty/runs/run-1/workers/issue-123/MONTY.md";
         context = "/monty/.monty/runs/run-1/issue-123.md";
-        home = "/monty" }
+        home = "/monty";
+        profile = reviewed_profile }
   in
   let json = Headless.dispatch_json ~attempt_id:"attempt-test" dispatch in
   assert_equal "headless dispatch schema" Headless.dispatch_schema
@@ -1128,6 +1247,54 @@ let test_headless_json_contract () =
   assert_child "headless quality review" "reviews/quality.md"
     (List.nth reviewers 1);
   assert_child "headless final" "final.md" fixer;
+  let review_only_profile =
+    Agent_profile.
+      { id = "review-only";
+        description = "one review without a fixer";
+        interactive = "Review once.";
+        implementation = "Implement.";
+        reviews =
+          [ { id = "edge"; title = "Edge review";
+              instructions = "Inspect edge cases." } ];
+        fix = None }
+  in
+  let review_only =
+    Headless.dispatch_json ~attempt_id:"attempt-review-only"
+      { dispatch with profile = review_only_profile }
+  in
+  let review_only_chain =
+    Yojson.Safe.Util.(
+      review_only |> member "harness_call" |> member "arguments"
+      |> member "chain" |> to_list)
+  in
+  assert_bool "review-only chain omits fixer"
+    (List.length review_only_chain = 2);
+  assert_equal "review-only implementation is final" "final.md"
+    Yojson.Safe.Util.(
+      List.hd review_only_chain |> member "output" |> to_string
+      |> Filename.basename);
+  let colliding_ids_profile =
+    { reviewed_profile with
+      reviews =
+        [ Agent_profile.
+            { id = "edge-case"; title = "Hyphen review";
+              instructions = "Review." };
+          Agent_profile.
+            { id = "edge_case"; title = "Underscore review";
+              instructions = "Review." } ] }
+  in
+  let colliding_ids =
+    Headless.dispatch_json ~attempt_id:"attempt-aliases"
+      { dispatch with profile = colliding_ids_profile }
+  in
+  let aliases =
+    Yojson.Safe.Util.(
+      colliding_ids |> member "harness_call" |> member "arguments"
+      |> member "chain" |> index 1 |> member "parallel" |> to_list)
+    |> List.map Yojson.Safe.Util.(fun json -> json |> member "as" |> to_string)
+  in
+  assert_bool "distinct reviewer ids keep distinct output aliases"
+    (List.sort_uniq String.compare aliases |> List.length = 2);
   let prepared =
     Headless.
       { id = dispatch.id;
@@ -1136,7 +1303,8 @@ let test_headless_json_contract () =
         worktree = Some dispatch.worktree;
         workspaces = dispatch.workspaces;
         worker_dir = dispatch.worker_dir;
-        status = "prepared" }
+        status = "prepared";
+        profile = reviewed_profile }
   in
   let prepared_json =
     Headless.prepare_json ~harness:Harness.Codex ~codex_yolo:true [ prepared ]
@@ -1161,6 +1329,7 @@ let () =
   [ ("slug", test_slug);
     ("shell_quote", test_shell_quote);
     ("manifest", test_manifest);
+    ("agent_profile_validation", test_agent_profile_validation);
     ("worker_memory_and_resume", test_worker_memory_and_resume);
     ("wt_repo_disambiguation", test_wt_disambiguates_repo_when_branch_name_collides);
     ("done_refuses_dirty_worktree", test_done_refuses_dirty_worktree);

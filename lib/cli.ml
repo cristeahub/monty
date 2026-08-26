@@ -99,6 +99,10 @@ let branch_prefix_arg =
   let doc = "Prefix for automatically generated worktree branches. Overrides the persisted setting, MONTY_BRANCH_PREFIX fallback, and monty default." in
   Cmdliner.Arg.(value & opt (some string) None & info [ "branch-prefix" ] ~docv:"PREFIX" ~doc)
  in
+let agent_profile_arg =
+  let doc = "Agent profile for newly launched workers. Overrides the persisted setting and reviewed default." in
+  Cmdliner.Arg.(value & opt (some string) None & info [ "agent-profile" ] ~docv:"NAME" ~doc)
+ in
 let fork_arg =
   let doc = "Optional Pi session id or path to fork. Unsupported by Codex." in
   Cmdliner.Arg.(value & opt (some string) None & info [ "fork" ] ~docv:"SESSION" ~doc)
@@ -115,7 +119,7 @@ let monty_command () =
     | None -> Shell.normalize (Shell.abs_path executable)
   else Shell.normalize (Shell.abs_path executable)
  in
-let options backend target harness_override codex_yolo_override pi_command codex_command wt_command worktree_mode branch_prefix_override fork home script_dir =
+let options backend target harness_override codex_yolo_override pi_command codex_command wt_command worktree_mode branch_prefix_override agent_profile_override fork home script_dir =
   let ( let* ) = Result.bind in
   let* harness =
     Settings.effective_harness ~getenv ~home harness_override
@@ -125,6 +129,9 @@ let options backend target harness_override codex_yolo_override pi_command codex
   in
   let* branch_prefix =
     Settings.effective_branch_prefix ~getenv ~home branch_prefix_override
+  in
+  let* agent_profile =
+    Settings.effective_agent_profile ~home agent_profile_override
   in
   let script_dir =
     match script_dir with
@@ -141,6 +148,7 @@ let options backend target harness_override codex_yolo_override pi_command codex
     wt_command;
     worktree_mode;
     branch_prefix;
+    agent_profile;
     fork;
     home;
     script_dir;
@@ -151,19 +159,19 @@ let options_term =
   Cmdliner.Term.(
     const options $ backend_arg $ target_arg $ harness_arg $ codex_yolo_arg $ pi_command_arg
     $ codex_command_arg $ wt_command_arg $ worktree_arg
-    $ branch_prefix_arg $ fork_arg $ home_arg $ script_dir_arg)
+    $ branch_prefix_arg $ agent_profile_arg $ fork_arg $ home_arg $ script_dir_arg)
  in
 let headless_options harness_override codex_yolo_override pi_command codex_command
-    wt_command branch_prefix_override fork home script_dir =
+    wt_command branch_prefix_override agent_profile_override fork home script_dir =
   options Terminal.Dry_run Terminal.Tab harness_override codex_yolo_override
     pi_command codex_command wt_command Launcher.Always branch_prefix_override
-    fork home script_dir
+    agent_profile_override fork home script_dir
  in
 let headless_options_term =
   Cmdliner.Term.(
     const headless_options $ harness_arg $ codex_yolo_arg $ pi_command_arg
-    $ codex_command_arg $ wt_command_arg $ branch_prefix_arg $ fork_arg
-    $ home_arg $ script_dir_arg)
+    $ codex_command_arg $ wt_command_arg $ branch_prefix_arg $ agent_profile_arg
+    $ fork_arg $ home_arg $ script_dir_arg)
  in
 let start name home harness_override codex_yolo_override pi_command codex_command =
   match
@@ -621,33 +629,43 @@ let resume archived fresh worker options =
   match record with
   | Error msg -> exit_code (Error msg)
   | Ok record -> (
-      let codex_mode =
-        match options.Launcher.harness with
-        | Harness.Pi -> Ok Codex_session.Fresh
-        | Codex ->
-            Codex_session.resume_mode ~fresh
-              ~worker_dir:record.Job_store.worker_dir
-      in
-      match codex_mode with
+      match
+        Agent_profile.load_pinned ~home:options.Launcher.home
+          ~worker_dir:record.Job_store.worker_dir
+          record.job.Job.agent_profile
+      with
       | Error msg -> exit_code (Error msg)
-      | Ok codex_mode ->
-      let job =
-        if archived then
-          match options.Launcher.backend with
-          | Terminal.Dry_run -> Resume.plan_reactivate ~home:options.Launcher.home record
-          | Terminal.Ghostty -> Resume.reactivate ~home:options.Launcher.home record
-        else Ok record.Job_store.job
-      in
-      match job with
-      | Error msg -> exit_code (Error msg)
-      | Ok job ->
+      | Ok profile ->
+          let codex_mode =
+            match options.Launcher.harness with
+            | Harness.Pi -> Ok Codex_session.Fresh
+            | Codex ->
+                Codex_session.resume_mode ~fresh
+                  ~worker_dir:record.Job_store.worker_dir
+          in
+          (match codex_mode with
+          | Error msg -> exit_code (Error msg)
+          | Ok codex_mode ->
+          let job =
+            if archived then
+              match options.Launcher.backend with
+              | Terminal.Dry_run ->
+                  Resume.plan_reactivate ~home:options.Launcher.home record
+              | Terminal.Ghostty ->
+                  Resume.reactivate ~home:options.Launcher.home record
+            else Ok record.Job_store.job
+          in
+          (match job with
+          | Error msg -> exit_code (Error msg)
+          | Ok job ->
           let validate_open_task =
             (not archived)
             || options.Launcher.backend <> Terminal.Dry_run
           in
           Launcher.resume_job ~validate_open_task ~fresh ~codex_mode
-            ~persisted_worktree_mode:record.Job_store.worktree_mode options job
-          |> exit_code)
+            ~persisted_worktree_mode:record.Job_store.worktree_mode ~profile
+            options job
+          |> exit_code)))
  in
 let resume_term =
   let worker =
@@ -983,6 +1001,11 @@ let settings_get key home =
             (settings.Settings.branch_prefix
             |> Option.value ~default:"monty");
           0
+      | "agent-profile" ->
+          Fmt.pr "%s\n"
+            (settings.Settings.agent_profile
+            |> Option.value ~default:Agent_profile.default_id);
+          0
       | _ -> exit_code (Error (Printf.sprintf "unknown setting %S" key)))
  in
 let settings_get_term =
@@ -1014,6 +1037,13 @@ let settings_set key value home =
       Settings.set_branch_prefix ~home value
       |> Result.map (fun () -> Fmt.pr "branch-prefix = %s\n" value)
       |> exit_code
+  | "agent-profile" -> (
+      match Agent_profile.find ~home value with
+      | Error message -> exit_code (Error message)
+      | Ok profile ->
+          Settings.set_agent_profile ~home profile.id
+          |> Result.map (fun () -> Fmt.pr "agent-profile = %s\n" profile.id)
+          |> exit_code)
   | _ -> exit_code (Error (Printf.sprintf "unknown setting %S" key))
  in
 let settings_set_term =
@@ -1046,6 +1076,58 @@ let settings_cmd =
   Cmdliner.Cmd.group ~default:settings_show_term
     (Cmdliner.Cmd.info "settings" ~doc:"Show and change persisted Monty settings.")
     [ show_cmd; get_cmd; set_cmd ]
+ in
+let agent_profiles_list home =
+  match
+    (Agent_profile.discover ~home, Settings.effective_agent_profile ~home None)
+  with
+  | Error message, _ | _, Error message -> exit_code (Error message)
+  | Ok profiles, Ok selected ->
+      Fmt.pr "ID        SELECTED  STAGES                                  DESCRIPTION\n";
+      Fmt.pr "--------  --------  --------------------------------------  -----------\n";
+      profiles
+      |> List.sort (fun (left : Agent_profile.t) right ->
+             String.compare left.id right.id)
+      |> List.iter (fun (profile : Agent_profile.t) ->
+             Fmt.pr "%-8s  %-8s  %-38s  %s\n" profile.Agent_profile.id
+               (if String.equal profile.id selected then "yes" else "")
+               (Agent_profile.stage_summary profile) profile.description);
+      0
+ in
+let agent_profiles_list_term = Cmdliner.Term.(const agent_profiles_list $ home_arg)
+ in
+let agent_profiles_show name home =
+  let selected = Settings.effective_agent_profile ~home name in
+  match selected with
+  | Error message -> exit_code (Error message)
+  | Ok name -> (
+      match Agent_profile.find ~home name with
+      | Error message -> exit_code (Error message)
+      | Ok profile ->
+          Fmt.pr "%s" (Agent_profile.render profile);
+          0)
+ in
+let agent_profiles_show_term =
+  let name =
+    let doc = "Profile name. Defaults to the currently selected profile." in
+    Cmdliner.Arg.(value & pos 0 (some string) None & info [] ~docv:"NAME" ~doc)
+  in
+  Cmdliner.Term.(const agent_profiles_show $ name $ home_arg)
+ in
+let agent_profiles_cmd =
+  let list_cmd =
+    Cmdliner.Cmd.v
+      (Cmdliner.Cmd.info "list" ~doc:"List available agent profiles.")
+      agent_profiles_list_term
+  in
+  let show_cmd =
+    Cmdliner.Cmd.v
+      (Cmdliner.Cmd.info "show" ~doc:"Show an expanded agent profile.")
+      agent_profiles_show_term
+  in
+  Cmdliner.Cmd.group
+    (Cmdliner.Cmd.info "agent-profiles" ~doc:"Discover and inspect agent profiles.")
+    [ list_cmd; show_cmd ]
  in
 let start_cmd =
   let doc = "Start the head-butler agent session in the Monty control room." in
@@ -1245,6 +1327,7 @@ let main_cmd =
       overview_cmd;
       projects_cmd;
       settings_cmd;
+      agent_profiles_cmd;
       tasks_cmd;
       task_cmd;
       headless_cmd;
