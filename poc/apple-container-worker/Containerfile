@@ -1,0 +1,7 @@
+FROM docker.io/library/alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce
+
+RUN apk add --no-cache git=2.49.1-r0
+
+ENV HOME=/monty/home
+LABEL com.monty.poc=apple-container-worker-v1
+CMD ["sleep", "infinity"]
