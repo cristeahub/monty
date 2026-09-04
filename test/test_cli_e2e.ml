@@ -37,6 +37,24 @@ let rec remove_tree path =
     | _ -> Unix.unlink path
   with Unix.Unix_error ((Unix.ENOENT | Unix.ENOTDIR), _, _) -> ()
 
+let rec tree_has path predicate =
+  match Unix.lstat path with
+  | exception Unix.Unix_error ((Unix.ENOENT | Unix.ENOTDIR), _, _) -> false
+  | { Unix.st_kind = Unix.S_DIR; _ } ->
+      Sys.readdir path |> Array.exists (fun name -> tree_has (Filename.concat path name) predicate)
+  | { Unix.st_kind = Unix.S_REG; _ } -> predicate path
+  | _ -> false
+
+let wait_for_path path =
+  let rec loop remaining =
+    if Sys.file_exists path then ()
+    else if remaining = 0 then failf "timed out waiting for %s" path
+    else (
+      ignore (Unix.select [] [] [] 0.02);
+      loop (remaining - 1))
+  in
+  loop 250
+
 let with_temp_root name f =
   let marker = Filename.temp_file ("monty-cli-" ^ name ^ "-") ".tmp" in
   Sys.remove marker;
@@ -3555,6 +3573,7 @@ let test_headless_prepare_begin_and_resume () =
             harness = Harness.Pi;
             harness_command = "pi";
             codex_yolo = false;
+            container_workers = false;
             wt_command = Filename.concat root "fake-bin/wt";
             worktree_mode = Always;
             branch_prefix = "monty";
@@ -4769,6 +4788,8 @@ let test_settings_commands_and_effective_harness () =
       require_contains "initial harness setting" initial.stdout "harness       pi";
       require_contains "initial Codex YOLO setting" initial.stdout
         "codex-yolo    false";
+      require_contains "initial container worker setting" initial.stdout
+        "container-workers false";
       require_contains "initial branch prefix setting" initial.stdout
         "branch-prefix monty";
       let set =
@@ -4796,6 +4817,20 @@ let test_settings_commands_and_effective_harness () =
       in
       require_code 0 get_yolo;
       require_contains "get Codex YOLO result" get_yolo.stdout "true";
+      let set_container_workers =
+        run ~root ~env 195225
+          [ "settings"; "set"; "container-workers"; "true"; "--home"; home ]
+      in
+      require_code 0 set_container_workers;
+      require_contains "set container workers result"
+        set_container_workers.stdout "container-workers = true";
+      let get_container_workers =
+        run ~root ~env 195226
+          [ "settings"; "get"; "container-workers"; "--home"; home ]
+      in
+      require_code 0 get_container_workers;
+      require_contains "get container workers result"
+        get_container_workers.stdout "true";
       let set_branch_prefix =
         run ~root ~env 19523
           [ "settings"; "set"; "branch-prefix"; "cto"; "--home"; home ]
@@ -4821,6 +4856,17 @@ let test_settings_commands_and_effective_harness () =
             Yojson.Safe.from_file settings_path |> member "codex_yolo"
             |> to_bool)
       then failwith "settings command did not persist Codex YOLO";
+      if
+        not
+          Yojson.Safe.Util.(
+            Yojson.Safe.from_file settings_path |> member "container_workers"
+            |> to_bool)
+      then failwith "settings command did not persist container workers";
+      let disable_container_workers =
+        run ~root ~env 195227
+          [ "settings"; "set"; "container-workers"; "false"; "--home"; home ]
+      in
+      require_code 0 disable_container_workers;
       if
         Yojson.Safe.Util.(
           Yojson.Safe.from_file settings_path |> member "branch_prefix"
@@ -4914,7 +4960,530 @@ let test_head_butler_continue_uses_native_sessions_without_monty_state () =
              if Sys.file_exists (Filename.concat home relative) then
                failwith
                  ("continuing a head-butler conversation created Monty state at "
-                ^ relative)))
+                 ^ relative)))
+
+let test_containerized_codex_worker_lifecycle () =
+  with_temp_root "container-worker" (fun root ->
+      let home, host_log, base_env = setup_environment root in
+      let repo = Filename.concat root "repo" in
+      let context = Filename.concat root "context.md" in
+      let manifest =
+        Filename.concat home ".monty/runs/run-container/jobs.json"
+      in
+      let worker_dir =
+        Filename.concat home
+          ".monty/runs/run-container/workers/container-worker"
+      in
+      let job_file = Filename.concat worker_dir "job.json" in
+      let fake_state = Filename.concat root "fake-container-state" in
+      let container_log = Filename.concat root "container.log" in
+      let fake_container = Filename.concat root "fake-bin/container" in
+      let fixture =
+        Filename.concat
+          (Option.value ~default:(Sys.getcwd ())
+             (Sys.getenv_opt "DUNE_SOURCEROOT"))
+          "test/fake_container.sh"
+      in
+      init_git_repo repo;
+      let initial_head =
+        Process.run_success ~cwd:repo "git rev-parse HEAD" |> Result.get_ok
+        |> String.trim
+      in
+      Process.run_quiet ~cwd:repo "git branch cto/container-worker"
+      |> Result.get_ok;
+      Shell.write_file (Filename.concat repo "tracked.txt") "advanced host HEAD\n";
+      Process.run_quiet ~cwd:repo "git commit -qam advanced" |> Result.get_ok;
+      add_project ~root ~home ~env:base_env repo;
+      Shell.write_file context "# Private container task\n";
+      Shell.write_file fake_container (Shell.read_file fixture);
+      Shell.chmod_executable fake_container;
+      let codex = Filename.concat root "fake-bin/codex" in
+      Shell.write_file codex
+        (String.concat "\n"
+           [ "#!/bin/sh";
+             "set -eu";
+             "printf '%s\\n' \"$0 $*\" >> " ^ Shell.quote container_log;
+             "output=";
+             "worktree=";
+             "while [ \"$#\" -gt 0 ]; do";
+             "  case \"$1\" in";
+             "    --output-last-message|-o) output=$2; shift 2 ;;";
+             "    -C|--cd) worktree=$2; shift 2 ;;";
+             "    --sandbox|--add-dir|-c|--config|--color) shift 2 ;;";
+             "    *) shift ;;";
+             "  esac";
+             "done";
+             "cat >/dev/null";
+             "test -n \"$output\"";
+             "test -n \"$worktree\"";
+             "test \"${MONTY_TEST_NESTED_AGENT:-}\" != true";
+             "if [ -n \"${MONTY_TEST_CODEX_BLOCK:-}\" ]; then";
+             "  : > \"$MONTY_TEST_CODEX_BLOCK.started\"";
+             "  while [ ! -e \"$MONTY_TEST_CODEX_BLOCK.release\" ]; do sleep 0.02; done";
+             "fi";
+             "if [ ! -e \"$worktree/private-change.txt\" ]; then";
+             "  printf '%s\\n' private > \"$worktree/private-change.txt\"";
+             "fi";
+             "if [ \"${MONTY_TEST_LEAK_AUTH:-}\" = true ]; then";
+             "  cat \"$CODEX_HOME/auth.json\" > \"$output\"";
+             "else";
+             "  printf '%s\\n' 'fake private Codex handoff' > \"$output\"";
+             "fi";
+             "printf '%s\\n' '{\"type\":\"turn.completed\"}'";
+             "" ]);
+      Shell.chmod_executable codex;
+      let codex_home = Filename.concat root "codex-home" in
+      let auth = Filename.concat codex_home "auth.json" in
+      let secret = "container-auth-secret-that-must-not-leak" in
+      Shell.write_file auth
+        (Yojson.Safe.to_string
+           (`Assoc [ ("tokens", `Assoc [ ("access_token", `String secret) ]) ])
+        ^ "\n");
+      Unix.chmod auth 0o600;
+      let env =
+        replace_env base_env
+          [ ("MONTY_FAKE_CONTAINER_STATE", fake_state);
+            ("MONTY_FAKE_CONTAINER_LOG", container_log) ]
+      in
+      let set_harness =
+        run ~root ~env 6000
+          [ "settings"; "set"; "harness"; "codex"; "--home"; home ]
+      in
+      require_code 0 set_harness;
+      let set_profile =
+        run ~root ~env 6001
+          [ "settings"; "set"; "agent-profile"; "solo"; "--home"; home ]
+      in
+      require_code 0 set_profile;
+      write_manifest manifest
+        [ manifest_job ~id:"container-worker" ~branch:"cto/container-worker"
+            ~title:"Container worker" ~repo ~context () ];
+      let host_dry_run =
+        run ~root ~env 6002
+          [ "headless"; "prepare-many"; "--dry-run"; "--manifest";
+            manifest; "--home"; home ]
+      in
+      require_code 0 host_dry_run;
+      if Sys.file_exists container_log then
+        failwith "disabled container setting invoked Apple container";
+      let enable =
+        run ~root ~env 6003
+          [ "settings"; "set"; "container-workers"; "true"; "--home"; home ]
+      in
+      require_code 0 enable;
+      let missing_image =
+        run ~root ~env 6004
+          [ "headless"; "prepare-many"; "--dry-run"; "--manifest";
+            manifest; "--home"; home ]
+      in
+      if missing_image.code = 0 then
+        failwith "container worker preflight accepted an unregistered image";
+      require_contains "missing image preflight" missing_image.stderr
+        "container worker image is not registered";
+      if Sys.file_exists worker_dir then
+        failwith "failed image preflight reserved worker state";
+      let register =
+        run ~root ~env 6005
+          [ "container-image"; "register"; "--home"; home ]
+      in
+      require_code 0 register;
+      require_contains "registered image digest" register.stdout
+        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+      let accepted_yolo =
+        run ~root ~env 60050
+          [ "headless"; "prepare-many"; "--dry-run"; "--manifest";
+            manifest; "--home"; home; "--codex-yolo" ]
+      in
+      require_code 0 accepted_yolo;
+      if Sys.file_exists worker_dir then
+        failwith "container YOLO dry-run reserved worker state";
+      let second_repo = Filename.concat root "second-repo" in
+      let multi_manifest =
+        Filename.concat home ".monty/runs/run-container-multi/jobs.json"
+      in
+      init_git_repo second_repo;
+      add_project ~root ~home ~env second_repo;
+      write_manifest multi_manifest
+        [ `Assoc
+            [ ("id", `String "container-multi");
+              ("title", `String "Container multi");
+              ("context", `String context);
+              ("agent_profile", `String "solo");
+              ( "workspaces",
+                `List
+                  [ `Assoc
+                      [ ("repo", `String repo);
+                        ("branch", `String "cto/container-multi") ];
+                    `Assoc
+                      [ ("repo", `String second_repo);
+                        ("branch", `String "cto/container-multi-second") ] ] ) ] ];
+      let rejected_multi =
+        run ~root ~env 60051
+          [ "headless"; "prepare-many"; "--dry-run"; "--manifest";
+            multi_manifest; "--home"; home ]
+      in
+      if rejected_multi.code = 0 then
+        failwith "container pilot accepted a multi-workspace task";
+      require_contains "container multi-workspace rejection"
+        rejected_multi.stderr "supports exactly one";
+      let failed_create =
+        run ~root
+          ~env:(replace_env env [ ("MONTY_FAKE_CONTAINER_FAIL_ONCE", "create") ])
+          6006
+          [ "headless"; "prepare-many"; "--manifest"; manifest; "--home";
+            home ]
+      in
+      if failed_create.code = 0 then
+        failwith "interrupted container creation reported success";
+      if job_status job_file <> "prepared" then
+        failwith "interrupted container creation was not retryable";
+      let prepared =
+        run ~root ~env 6007
+          [ "headless"; "prepare-many"; "--manifest"; manifest; "--home";
+            home ]
+      in
+      require_code 0 prepared;
+      let job = Yojson.Safe.from_file job_file in
+      if not Yojson.Safe.Util.(job |> member "containerized" |> to_bool) then
+        failwith "container worker mode was not persisted";
+      let container_worker = Yojson.Safe.Util.member "container_worker" job in
+      let container =
+        Yojson.Safe.Util.(container_worker |> member "container" |> to_string)
+      in
+      let volume =
+        Yojson.Safe.Util.(container_worker |> member "volume" |> to_string)
+      in
+      let task_key = Yojson.Safe.Util.(job |> member "task_key" |> to_string) in
+      let private_worktree =
+        Yojson.Safe.Util.(job |> member "last_known_worktree" |> to_string)
+      in
+      if private_worktree <> "/monty/worktrees/task/cto_container-worker" then
+        failf "unexpected private worktree identity: %s" private_worktree;
+      let create_log = read_file container_log in
+      require_contains "named task volume" create_log
+        ("type=volume,source=" ^ volume ^ ",target=/monty");
+      require_contains "secret tmpfs" create_log
+        "type=tmpfs,target=/run/monty-secrets,size=16M,mode=0700";
+      require_contains "minimal root setup capability" create_log
+        "--cap-add CAP_CHOWN --cap-add CAP_DAC_OVERRIDE";
+      List.iter
+        (fun forbidden ->
+          if string_contains create_log forbidden then
+            failf "container create attached forbidden integration %s" forbidden)
+        [ "type=bind"; "virtiofs"; "--ssh"; "--publish";
+          "--publish-socket" ];
+      if string_contains create_log secret || string_contains (read_file job_file) secret
+      then failwith "Codex credential leaked into command log or worker state";
+      let volume_dir = Filename.concat fake_state ("volumes/" ^ volume) in
+      let container_dir = Filename.concat fake_state ("containers/" ^ container) in
+      let private_worktree_dir =
+        Filename.concat volume_dir
+          (String.sub private_worktree 7 (String.length private_worktree - 7))
+      in
+      List.iter
+        (fun relative ->
+          if not (Sys.file_exists (Filename.concat volume_dir relative)) then
+            failf "private task volume omitted %s" relative)
+        [ "home"; "repos"; "worktrees"; "context"; "outbox";
+          "artifacts"; "context/source.bundle"; "repos/task/.git" ];
+      let private_auth = Filename.concat volume_dir "home/.codex/auth.json" in
+      if (Unix.lstat private_auth).Unix.st_kind <> Unix.S_LNK then
+        failwith "persistent Codex credential path is not a tmpfs symlink";
+      let private_head =
+        Process.run_success
+          ("git -C " ^ Shell.quote private_worktree_dir ^ " rev-parse HEAD")
+        |> Result.get_ok |> String.trim
+      in
+      if private_head <> initial_head then
+        failwith "existing task branch was seeded from unrelated host HEAD";
+      let host_branch_head =
+        Process.run_success ~cwd:repo "git rev-parse refs/heads/cto/container-worker"
+        |> Result.get_ok |> String.trim
+      in
+      if host_branch_head <> initial_head then
+        failwith "container preparation changed the existing host task branch";
+      let ensured =
+        run ~root ~env 60071
+          [ "task"; "workspace"; "ensure"; task_key; "--repo"; repo;
+            "--home"; home; "--wt-command"; "wt" ]
+      in
+      if ensured.code = 0 then
+        failwith "containerized task workspace ensure materialized a host worktree";
+      require_contains "container workspace ensure rejection" ensured.stderr
+        "exists only inside the private volume";
+      require_empty_log host_log;
+      let doctor =
+        run ~root ~env 60072
+          [ "doctor"; "--home"; home; "--terminal"; "ghostty";
+            "--worktree"; "always"; "--codex-command";
+            "definitely-missing-codex"; "--wt-command";
+            "definitely-missing-wt" ]
+      in
+      require_code 0 doctor;
+      require_contains "container-aware doctor" doctor.stdout "apple-container";
+      require_contains "container doctor recovery" doctor.stdout
+        "monty headless run 'container-worker'";
+      if string_contains doctor.stdout "definitely-missing" then
+        failwith "container-aware doctor required a host harness or wt";
+      let disable =
+        run ~root ~env 6008
+          [ "settings"; "set"; "container-workers"; "false"; "--home";
+            home ]
+      in
+      require_code 0 disable;
+      let leaked =
+        run ~root
+          ~env:(replace_env env [ ("MONTY_TEST_LEAK_AUTH", "true") ])
+          60081
+          [ "headless"; "run"; "container-worker"; "--home"; home;
+            "--codex-yolo" ]
+      in
+      if leaked.code = 0 then
+        failwith "container report containing auth data was persisted";
+      require_contains "credential report rejection" leaked.stderr
+        "contains a Codex credential value";
+      require_contains "container YOLO execution" (read_file container_log)
+        "--dangerously-bypass-approvals-and-sandbox";
+      if job_status job_file <> "launch-requested" then
+        failwith "credential rejection changed the claimed lifecycle";
+      if
+        tree_has worker_dir (fun path ->
+            string_contains (read_file path) secret)
+      then failwith "Codex credential reached durable worker artifacts";
+      if tree_has worker_dir (fun path -> Filename.check_suffix path ".partial") then
+        failwith "credential rejection left a partial host artifact";
+      if tree_has (Filename.concat container_dir "rootfs") (fun _ -> true) then
+        failwith "credential rejection left a rootfs staging artifact";
+      let injections_before_failed_collect =
+        read_file (Filename.concat fake_state "auth-hashes")
+        |> String.split_on_char '\n'
+        |> List.filter (fun line -> line <> "") |> List.length
+      in
+      let failed_collect =
+        run ~root
+          ~env:(replace_env env [ ("MONTY_FAKE_CONTAINER_FAIL_ONCE", "collect") ])
+          6009 [ "headless"; "resume"; "container-worker"; "--home"; home ]
+      in
+      if failed_collect.code = 0 then
+        failwith "interrupted report collection reported success";
+      if job_status job_file <> "launch-requested" then
+        failwith "failed container run did not retain its claimed lifecycle";
+      let injections_after_failed_collect =
+        read_file (Filename.concat fake_state "auth-hashes")
+        |> String.split_on_char '\n'
+        |> List.filter (fun line -> line <> "") |> List.length
+      in
+      if injections_after_failed_collect <= injections_before_failed_collect then
+        failwith "running container resume did not refresh authentication";
+      if tree_has worker_dir (fun path -> Filename.check_suffix path ".partial") then
+        failwith "failed collection left a partial host artifact";
+      if tree_has (Filename.concat container_dir "rootfs") (fun _ -> true) then
+        failwith "failed collection left a rootfs staging artifact";
+      let status () =
+        Process.run_success
+          ("git -C " ^ Shell.quote private_worktree_dir
+         ^ " status --porcelain=v1 --untracked-files=all")
+        |> Result.get_ok
+      in
+      let before_inspect = status () in
+      let codex_calls = count_lines_containing container_log "/codex exec" in
+      let auth_injections =
+        read_file (Filename.concat fake_state "auth-hashes")
+        |> String.split_on_char '\n'
+        |> List.filter (fun line -> line <> "") |> List.length
+      in
+      let inspected =
+        run ~root ~env 6010 [ "inspect"; "container-worker"; "--home"; home ]
+      in
+      require_code 0 inspected;
+      require_contains "private inspection" inspected.stdout "private-change.txt";
+      if status () <> before_inspect then
+        failwith "inspection mutated the private workspace";
+      if count_lines_containing container_log "/codex exec" <> codex_calls then
+        failwith "inspection resumed Codex";
+      if
+        (read_file (Filename.concat fake_state "auth-hashes")
+        |> String.split_on_char '\n'
+        |> List.filter (fun line -> line <> "") |> List.length)
+        <> auth_injections
+      then failwith "running inspection invoked a non-inspection guest command";
+      let interrupted_stop =
+        run ~root
+          ~env:(replace_env env [ ("MONTY_FAKE_CONTAINER_FAIL_ONCE", "stop") ])
+          6011 [ "stop"; "container-worker"; "--home"; home ]
+      in
+      if interrupted_stop.code = 0 then
+        failwith "interrupted stop reported success";
+      let stopped =
+        run ~root ~env 6012 [ "stop"; "container-worker"; "--home"; home ]
+      in
+      require_code 0 stopped;
+      if Sys.file_exists (Filename.concat container_dir "running") then
+        failwith "container remained running after stop retry";
+      if Sys.file_exists (Filename.concat container_dir "secrets/auth.json") then
+        failwith "stopped container retained the tmpfs credential";
+      let failed_inspection =
+        run ~root
+          ~env:(replace_env env [ ("MONTY_FAKE_CONTAINER_FAIL_ONCE", "inspection") ])
+          60121 [ "inspect"; "container-worker"; "--home"; home ]
+      in
+      if failed_inspection.code = 0 then
+        failwith "failed stopped inspection reported success";
+      if Sys.file_exists (Filename.concat container_dir "running") then
+        failwith "failed inspection left a previously stopped container running";
+      let failed_auth =
+        run ~root
+          ~env:(replace_env env [ ("MONTY_FAKE_CONTAINER_FAIL_ONCE", "auth") ])
+          60122
+          [ "headless"; "resume"; "container-worker"; "--home"; home ]
+      in
+      if failed_auth.code = 0 then failwith "failed wake authentication reported success";
+      if Sys.file_exists (Filename.concat container_dir "running") then
+        failwith "failed authentication left a previously stopped container running";
+      let credential_path = Filename.concat private_worktree_dir secret in
+      Shell.write_file credential_path "private\n";
+      let guarded_changes =
+        run ~root ~env 601221
+          [ "headless"; "resume"; "container-worker"; "--home"; home ]
+      in
+      require_code 0 guarded_changes;
+      let guarded_handoff =
+        Yojson.Safe.from_string guarded_changes.stdout
+        |> Yojson.Safe.Util.member "handoff" |> Yojson.Safe.Util.to_string
+        |> Yojson.Safe.from_file
+      in
+      let guarded_handoff_text = Yojson.Safe.to_string guarded_handoff in
+      if string_contains guarded_handoff_text secret then
+        failwith "credential-bearing Git change evidence reached the handoff";
+      require_contains "credential change-summary rejection" guarded_handoff_text
+        "container output contains a Codex credential value";
+      Sys.remove credential_path;
+      require_code 0
+        (run ~root ~env 601222
+           [ "stop"; "container-worker"; "--home"; home ]);
+      let marker = Filename.concat volume_dir "context/worktree" in
+      let expected_marker = read_file marker in
+      Shell.write_file marker "/monty/worktrees/task/forged\n";
+      let forged_inspection =
+        run ~root ~env 60123 [ "inspect"; "container-worker"; "--home"; home ]
+      in
+      if forged_inspection.code = 0 then
+        failwith "inspection trusted a worker-controlled workspace marker";
+      if Sys.file_exists (Filename.concat container_dir "running") then
+        failwith "identity rejection left a previously stopped container running";
+      Shell.write_file marker expected_marker;
+      let block = Filename.concat root "codex-block" in
+      let resumed_child =
+        spawn ~root
+          ~env:(replace_env env [ ("MONTY_TEST_CODEX_BLOCK", block) ])
+          6013 [ "headless"; "resume"; "container-worker"; "--home"; home ]
+      in
+      wait_for_path (block ^ ".started");
+      let busy_done =
+        run ~root ~env 60131 [ "done"; "container-worker"; "--home"; home ]
+      in
+      if busy_done.code = 0 then
+        failwith "normal completion deleted a running headless worker";
+      require_contains "busy container completion" busy_done.stderr
+        "busy with a headless run";
+      Shell.write_file (block ^ ".release") "release\n";
+      let resumed = await resumed_child in
+      require_code 0 resumed;
+      let result = Yojson.Safe.from_string resumed.stdout in
+      let final =
+        Yojson.Safe.Util.(result |> member "outputs" |> member "final" |> to_string)
+      in
+      require_contains "collected normal final handoff" (read_file final)
+        "fake private Codex handoff";
+      let handoff =
+        Yojson.Safe.Util.(result |> member "handoff" |> to_string)
+        |> Yojson.Safe.from_file
+      in
+      let changes = Yojson.Safe.Util.(handoff |> member "changes" |> to_list) in
+      (match changes with
+      | [ change ] ->
+          let files = Yojson.Safe.Util.(change |> member "files" |> to_list) in
+          if not (List.mem (`String "private-change.txt") files) then
+            failf "container handoff omitted private workspace changes: %s"
+              (Yojson.Safe.to_string change);
+          if Yojson.Safe.Util.member "diff_error" change <> `Null then
+            failwith "container handoff reported the guest worktree as unavailable"
+      | _ -> failwith "container handoff did not contain exactly one workspace");
+      if not (Sys.file_exists (Filename.concat container_dir "running")) then
+        failwith "headless resume automatically stopped the container";
+      if status () <> before_inspect then
+        failwith "stop and wake did not preserve private workspace state";
+      let stop_after_result =
+        run ~root ~env 6014 [ "stop"; "container-worker"; "--home"; home ]
+      in
+      require_code 0 stop_after_result;
+      let log_lines = read_file container_log |> String.split_on_char '\n' in
+      let last_index needle =
+        log_lines
+        |> List.mapi (fun index line -> (index, line))
+        |> List.fold_left
+             (fun found (index, line) ->
+               if string_contains line needle then index else found)
+             (-1)
+      in
+      if last_index "copy" >= last_index " stop " then
+        failwith "container stopped before its final report was delivered";
+      let codex_calls_before_stopped_inspect =
+        count_lines_containing container_log "/codex exec"
+      in
+      let inspect_stopped =
+        run ~root ~env 6015 [ "inspect"; "container-worker"; "--home"; home ]
+      in
+      require_code 0 inspect_stopped;
+      if Sys.file_exists (Filename.concat container_dir "running") then
+        failwith "inspection changed a stopped worker to running";
+      if
+        count_lines_containing container_log "/codex exec"
+        <> codex_calls_before_stopped_inspect
+      then
+        failwith "stopped inspection resumed Codex";
+      let dirty_done =
+        run ~root ~env 6016 [ "done"; "container-worker"; "--home"; home ]
+      in
+      if dirty_done.code = 0 then
+        failwith "normal completion discarded private workspace changes";
+      require_contains "dirty private completion" dirty_done.stderr
+        "tracked or untracked changes";
+      if Sys.file_exists (Filename.concat container_dir "running") then
+        failwith "dirty completion changed a stopped worker to running";
+      Shell.ensure_dir (Filename.concat fake_state "containers/unrelated");
+      Shell.ensure_dir (Filename.concat fake_state "volumes/unrelated-volume");
+      let interrupted_done =
+        run ~root
+          ~env:(replace_env env [ ("MONTY_FAULT_INJECT", "complete-after-cleanup") ])
+          6017
+          [ "done"; "container-worker"; "--force"; "--home"; home ]
+      in
+      if interrupted_done.code = 0 then
+        failwith "interrupted forced completion reported success";
+      if Sys.file_exists container_dir || Sys.file_exists volume_dir then
+        failwith "forced completion did not remove exact owned resources";
+      if
+        not
+          (Sys.file_exists (Filename.concat fake_state "containers/unrelated")
+          && Sys.file_exists
+               (Filename.concat fake_state "volumes/unrelated-volume"))
+      then failwith "container cleanup removed an unrelated resource";
+      let completed =
+        run ~root ~env 6018
+          [ "done"; "container-worker"; "--force"; "--home"; home ]
+      in
+      require_code 0 completed;
+      if Sys.file_exists worker_dir then
+        failwith "completion retry left active worker memory";
+      if
+        not
+          (Sys.file_exists
+             (Filename.concat home
+                ".monty/runs/run-container/archive/container-worker/job.json"))
+      then failwith "completion retry did not archive worker memory";
+      if local_task_status home <> "done" then
+        failwith "container completion did not close its linked local task")
 
 let test_cli_parser_and_doctor_contracts () =
   with_temp_root "parser-doctor" (fun root ->
@@ -5364,6 +5933,8 @@ let () =
       test_run_handoff_publish_delivery_follow_up_and_lifecycle_race );
     ( "cli_settings_commands_and_effective_harness",
       test_settings_commands_and_effective_harness );
+    ( "cli_containerized_codex_worker_lifecycle",
+      test_containerized_codex_worker_lifecycle );
     ( "cli_head_butler_continue_uses_native_sessions_without_monty_state",
       test_head_butler_continue_uses_native_sessions_without_monty_state );
     ( "cli_parser_and_doctor_contracts", test_cli_parser_and_doctor_contracts ) ]

@@ -546,6 +546,7 @@ let test_launch_many_single_job_uses_single_job_defaults () =
       harness = Harness.Pi;
       harness_command = "/usr/bin/true --pi-test";
       codex_yolo = false;
+      container_workers = false;
       wt_command = "/usr/bin/true --wt-test";
       worktree_mode = Always;
       branch_prefix = "cto";
@@ -576,6 +577,7 @@ let test_launch_many_multiple_jobs_keeps_numbered_defaults () =
       harness = Harness.Pi;
       harness_command = "/usr/bin/true --pi-test";
       codex_yolo = false;
+      container_workers = false;
       wt_command = "/usr/bin/true --wt-test";
       worktree_mode = Always;
       branch_prefix = "cto";
@@ -1103,6 +1105,7 @@ let test_codex_harness_rejects_fork () =
         harness = Harness.Codex;
         harness_command = "/usr/bin/true";
         codex_yolo = false;
+        container_workers = false;
         wt_command = "/usr/bin/true";
         worktree_mode = Never;
         branch_prefix = "monty";
@@ -1123,12 +1126,15 @@ let test_settings_harness_roundtrip_and_precedence () =
   assert_bool "persisted Codex harness"
     (settings.Settings.harness = Some Harness.Codex);
   assert_bool "Codex YOLO defaults off" (not settings.codex_yolo);
+  assert_bool "container workers default off" (not settings.container_workers);
   assert_bool "branch prefix defaults to absent"
     (settings.branch_prefix = None);
   must (Settings.set_codex_yolo ~home true);
+  must (Settings.set_container_workers ~home true);
   must (Settings.set_branch_prefix ~home "cto");
   let settings = must (Settings.load ~home) in
   assert_bool "persisted Codex YOLO" settings.codex_yolo;
+  assert_bool "persisted container workers" settings.container_workers;
   assert_bool "setting Codex YOLO preserves harness"
     (settings.harness = Some Harness.Codex);
   assert_bool "persisted branch prefix"
@@ -1169,8 +1175,80 @@ let test_settings_harness_roundtrip_and_precedence () =
     "harness       codex";
   assert_contains "YOLO settings rendering" (Settings.render settings)
     "codex-yolo    true";
+  assert_contains "container settings rendering" (Settings.render settings)
+    "container-workers true";
   assert_contains "branch-prefix settings rendering" (Settings.render settings)
     "branch-prefix cto"
+
+let test_container_worker_contract () =
+  let digest = "sha256:" ^ String.make 64 'a' in
+  let value =
+    must
+      (Container_worker.identity ~worker_dir:"/tmp/monty/workers/worker"
+         ~id:"worker" digest)
+  in
+  let decoded =
+    must (Container_worker.of_json (Container_worker.to_json value))
+  in
+  assert_bool "container identity roundtrip" (decoded = value);
+  must
+    (Container_worker.validate_identity
+       ~worker_dir:"/tmp/monty/workers/worker" ~id:"worker" decoded);
+  must
+    (Container_worker.validate_identity
+       ~worker_dir:"/tmp/monty/archive/worker" ~id:"worker" decoded);
+  let command =
+    Container_worker.create_arguments value |> String.concat " "
+  in
+  List.iter
+    (fun forbidden -> assert_not_contains "isolated create" command forbidden)
+    [ "type=bind"; "virtiofs"; "--ssh"; "--publish"; "--publish-socket" ];
+  assert_contains "private volume mount" command
+    ("type=volume,source=" ^ value.volume ^ ",target=/monty");
+  assert_contains "secret tmpfs" command
+    "type=tmpfs,target=/run/monty-secrets,size=16M,mode=0700";
+  assert_contains "inert init" command "--init";
+  assert_contains "root setup capability" command
+    "--cap-add CAP_CHOWN --cap-add CAP_DAC_OVERRIDE";
+  let root =
+    Option.value ~default:(Sys.getcwd ()) (Sys.getenv_opt "DUNE_SOURCEROOT")
+  in
+  let recipe =
+    Shell.read_file (Filename.concat root "container/apple-worker/Containerfile")
+  in
+  let helper =
+    Shell.read_file (Filename.concat root "container/apple-worker/monty-inspect")
+  in
+  assert_contains "pinned image base" recipe "@sha256:";
+  assert_contains "pinned Codex" recipe "@openai/codex@0.153.0";
+  assert_contains "verified Codex tarball" recipe "npm pack --pack-destination";
+  assert_contains "offline Codex install" recipe
+    "npm install --global --offline --omit=optional";
+  assert_not_contains "Codex install does not trust registry metadata" recipe
+    "npm view";
+  assert_contains "non-root image" recipe "USER monty";
+  assert_contains "versioned image label" recipe
+    "LABEL com.monty.image=apple-worker-v1";
+  assert_contains "persisted inspection identity" helper
+    "test \"$worktree\" = \"$1\"";
+  assert_contains "inspection rejects a symlinked worktree" helper
+    "test ! -L \"$worktree\"";
+  assert_not_contains "inspection has no eval" helper "eval";
+  (match
+     Container_worker.reject_credentials [ "credential-value" ]
+       "reported credential-value"
+   with
+  | Error _ -> ()
+  | Ok () -> failwith "container output credential was not rejected");
+  let changes =
+    must
+      (Container_worker.parse_change_summary
+         "monty-changes-v1    16  12  14\n1\t2\ttracked.txt\000tracked.txt\000untracked.txt\000")
+  in
+  assert_bool "parsed tracked and untracked changes"
+    (changes.files = [ "tracked.txt"; "untracked.txt" ]);
+  assert_bool "parsed insertions" (changes.insertions = 1);
+  assert_bool "parsed deletions" (changes.deletions = 2)
 
 let test_headless_json_contract () =
   let dispatch =
@@ -1194,7 +1272,8 @@ let test_headless_json_contract () =
           "/monty/.monty/runs/run-1/workers/issue-123/MONTY.md";
         context = "/monty/.monty/runs/run-1/issue-123.md";
         home = "/monty";
-        profile = reviewed_profile }
+        profile = reviewed_profile;
+        container_worker = None }
   in
   let json = Headless.dispatch_json ~attempt_id:"attempt-test" dispatch in
   assert_equal "headless dispatch schema" Headless.dispatch_schema
@@ -1307,7 +1386,8 @@ let test_headless_json_contract () =
         workspaces = dispatch.workspaces;
         worker_dir = dispatch.worker_dir;
         status = "prepared";
-        profile = reviewed_profile }
+        profile = reviewed_profile;
+        container_worker = None }
   in
   let prepared_json =
     Headless.prepare_json ~harness:Harness.Codex ~codex_yolo:true [ prepared ]
@@ -1365,5 +1445,6 @@ let () =
     ("codex_harness_rejects_fork", test_codex_harness_rejects_fork);
     ( "settings_harness_roundtrip_and_precedence",
       test_settings_harness_roundtrip_and_precedence );
+    ("container_worker_contract", test_container_worker_contract);
     ("headless_json_contract", test_headless_json_contract) ]
   |> List.iter (fun (name, test) -> run_named name test)

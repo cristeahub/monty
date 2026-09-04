@@ -905,7 +905,7 @@ let publication_checkpoint name =
 let publish ~home ~(record : Job_store.record) ?handoff_id ~source ~outcome
     ~summary ?(validation = []) ?(accepted = []) ?(fixed = []) ?(rejected = [])
     ?(unresolved = []) ?review_summary ?(risks = []) ?last_phase ?error
-    ?(artifacts = []) () =
+    ?changes ?(artifacts = []) () =
   let summary = compact_summary summary in
   if summary = "" then Error "run handoff summary must not be empty"
   else
@@ -941,7 +941,10 @@ let publish ~home ~(record : Job_store.record) ?handoff_id ~source ~outcome
       |> Result.map (fun values -> List.rev values |> List.sort_uniq String.compare)
     in
     (* Git is intentionally inspected before taking Monty's one-home state lock. *)
-    let changes = List.map inspect_workspace_change record.workspaces in
+    let changes =
+      Option.value ~default:(List.map inspect_workspace_change record.workspaces)
+        changes
+    in
     let finished_at = Worker_memory.now_utc () in
     State_store.with_lock ~home (fun () ->
         let* current = current_record_unlocked ~home:state_home reference in

@@ -1,0 +1,60 @@
+#!/bin/sh
+set -eu
+
+for path in /monty /monty/context /monty/repos /monty/worktrees /monty/worktrees/task \
+  /monty/context/worktree /monty/context/branch; do
+  test ! -L "$path"
+done
+test -f /monty/context/worktree
+test -f /monty/context/branch
+for path in /monty/context /monty/context/worktree /monty/context/branch; do
+  test "$(stat -c '%u:%g' "$path")" = 0:0
+  test ! -w "$path"
+done
+worktree=$(cat /monty/context/worktree)
+branch=$(cat /monty/context/branch)
+case "${1:-}" in
+  --dirty|--changes) mode=$1; shift ;;
+  *) mode=inspect ;;
+esac
+test "$#" -eq 2
+test "$worktree" = "$1"
+test "$branch" = "$2"
+test ! -L "$worktree"
+case "$worktree" in
+  /monty/worktrees/*) ;;
+  *) printf '%s\n' 'invalid private worktree identity' >&2; exit 2 ;;
+esac
+test -d "$worktree"
+export GIT_OPTIONAL_LOCKS=0
+test "$(git -C "$worktree" rev-parse --show-toplevel)" = "$worktree"
+test "$(git -C "$worktree" branch --show-current)" = "$branch"
+
+if [ "$mode" = "--dirty" ]; then
+  test -z "$(git -C "$worktree" status --porcelain=v1 --untracked-files=all)" || exit 3
+  exit 0
+fi
+if [ "$mode" = "--changes" ]; then
+  temp=$(mktemp -d)
+  trap 'rm -rf "$temp"' EXIT HUP INT TERM
+  git -C "$worktree" diff --numstat -z HEAD -- > "$temp/numstat"
+  git -C "$worktree" diff --name-only -z HEAD -- > "$temp/tracked"
+  git -C "$worktree" ls-files --others --exclude-standard -z > "$temp/untracked"
+  numstat_size=$(wc -c < "$temp/numstat")
+  tracked_size=$(wc -c < "$temp/tracked")
+  untracked_size=$(wc -c < "$temp/untracked")
+  test "$numstat_size" -le 5242880
+  test "$tracked_size" -le 5242880
+  test "$untracked_size" -le 5242880
+  printf 'monty-changes-v1 %s %s %s\n' "$numstat_size" "$tracked_size" "$untracked_size"
+  cat "$temp/numstat" "$temp/tracked" "$temp/untracked"
+  exit 0
+fi
+test "$mode" = inspect
+
+printf '%s\n' '== workspace =='
+git -C "$worktree" status --short --branch
+printf '%s\n' '== diff stat =='
+git -C "$worktree" diff --stat --no-ext-diff
+printf '%s\n' '== processes =='
+ps -o pid,comm,args

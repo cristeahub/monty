@@ -6,6 +6,7 @@ type options = {
   harness : Harness.t;
   harness_command : string;
   codex_yolo : bool;
+  container_workers : bool;
   wt_command : string;
   worktree_mode : worktree_mode;
   branch_prefix : string;
@@ -39,6 +40,7 @@ type prepared = {
   script_path : string;
   requested_task_key : string option;
   profile : Agent_profile.t;
+  container_worker : Container_worker.t option;
   existing : existing;
 }
 
@@ -112,15 +114,20 @@ let check_dependencies options =
              (Harness.to_string options.harness))
     | _ -> Ok ()
   in
-  let* () =
-    check_dependency (Harness.to_string options.harness) options.harness_command
-  in
-  let* () = check_worktree_dependency options in
-  match options.backend with
-  | Terminal.Dry_run -> Ok ()
-  | Terminal.Ghostty ->
-      let* () = check_dependency "Ghostty application" "ghostty" in
-      check_dependency "Ghostty terminal request" "osascript"
+  if options.container_workers then
+    if options.harness <> Harness.Codex then
+      Error "container workers support only the Codex headless harness"
+    else check_dependency "Apple container" (Container_worker.command ())
+  else
+    let* () =
+      check_dependency (Harness.to_string options.harness) options.harness_command
+    in
+    let* () = check_worktree_dependency options in
+    match options.backend with
+    | Terminal.Dry_run -> Ok ()
+    | Terminal.Ghostty ->
+        let* () = check_dependency "Ghostty application" "ghostty" in
+        check_dependency "Ghostty terminal request" "osascript"
 
 let script_path options id =
   let* directory = State_path.canonicalize options.script_dir in
@@ -228,6 +235,7 @@ let prepare_identity ?index ?profile options manifest_index job =
         script_path;
         requested_task_key = job.Job.task_key;
         profile;
+        container_worker = None;
         existing = New }
 
 let duplicate_error label identity left right =
@@ -306,9 +314,12 @@ let same_record_identity (prepared : prepared) (record : Job_store.record) =
 let same_record prepared (record : Job_store.record) =
   same_record_identity prepared record
   &&
-  match record.launch_script with
-  | Some path -> canonical_path_equal path prepared.script_path
-  | None -> false
+  match prepared.container_worker with
+  | Some _ -> record.launch_script = None
+  | None -> (
+      match record.launch_script with
+      | Some path -> canonical_path_equal path prepared.script_path
+      | None -> false)
 
 let script_has_owner_marker (options : options) (prepared : prepared)
     (record : Job_store.record) path =
@@ -608,6 +619,7 @@ let classify_existing options records (prepared : prepared) =
       let prepared =
         { prepared with
           profile;
+          container_worker = record.container_worker;
           job =
             { prepared.job with
               Job.agent_profile = Some profile.Agent_profile.id } }
@@ -621,7 +633,16 @@ let classify_existing options records (prepared : prepared) =
                "existing worker %s uses persisted worktree mode %S, not requested mode %S; retry with the persisted mode"
                record.id record.worktree_mode (worktree_mode_string options))
       in
-      let* prepared = recorded_script options prepared record in
+      let* prepared =
+        match record.container_worker with
+        | Some _ when record.launch_script <> None ->
+            Error
+              (Printf.sprintf
+                 "containerized worker %s records a forbidden host launch script"
+                 record.id)
+        | Some _ -> Ok prepared
+        | None -> recorded_script options prepared record
+      in
       (match record.status with
       | "prepared" | "launch-failed" ->
           Ok { prepared with existing = Retryable record.status }
@@ -702,7 +723,37 @@ let preflight_batch options indexed_jobs =
         let* item = classify_existing options records item in
         classify (item :: acc) rest
   in
-  classify [] prepared
+  let* prepared = classify [] prepared in
+  prepared
+  |> List.fold_left
+       (fun result item ->
+         let* acc = result in
+         let requested =
+           match item.existing with
+           | New -> options.container_workers
+           | Retryable _ | Requested -> Option.is_some item.container_worker
+         in
+         if not requested then Ok ({ item with container_worker = None } :: acc)
+         else if options.harness <> Harness.Codex then
+           Error "container workers support only headless Codex"
+         else if List.length item.workspaces <> 1 then
+           Error
+             (Printf.sprintf
+                "container worker %s has %d workspaces; this pilot supports exactly one"
+                item.id (List.length item.workspaces))
+         else
+           let* container_worker =
+             match item.container_worker with
+             | Some value ->
+                 let* () = Container_worker.preflight_existing ~home:options.home value in
+                 Ok value
+             | None ->
+                 Container_worker.preflight_new ~home:options.home
+                   ~worker_dir:item.worker_dir ~id:item.id
+           in
+           Ok ({ item with container_worker = Some container_worker } :: acc))
+       (Ok [])
+  |> Result.map List.rev
 
 let prepare_batch options indexed_jobs =
   let* () = check_dependencies options in
@@ -781,6 +832,8 @@ let validate_staged_reservation options (item : prepared) staging_dir =
       Error "staged agent profile snapshot does not match the prepared launch"
     else if record.job.Job.agent_profile <> Some item.profile.id then
       Error "staged job agent profile does not match its snapshot"
+    else if record.container_worker <> item.container_worker then
+      Error "staged container worker choice does not match the prepared launch"
     else if not (same_record item record) then
       let workspace_text workspaces =
         workspaces
@@ -888,10 +941,14 @@ let stage_reservation options (item : prepared) =
           State_store.write_json_atomic
             ~path:(Filename.concat staging_dir "job.json")
             (Worker_memory.job_json ~status:"prepared"
-               ~launch_script:item.script_path ~worker_dir:item.worker_dir
+               ?launch_script:
+                 (if Option.is_some item.container_worker then None
+                  else Some item.script_path)
+               ~worker_dir:item.worker_dir
                ~id:item.id ~job:item.job ~branch:item.branch ~repo:item.repo
                ~context:item.context
                ~worktree_mode:(worktree_mode_string options)
+               ?container_worker:item.container_worker
                ~last_known_worktree:None ())
         with
         | Sys_error msg -> Error msg
@@ -1165,6 +1222,8 @@ let dry_run ?(codex_mode = Codex_session.Fresh) options
   Fmt.pr "[dry-run] worker memory: %s\n" prepared.worker_dir;
   Fmt.pr "[dry-run] monty instructions: %s\n" prepared.instructions;
   Fmt.pr "[dry-run] context: %s\n" prepared.context;
+  Fmt.pr "[dry-run] isolation: %s\n"
+    (if Option.is_some prepared.container_worker then "apple-container" else "host");
   Fmt.pr "[dry-run] terminal: %s %s\n"
     (Terminal.backend_to_string options.backend)
     (Terminal.target_to_string options.target);
@@ -1205,8 +1264,11 @@ let update_launch_state options (prepared : prepared) ~expected_statuses ~status
     ?error ?worktree ?workspaces () =
   let updates =
     [ Job_store.string "status" status;
-      Job_store.string "updated_at" (Worker_memory.now_utc ());
-      Job_store.string "launch_script" prepared.script_path ]
+      Job_store.string "updated_at" (Worker_memory.now_utc ()) ]
+    @
+    (match prepared.container_worker with
+    | Some _ -> []
+    | None -> [ Job_store.string "launch_script" prepared.script_path ])
     @
     (match worktree with
     | None -> []
@@ -1564,7 +1626,18 @@ let retry_launch_command options (job : Job.t) =
     @ [ common_retry_options options ])
 
 let launch_many ?(retry_command = "monty launch-many") options indexed_jobs =
-  let* prepared = prepare_batch options indexed_jobs in
+  let* prepared =
+    if options.container_workers then preflight_batch options indexed_jobs
+    else prepare_batch options indexed_jobs
+  in
+  let* () =
+    if List.exists (fun item -> Option.is_some item.container_worker) prepared then
+      Error
+        "container workers are headless-only; use monty headless prepare-many and run"
+    else if options.container_workers then
+      check_dependencies { options with container_workers = false }
+    else Ok ()
+  in
   match options.backend with
   | Terminal.Dry_run ->
       List.iter (dry_run options) prepared;
@@ -1646,6 +1719,12 @@ let script_for_resume options prepared (record : Job_store.record) =
 let resume_job_unlocked ?(validate_open_task = true) ?(fresh = false)
     ?(codex_mode = Codex_session.Fresh) ~persisted_worktree_mode ~profile options
     job =
+  let* () =
+    if options.container_workers then
+      Error
+        "container workers are headless-only; use monty headless resume for a successor chain"
+    else Ok ()
+  in
   let* options =
     options_with_persisted_worktree_mode options persisted_worktree_mode
   in

@@ -301,7 +301,7 @@ Codex progress, JSONL events, prompts, and final phase messages are kept under t
 Before returning success, Codex also writes the canonical `monty:run-handoff:v1` record and a pending finished-run notice.
 Failures after the worker is claimed write the same record with outcome `failed`, the last known phase, useful error text, workspace identity, and artifact paths.
 The CLI returns a compact JSON summary that references the canonical handoff; it does not close the task.
-While a Codex chain or its inherited child process is alive, another run, resume, or completion of the same worker fails with a busy diagnostic. This guard also applies to forced completion and survives termination of the Monty supervisor. Other workers and registry commands remain available.
+For host workers, another run, resume, or completion fails with a busy diagnostic while a Codex chain or an inherited child process is alive. This guard also applies to forced completion and survives termination of the Monty supervisor. Other workers and registry commands remain available.
 
 ### Pi headless execution
 

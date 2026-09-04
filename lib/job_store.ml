@@ -34,6 +34,7 @@ type record = {
   completed_at : string option;
   archived_at : string option;
   transition : transition option;
+  container_worker : Container_worker.t option;
   state_path : State_path.t option;
   home : string option;
 }
@@ -248,6 +249,24 @@ let parse_job_file ?home path =
           State_path.safe_component ~label:"persisted agent profile" value
           |> Result.map Option.some
     in
+    let* containerized =
+      match Util.member "containerized" json with
+      | `Null -> Ok false
+      | `Bool value -> Ok value
+      | _ -> Error "job.json field \"containerized\" must be a boolean"
+    in
+    let* container_worker =
+      match (containerized, Util.member "container_worker" json) with
+      | false, `Null -> Ok None
+      | true, (`Assoc _ as value) ->
+          Container_worker.of_json value |> Result.map Option.some
+      | false, _ ->
+          Error
+            "job.json has container_worker metadata while containerized is false"
+      | true, _ ->
+          Error
+            "job.json sets containerized true without container_worker metadata"
+    in
     let* persisted_status = optional_string json "status" in
     let* persisted_run_dir = optional_string json "run_dir" in
     let* worktree_mode = optional_string json "worktree_mode" in
@@ -277,6 +296,24 @@ let parse_job_file ?home path =
             else Ok ()
     in
     let* launch_script = optional_string json "launch_script" in
+    let* () =
+      match container_worker with
+      | None -> Ok ()
+      | Some _ when List.length workspaces <> 1 ->
+          Error "containerized job.json must contain exactly one workspace"
+      | Some _ when launch_script <> None ->
+          Error "containerized job.json must not contain a host launch script"
+      | Some _ -> (
+          match (branch, last_known_worktree, worktree_mode) with
+          | _, _, Some mode when String.lowercase_ascii mode <> "always" ->
+              Error "containerized job.json must use worktree mode always"
+          | Some branch, Some worktree, _
+            when worktree <> Container_worker.guest_worktree branch ->
+              Error
+                "containerized job.json worktree does not match its private deterministic path"
+          | Some _, _, _ -> Ok ()
+          | None, _, _ -> Error "containerized job.json requires a branch")
+    in
     let* updated_at = optional_string json "updated_at" in
     let* completed_at = optional_string json "completed_at" in
     let* archived_at = optional_string json "archived_at" in
@@ -315,6 +352,11 @@ let parse_job_file ?home path =
       | Some state, _ -> state.State_path.run_dir
       | None, Some value -> Shell.normalize value
       | None, None -> default_run_dir worker_dir
+    in
+    let* () =
+      match container_worker with
+      | None -> Ok ()
+      | Some value -> Container_worker.validate_identity ~worker_dir ~id value
     in
     let* () =
       match state_path with
@@ -401,6 +443,7 @@ let parse_job_file ?home path =
         completed_at;
         archived_at;
         transition;
+        container_worker;
         state_path;
         home = Option.map (fun value -> Shell.normalize (Shell.abs_path value)) home;
       }
