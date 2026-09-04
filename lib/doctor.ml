@@ -52,14 +52,29 @@ let launch_state_check ~home (record : Job_store.record) =
   | None ->
       let state = String.lowercase_ascii record.status in
       if List.mem state [ "prepared"; "launch-failed"; "launch-requested" ] then
+        let recovery =
+          match (record.container_worker, state) with
+          | Some _, "prepared" ->
+              Printf.sprintf "monty headless run %s --home %s"
+                (Shell.quote record.id) (Shell.quote home)
+          | Some _, "launch-requested" ->
+              Printf.sprintf "monty headless resume %s --home %s"
+                (Shell.quote record.id) (Shell.quote home)
+          | Some _, "launch-failed" ->
+              Printf.sprintf "monty headless prepare-many --manifest %s --home %s"
+                (Shell.quote (Filename.concat record.run_dir "jobs.json"))
+                (Shell.quote home)
+          | None, _ ->
+              Printf.sprintf "monty resume %s --home %s" (Shell.quote record.id)
+                (Shell.quote home)
+          | Some _, _ -> assert false
+        in
         Some
           {
             name = "worker " ^ record.id;
             level = Warn;
             message = state ^ " at " ^ record.path;
-            recovery =
-              [ Printf.sprintf "monty resume %s --home %s" (Shell.quote record.id)
-                  (Shell.quote home) ];
+            recovery = [ recovery ];
           }
       else None
 
@@ -154,22 +169,52 @@ let state_checks ~home ~wt_command =
         [ { name = "worker state"; level = Pass; message = "records are readable and no recovery is pending"; recovery = [] } ]
       else warning_checks @ identity_checks @ record_checks
 
-let checks ?(find_command = Process.command_exists_with_arguments) ~home ~harness ~harness_command ~wt_command ~backend
-    ~worktree_mode () =
+let active_container_workers ~home =
+  match Job_store.scan ~home with
+  | Error _ -> false
+  | Ok scan ->
+      List.exists
+        (fun record ->
+          not (Job_store.is_archived record)
+          && Option.is_some record.Job_store.container_worker)
+        scan.records
+
+let container_check find_command ~home =
+  let command = Container_worker.command () in
+  match find_command command with
+  | Error message ->
+      { name = "apple-container"; level = Fail; message;
+        recovery = [ "Install Apple container and start its service." ] }
+  | Ok _ -> (
+      match Container_worker.preflight_image ~home with
+      | Ok digest ->
+          { name = "apple-container"; level = Pass; message = digest; recovery = [] }
+      | Error message ->
+          { name = "apple-container"; level = Fail; message;
+            recovery =
+              [ Printf.sprintf
+                  "Build %s explicitly, then run monty container-image register --home %s."
+                  Container_worker.image (Shell.quote home) ] })
+
+let checks ?(find_command = Process.command_exists_with_arguments)
+    ?(container_workers = false) ~home ~harness ~harness_command ~wt_command
+    ~backend ~worktree_mode () =
   let home = Shell.normalize (Shell.abs_path home) in
+  let needs_container = container_workers || active_container_workers ~home in
   let required =
-    [
-      check_command find_command ~required:true ~name:(Harness.to_string harness)
-        ~command:harness_command
-        ~recovery:
-          [ Printf.sprintf "Install the configured %s executable or pass --%s-command COMMAND."
-              (Harness.to_string harness) (Harness.to_string harness) ];
-    ]
+    if container_workers then [ container_check find_command ~home ]
+    else
+      [ check_command find_command ~required:true ~name:(Harness.to_string harness)
+          ~command:harness_command
+          ~recovery:
+            [ Printf.sprintf
+                "Install the configured %s executable or pass --%s-command COMMAND."
+                (Harness.to_string harness) (Harness.to_string harness) ] ]
   in
   let required =
-    match worktree_mode with
-    | Launcher.Never -> required
-    | Launcher.Always ->
+    match (container_workers, worktree_mode) with
+    | true, _ | false, Launcher.Never -> required
+    | false, Launcher.Always ->
         required
         @ [
             check_command find_command ~required:true ~name:"wt" ~command:wt_command
@@ -177,9 +222,9 @@ let checks ?(find_command = Process.command_exists_with_arguments) ~home ~harnes
           ]
   in
   let required =
-    match backend with
-    | Terminal.Dry_run -> required
-    | Terminal.Ghostty ->
+    match (container_workers, backend) with
+    | true, _ | false, Terminal.Dry_run -> required
+    | false, Terminal.Ghostty ->
         required
         @ [
             check_command find_command ~required:true ~name:"ghostty" ~command:"ghostty"
@@ -188,7 +233,9 @@ let checks ?(find_command = Process.command_exists_with_arguments) ~home ~harnes
               ~recovery:[ "Install osascript or use --terminal dry-run." ];
           ]
   in
-  required
+  (if needs_container && not container_workers then
+     required @ [ container_check find_command ~home ]
+   else required)
   @ [
       check_command find_command ~required:false ~name:"gh" ~command:"gh"
         ~recovery:[ "Install gh to use GitHub issue metadata." ];
@@ -220,9 +267,11 @@ let render checks =
 let exit_code checks =
   if List.exists (fun check -> check.level = Fail) checks then 1 else 0
 
-let run ~home ~harness ~harness_command ~wt_command ~backend ~worktree_mode =
+let run ~home ~harness ~harness_command ~wt_command ~backend ~worktree_mode
+    ~container_workers =
   let checks =
-    checks ~home ~harness ~harness_command ~wt_command ~backend ~worktree_mode ()
+    checks ~home ~harness ~harness_command ~wt_command ~backend ~worktree_mode
+      ~container_workers ()
   in
   Fmt.pr "%s" (render checks);
   if exit_code checks = 0 then Ok () else Error "doctor found failing checks"

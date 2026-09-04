@@ -2,13 +2,15 @@
  (name test_monty)
  (modules test_monty)
  (libraries monty unix yojson)
- (deps (source_tree ../agent-profiles)))
+ (deps
+  (source_tree ../agent-profiles)
+  (source_tree ../container/apple-worker)))
 
 (test
  (name test_cli_e2e)
  (modules test_cli_e2e)
  (libraries monty unix yojson)
- (deps ../bin/main.exe))
+ (deps ../bin/main.exe fake_container.sh))
 
 (rule
  (alias runtest)

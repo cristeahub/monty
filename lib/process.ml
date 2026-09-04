@@ -31,6 +31,48 @@ let run_capture ?cwd command =
         (Printf.sprintf "%s(%s): %s" operation argument
            (Unix.error_message error))
 
+let run_capture_with_stdin command input =
+  try
+    let stdout_channel, stdin_channel, stderr_channel =
+      Unix.open_process_full command (Unix.environment ())
+    in
+    let write_error =
+      try
+        output_string stdin_channel input;
+        flush stdin_channel;
+        close_out stdin_channel;
+        None
+      with
+      | Sys_error message ->
+          close_out_noerr stdin_channel;
+          Some message
+      | Unix.Unix_error (error, operation, argument) ->
+          close_out_noerr stdin_channel;
+          Some
+            (Printf.sprintf "%s(%s): %s" operation argument
+               (Unix.error_message error))
+    in
+    let stdout = In_channel.input_all stdout_channel in
+    let stderr = In_channel.input_all stderr_channel in
+    let status =
+      match
+        Unix.close_process_full
+          (stdout_channel, stdin_channel, stderr_channel)
+      with
+      | Unix.WEXITED code -> `Exited code
+      | Unix.WSIGNALED signal -> `Signaled signal
+      | Unix.WSTOPPED signal -> `Stopped signal
+    in
+    match write_error with
+    | None -> Ok { stdout = stdout ^ stderr; status }
+    | Some message -> Error message
+  with
+  | Sys_error message -> Error message
+  | Unix.Unix_error (error, operation, argument) ->
+      Error
+        (Printf.sprintf "%s(%s): %s" operation argument
+           (Unix.error_message error))
+
 let run_success ?cwd command =
   match run_capture ?cwd command with
   | Error msg -> Error msg

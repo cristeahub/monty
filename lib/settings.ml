@@ -1,12 +1,14 @@
 type t = {
   harness : Harness.t option;
   codex_yolo : bool;
+  container_workers : bool;
   branch_prefix : string option;
   agent_profile : string option;
 }
 
 let empty =
-  { harness = None; codex_yolo = false; branch_prefix = None; agent_profile = None }
+  { harness = None; codex_yolo = false; container_workers = false;
+    branch_prefix = None; agent_profile = None }
 let path ~home = Filename.concat (Filename.concat home ".monty") "settings.json"
 
 let parse json =
@@ -27,6 +29,12 @@ let parse json =
     | `Bool value -> Ok value
     | _ -> Error "settings field \"codex_yolo\" must be a boolean"
   in
+  let* container_workers =
+    match member "container_workers" json with
+    | `Null -> Ok false
+    | `Bool value -> Ok value
+    | _ -> Error "settings field \"container_workers\" must be a boolean"
+  in
   let* branch_prefix =
     match member "branch_prefix" json with
     | `Null -> Ok None
@@ -41,7 +49,7 @@ let parse json =
         |> Result.map Option.some
     | _ -> Error "settings field \"agent_profile\" must be a string"
   in
-  Ok { harness; codex_yolo; branch_prefix; agent_profile }
+  Ok { harness; codex_yolo; container_workers; branch_prefix; agent_profile }
 
 let load ~home =
   let settings_path = path ~home in
@@ -75,6 +83,7 @@ let to_json settings =
         | None -> `Null
         | Some harness -> `String (Harness.to_string harness) );
       ("codex_yolo", `Bool settings.codex_yolo);
+      ("container_workers", `Bool settings.container_workers);
       ( "branch_prefix",
         match settings.branch_prefix with
         | None -> `Null
@@ -97,6 +106,13 @@ let set_codex_yolo ~home codex_yolo =
       let* settings = load ~home in
       State_store.write_json_atomic ~path:(path ~home)
         (to_json { settings with codex_yolo }))
+
+let set_container_workers ~home container_workers =
+  State_store.with_lock ~home (fun () ->
+      let ( let* ) = Result.bind in
+      let* settings = load ~home in
+      State_store.write_json_atomic ~path:(path ~home)
+        (to_json { settings with container_workers }))
 
 let set_branch_prefix ~home branch_prefix =
   State_store.with_lock ~home (fun () ->
@@ -168,6 +184,7 @@ let render settings =
       "-------------  -----";
       "harness       " ^ harness;
       "codex-yolo    " ^ if settings.codex_yolo then "true" else "false";
+      "container-workers " ^ if settings.container_workers then "true" else "false";
       "branch-prefix "
       ^ Option.value ~default:"monty" settings.branch_prefix;
       "agent-profile "
