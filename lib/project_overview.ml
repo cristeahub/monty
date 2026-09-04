@@ -57,6 +57,15 @@ let ensure_task_workspaces ~home ~id ?repo ~wt_command () =
           (Printf.sprintf "worker %s is in a %s transition"
              record.id (Job_store.operation_name transition.operation))
   in
+  let* () =
+    match record.container_worker with
+    | None -> Ok ()
+    | Some _ ->
+        Error
+          (Printf.sprintf
+             "worker %s is containerized; its workspace exists only inside the private volume and cannot be materialized on the host"
+             record.id)
+  in
   let* selected_repo =
     match repo with
     | None -> Ok None
