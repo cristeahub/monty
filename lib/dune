@@ -1,3 +1,4 @@
 (library
  (name monty)
+ (foreign_stubs (language c) (names worker_lock_stubs))
  (libraries cmdliner fmt fpath unix yojson))

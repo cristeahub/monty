@@ -169,3 +169,5 @@ let load ?home path =
   with
   | Sys_error msg -> Error msg
   | Yojson.Json_error msg -> Error ("invalid JSON manifest: " ^ msg)
+  | Yojson.Safe.Util.Type_error (msg, _) ->
+      Error ("invalid JSON structure in " ^ manifest_path ^ ": " ^ msg)

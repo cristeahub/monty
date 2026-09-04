@@ -323,18 +323,6 @@ let script_has_owner_marker (options : options) (prepared : prepared)
           branch_prefix = options.branch_prefix;
           monty_command = options.monty_command }
     in
-    let expected ?(codex_hook = true) ?(job = prepared.job) codex_mode
-        codex_trusted_paths =
-      Harness_command.launch_script_contents ~options:harness_options
-        ~codex_hook ~codex_mode ~codex_trusted_paths ~job ~id:prepared.id
-        ~branch:prepared.branch
-        ~source_repo:prepared.repo ~initial_workdir:prepared.repo
-        ~home:options.home ~context:prepared.context
-        ~instructions:prepared.instructions
-        ~worker_dir:prepared.worker_dir
-        ~worktree_mode:(worktree_mode_string options)
-        ~wt_command:options.wt_command
-    in
     let without_lines predicates text =
       text |> String.split_on_char '\n'
       |> List.filter (fun line ->
@@ -371,6 +359,31 @@ let script_has_owner_marker (options : options) (prepared : prepared)
           else None
         in
         loop 1
+    in
+    let contents = Shell.read_file path in
+    let environment_path =
+      let prefix = "export PATH=" in
+      match String.split_on_char '\n' contents
+            |> List.filter (String.starts_with ~prefix) with
+      | [ line ] ->
+          decode_generated_shell_quote
+            (String.sub line (String.length prefix)
+               (String.length line - String.length prefix))
+      | _ -> None
+    in
+    (* Authenticate the entire old template using its safely quoted PATH.
+       Resume replaces it with a fresh script before requesting execution. *)
+    let expected ?(codex_hook = true) ?(job = prepared.job) codex_mode
+        codex_trusted_paths =
+      Harness_command.launch_script_contents ?environment_path ~options:harness_options
+        ~codex_hook ~codex_mode ~codex_trusted_paths ~job ~id:prepared.id
+        ~branch:prepared.branch
+        ~source_repo:prepared.repo ~initial_workdir:prepared.repo
+        ~home:options.home ~context:prepared.context
+        ~instructions:prepared.instructions
+        ~worker_dir:prepared.worker_dir
+        ~worktree_mode:(worktree_mode_string options)
+        ~wt_command:options.wt_command ()
     in
     let exact_template_matches contents template =
       let sentinel = "monty-codex-session-id-sentinel" in
@@ -450,7 +463,6 @@ let script_has_owner_marker (options : options) (prepared : prepared)
       variants (expected (Codex_session.Exact sentinel) trusted_paths)
       @ variants (expected (Codex_session.Exact sentinel) [])
     in
-    let contents = Shell.read_file path in
     List.exists (String.equal contents) (accepted @ legacy)
     || List.exists (exact_template_matches contents) exact_templates
   with Sys_error _ -> false
@@ -1631,7 +1643,7 @@ let script_for_resume options prepared (record : Job_store.record) =
             in
             Ok prepared)
 
-let resume_job ?(validate_open_task = true) ?(fresh = false)
+let resume_job_unlocked ?(validate_open_task = true) ?(fresh = false)
     ?(codex_mode = Codex_session.Fresh) ~persisted_worktree_mode ~profile options
     job =
   let* options =
@@ -1657,6 +1669,17 @@ let resume_job ?(validate_open_task = true) ?(fresh = false)
   in
   match options.backend with
   | Terminal.Dry_run ->
+      let* () =
+        if not (State_path.path_exists prepared.state_path.State_path.job_file) then Ok ()
+        else
+          let* record = Job_store.parse_job_file ~home:options.home
+              prepared.state_path.job_file in
+          match record.launch_script with
+          | Some _ -> recorded_script options prepared record |> Result.map ignore
+          | None when State_path.path_exists prepared.script_path ->
+              Error ("launch script already exists without recorded ownership: " ^ prepared.script_path)
+          | None -> Ok ()
+      in
       dry_run ~codex_mode options prepared;
       Ok ()
   | Terminal.Ghostty ->

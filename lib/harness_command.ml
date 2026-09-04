@@ -162,9 +162,9 @@ let static_workspace_lines (job : Job.t) =
   @ [ "MONTY_JOB_WORKTREE=$MONTY_WORKSPACE_1";
       "cd \"$MONTY_JOB_WORKTREE\"" ]
 
-let launch_script_contents ~codex_hook ~codex_mode ~codex_trusted_paths ~options
+let launch_script_contents ?environment_path ~codex_hook ~codex_mode ~codex_trusted_paths ~options
     ~job ~id ~branch ~source_repo ~initial_workdir ~home ~context ~instructions
-    ~worker_dir ~worktree_mode ~wt_command =
+    ~worker_dir ~worktree_mode ~wt_command () =
   let command =
     build_command ~codex_hook ~codex_mode ~codex_trusted_paths ~options ~home
       ~instructions:(Some instructions) ~job ~context
@@ -193,8 +193,9 @@ let launch_script_contents ~codex_hook ~codex_mode ~codex_trusted_paths ~options
          "export PATH="
          ^ Shell.quote
              (Option.value
-                ~default:"/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
-                (Sys.getenv_opt "PATH"));
+                ~default:(Option.value
+                  ~default:"/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+                  (Sys.getenv_opt "PATH")) environment_path);
          "printf '\\033]0;%s\\007' " ^ Shell.quote job.Job.title;
          "export MONTY_BRANCH_PREFIX=" ^ Shell.quote options.branch_prefix;
          "export MONTY_RUN_DIR=" ^ Shell.quote (Worker_memory.run_dir_of_worker_dir worker_dir);
@@ -230,7 +231,7 @@ let write_launch_script ?path ?(codex_trusted_paths = []) ?(codex_hook = true)
   let contents =
     launch_script_contents ~codex_hook ~codex_mode ~codex_trusted_paths ~options
       ~job ~id ~branch ~source_repo ~initial_workdir ~home ~context
-      ~instructions ~worker_dir ~worktree_mode ~wt_command
+      ~instructions ~worker_dir ~worktree_mode ~wt_command ()
   in
   (match State_store.write_file_atomic ~path ~perm:0o700 contents with
   | Ok () -> ()

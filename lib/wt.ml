@@ -18,10 +18,19 @@ let same_git_repo ~repo ~worktree =
   | Ok left, Ok right -> String.equal left right
   | _ -> false
 
-let validate_worktree ~repo path =
+let validate_worktree ?branch ~repo path =
   let path = Shell.normalize path |> realpath_if_exists in
   if Sys.file_exists path && Sys.is_directory path && same_git_repo ~repo ~worktree:path
-  then Ok path
+  then
+    match branch with
+    | None -> Ok path
+    | Some expected ->
+        let ( let* ) = Result.bind in
+        let* root = git_output ~cwd:path "git rev-parse --show-toplevel" in
+        let* actual = git_output ~cwd:path "git symbolic-ref --quiet --short HEAD" in
+        if String.equal (realpath_if_exists root) path && String.equal actual expected
+        then Ok path
+        else Error (Printf.sprintf "worktree identity mismatch: expected root %s on branch %s, found root %s on branch %s" path expected root actual)
   else
     Error
       (Printf.sprintf "worktree does not belong to repo %s: %s" repo path)
@@ -189,27 +198,27 @@ let locate_existing ~wt_command ~repo ~branch =
         (Printf.sprintf
            "wt has branch %S in another repo, but not in requested repo %s"
            branch repo)
-  | [ entry ] -> Ok (Some entry.path)
+  | [ entry ] -> validate_worktree ~repo ~branch entry.path |> Result.map Option.some
   | _ ->
       Error
         (Printf.sprintf "wt reports multiple worktrees for branch %S in repo %s"
            branch repo)
 
-let validate_output_path ~repo output =
+let validate_output_path ~repo ~branch output =
   match output_path output with
   | None -> Error "wt did not print a worktree path"
-  | Some path -> validate_worktree ~repo path
+  | Some path -> validate_worktree ~repo ~branch path
 
 let create_or_reuse ~wt_command ~repo ~branch =
   let repo = Shell.normalize repo in
   match run_wt_branch ~wt_command ~repo "b" branch with
   | Error msg -> Error msg
   | Ok { stdout; status = `Exited 0 } -> (
-      match validate_output_path ~repo stdout with
+      match validate_output_path ~repo ~branch stdout with
       | Ok path -> Ok path
       | Error msg -> (
           match find_existing_for_repo ~wt_command ~repo ~branch with
-          | Some entry -> Ok entry.path
+          | Some entry -> validate_worktree ~repo ~branch entry.path
           | None ->
               Error
                 (msg
@@ -219,14 +228,14 @@ let create_or_reuse ~wt_command ~repo ~branch =
       | Some selection -> (
           match run_wt_branch ~selection ~wt_command ~repo "b" branch with
           | Error msg -> Error msg
-          | Ok { stdout; status = `Exited 0 } -> validate_output_path ~repo stdout
+          | Ok { stdout; status = `Exited 0 } -> validate_output_path ~repo ~branch stdout
           | Ok { stdout; status } ->
               Error
                 (Printf.sprintf "wt b failed with %s after selecting repo:\n%s"
                    (Process.status_to_string status) stdout))
       | None -> (
           match find_existing_for_repo ~wt_command ~repo ~branch with
-          | Some entry -> Ok entry.path
+          | Some entry -> validate_worktree ~repo ~branch entry.path
           | None ->
               Error
                 (Printf.sprintf "wt b failed with %s:\n%s"
@@ -317,6 +326,17 @@ let remove_if_present ?worktree ~wt_command ~repo ~branch () =
           List.filter (fun entry -> String.equal entry.path path) matching_entries
         in
         if exact = [] then matching_entries else exact
+  in
+  let* () =
+    List.fold_left (fun result entry ->
+        let* () = result in
+        match git_common_dir ~cwd:entry.path with
+        | Ok _ -> validate_worktree ~repo ~branch entry.path |> Result.map ignore
+        | Error _ when not (State_path.path_exists entry.path) -> Ok ()
+        | Error message ->
+            Error (Printf.sprintf
+              "cannot verify repository identity for existing worktree %s; restore its Git metadata or remove the residual directory after inspecting it before retrying:\n%s"
+              entry.path message)) (Ok ()) matching_entries
   in
   match (branch_entries, matching_entries) with
   | [], _ when not requested_branch_exists -> Ok ()

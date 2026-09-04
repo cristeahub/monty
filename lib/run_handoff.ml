@@ -714,7 +714,7 @@ let read_handoff_file ~path =
   let* json = State_store.read_json ~path in
   match json with
   | None -> Error (Printf.sprintf "run-handoff file is missing: %s" path)
-  | Some json -> of_json json
+  | Some json -> State_store.decode_json ~path (fun () -> of_json json)
 
 let validate_loaded_reference ~home reference (handoff : t) =
   let expected = handoff_path home reference in
@@ -847,7 +847,9 @@ let load_notice_file ~home path =
   match json with
   | None -> Error (Printf.sprintf "run-handoff notice is missing: %s" path)
   | Some json ->
-      let* notice = notice_of_json ~home json in
+      let* notice =
+        State_store.decode_json ~path (fun () -> notice_of_json ~home json)
+      in
       let expected = notice_path home notice.id in
       if String.equal (Shell.normalize path) expected then Ok notice
       else
@@ -1000,7 +1002,16 @@ let publish ~home ~(record : Job_store.record) ?handoff_id ~source ~outcome
           | Ok (Some { Unix.st_kind = Unix.S_REG; _ }) ->
               let* existing = read_handoff_file ~path:json_path in
               let* existing = validate_loaded_reference ~home reference existing in
-              Ok (existing, false)
+              if existing.source = Headless_pi
+                 && existing.outcome = Needs_attention
+                 && source = Headless_pi
+                 && (outcome = Ready_for_review || outcome = Failed)
+              then
+                (* Discovery is provisional; the authenticated Pi callback is final. *)
+                let handoff = build () in
+                let* () = State_store.write_json_atomic ~path:json_path (to_json handoff) in
+                Ok (handoff, true)
+              else Ok (existing, false)
           | Ok (Some _) ->
               Error (Printf.sprintf "canonical handoff path is not a file: %s" json_path)
           | Ok None ->
@@ -1018,7 +1029,14 @@ let publish ~home ~(record : Job_store.record) ?handoff_id ~source ~outcome
           | Error _ as error -> error
           | Ok (Some { Unix.st_kind = Unix.S_LNK; _ }) ->
               Error (Printf.sprintf "unsafe rendered handoff is a symlink: %s" markdown_path)
-          | Ok (Some { Unix.st_kind = Unix.S_REG; _ }) -> Ok false
+          | Ok (Some { Unix.st_kind = Unix.S_REG; _ }) ->
+              let rendered = render_markdown handoff in
+              if String.equal (Shell.read_file markdown_path) rendered then Ok false
+              else
+                let* () =
+                  State_store.write_file_atomic ~path:markdown_path ~perm:0o600 rendered
+                in
+                Ok true
           | Ok (Some _) ->
               Error (Printf.sprintf "rendered handoff path is not a file: %s" markdown_path)
           | Ok None ->
@@ -1148,7 +1166,13 @@ let recover_orphaned_notices ~home =
                                           "unsafe rendered handoff is a symlink: %s"
                                           markdown)
                                  | Ok (Some { Unix.st_kind = Unix.S_REG; _ }) ->
-                                     Ok (repaired, false)
+                                     let contents = render_markdown handoff in
+                                     if String.equal (Shell.read_file markdown) contents then
+                                       Ok (repaired, false)
+                                     else
+                                       let* () = State_store.write_file_atomic
+                                           ~path:markdown ~perm:0o600 contents in
+                                       Ok (repaired + 1, true)
                                  | Ok (Some _) ->
                                      Error
                                        (Printf.sprintf

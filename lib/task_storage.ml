@@ -124,44 +124,45 @@ let json_of_local_task task =
   `Assoc fields
 
 let load_local_tasks ~home =
-  let path = local_tasks_file home in
-  if not (Sys.file_exists path) then Ok []
-  else
-    let ( let* ) = Result.bind in
-    let* json = read_json_file path in
-    let* tasks_json = list_field json "tasks" in
-    let* tasks =
-      fold_results tasks_json ~init:[] ~f:(fun acc json ->
-          parse_local_task json |> Result.map (fun task -> task :: acc))
-      |> Result.map List.rev
-    in
-    let unique_optional label values =
-      match duplicate_value (List.filter_map Fun.id values) with
-      | Some value ->
-          Error (Printf.sprintf "duplicate %s %S in %s" label value path)
-      | None -> Ok ()
-    in
-    let* () =
-      match duplicate_value (List.map (fun (task : local_task) -> task.id) tasks) with
-      | Some id -> Error (Printf.sprintf "duplicate local task id %S in %s" id path)
-      | None -> Ok ()
-    in
-    let* () = unique_optional "external task key" (List.map (fun (task : local_task) -> task.external_key) tasks) in
-    let* () = unique_optional "worker key" (List.map (fun (task : local_task) -> task.worker_key) tasks) in
-    let* () =
-      fold_results tasks ~init:() ~f:(fun () (task : local_task) ->
-          match
-            duplicate_value
-              (List.map (fun (workspace : task_workspace) -> workspace.repo)
-                 task.workspaces)
-          with
-          | None -> Ok ()
-          | Some repo ->
-              Error
-                (Printf.sprintf "duplicate workspace repo %S on local task %s in %s"
-                   repo task.id path))
-    in
-    Ok tasks
+  State_store.decode_json ~path:(local_tasks_file home) (fun () ->
+    let path = local_tasks_file home in
+    if not (Sys.file_exists path) then Ok []
+    else
+      let ( let* ) = Result.bind in
+      let* json = read_json_file path in
+      let* tasks_json = list_field json "tasks" in
+      let* tasks =
+        fold_results tasks_json ~init:[] ~f:(fun acc json ->
+            parse_local_task json |> Result.map (fun task -> task :: acc))
+        |> Result.map List.rev
+      in
+      let unique_optional label values =
+        match duplicate_value (List.filter_map Fun.id values) with
+        | Some value ->
+            Error (Printf.sprintf "duplicate %s %S in %s" label value path)
+        | None -> Ok ()
+      in
+      let* () =
+        match duplicate_value (List.map (fun (task : local_task) -> task.id) tasks) with
+        | Some id -> Error (Printf.sprintf "duplicate local task id %S in %s" id path)
+        | None -> Ok ()
+      in
+      let* () = unique_optional "external task key" (List.map (fun (task : local_task) -> task.external_key) tasks) in
+      let* () = unique_optional "worker key" (List.map (fun (task : local_task) -> task.worker_key) tasks) in
+      let* () =
+        fold_results tasks ~init:() ~f:(fun () (task : local_task) ->
+            match
+              duplicate_value
+                (List.map (fun (workspace : task_workspace) -> workspace.repo)
+                   task.workspaces)
+            with
+            | None -> Ok ()
+            | Some repo ->
+                Error
+                  (Printf.sprintf "duplicate workspace repo %S on local task %s in %s"
+                     repo task.id path))
+      in
+      Ok tasks)
 
 let save_local_tasks_unlocked ~home tasks =
   let path = local_tasks_file home in

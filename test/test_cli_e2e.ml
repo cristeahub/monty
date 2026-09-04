@@ -978,7 +978,10 @@ let install_stateful_remove_wt ~root ~worktree ~branch =
          ^ Shell.quote worktree;
          "    fi";
          "    ;;";
-         "  db) rm -f " ^ Shell.quote marker ^ " ;;";
+         "  db)";
+         "    git -C " ^ Shell.quote worktree ^ " checkout -q --detach";
+         "    git -C " ^ Shell.quote worktree ^ " branch -D " ^ Shell.quote branch ^ " >/dev/null";
+         "    rm -f " ^ Shell.quote marker ^ " ;;";
          "  b) exit 91 ;;";
          "  *) exit 92 ;;";
          "esac";
@@ -1035,6 +1038,9 @@ let command_count calls command =
 
 let setup_direct_worker ~home ~repo ~context ~worktree_mode
     ?last_known_worktree () =
+  if worktree_mode = "always" && last_known_worktree = Some repo then
+    (match Process.run_quiet ~cwd:repo "git checkout -qB cto/force-lifecycle" with
+     | Ok () -> () | Error message -> failwith message);
   let run_dir = Filename.concat home ".monty/runs/run-force" in
   let worker_dir = Filename.concat run_dir "workers/worker-force" in
   Shell.ensure_dir worker_dir;
@@ -1182,6 +1188,8 @@ let test_completion_recovers_after_partial_worktree_removal () =
         install_partial_remove_wt ~root ~worktree
           ~branch:"cto/force-lifecycle"
       in
+      let git_file = Filename.concat worktree ".git" in
+      let git_metadata = read_file git_file in
       let interrupted =
         run ~root ~env 626
           [ "done"; "worker-force"; "--home"; home; "--wt-command"; "wt" ]
@@ -1190,6 +1198,22 @@ let test_completion_recovers_after_partial_worktree_removal () =
         failwith "partial worktree removal unexpectedly completed";
       if Sys.file_exists (Filename.concat worktree ".git") then
         failwith "partial removal fixture retained Git metadata";
+      let sentinel = Filename.concat worktree "possibly-unrelated-data" in
+      Shell.write_file sentinel "keep this\n";
+      Unix.chmod sentinel 0o400;
+      let rejected = run ~root ~env 6261
+          [ "done"; "worker-force"; "--home"; home; "--wt-command"; "wt" ] in
+      require_code 1 rejected;
+      require_contains "partial recovery requires identity" rejected.stderr
+        "cannot verify repository identity";
+      if (Unix.stat sentinel).st_perm <> 0o400 || read_file sentinel <> "keep this\n" then
+        failwith "unverified residual directory was modified";
+      if command_count (read_file wt_log) "db" <> 1 then
+        failwith "unverified residual directory was sent to wt db";
+      (* The fixture knows this is the original directory; restore its metadata
+         explicitly before retrying the persisted completion transition. *)
+      Unix.unlink sentinel;
+      Shell.write_file git_file git_metadata;
       require_code 0
         (run ~root ~env 627
            [ "done"; "worker-force"; "--home"; home; "--wt-command"; "wt" ]);
@@ -1988,7 +2012,7 @@ let test_codex_session_capture_and_resume_modes () =
               ~context:legacy_context
               ~instructions:(Filename.concat legacy_worker_path "MONTY.md")
               ~worker_dir:legacy_worker_path ~worktree_mode:"never"
-              ~wt_command:"wt")
+              ~wt_command:"wt" ())
       in
       Shell.write_file legacy_script legacy_contents;
       let legacy_json =
@@ -2683,6 +2707,27 @@ let test_retry_uses_recorded_script_and_absolute_commands () =
       in
       if not (String.equal persisted recorded_script) then
         failwith "retry changed recorded script ownership";
+      let resume_args backend =
+        [ "resume"; "script-worker"; "--home"; home; "--terminal"; backend;
+          "--pi-command"; "/usr/bin/true --fixed argument" ]
+      in
+      let strange_path = Filename.concat root "quote'$(touch SHOULD_NOT_EXIST)" in
+      let changed_path = Filename.concat root "fake-bin" ^ ":/usr/bin:/bin:" ^ strange_path in
+      let changed_env = replace_env env [ ("PATH", changed_path) ] in
+      require_code 0 (run ~root ~env:changed_env 13211 (resume_args "dry-run"));
+      require_code 0 (run ~root ~env:changed_env 13212 (resume_args "ghostty"));
+      require_contains "fresh PATH in rewritten script" (read_file recorded_script)
+        ("export PATH=" ^ Shell.quote changed_path);
+      require_code 0 (run ~root ~env 13213 (resume_args "dry-run"));
+      require_code 0 (run ~root ~env 13214 (resume_args "ghostty"));
+      let forged = read_file recorded_script ^ "\ntouch SHOULD_NOT_EXIST\n" in
+      Shell.write_file recorded_script forged;
+      List.iteri (fun index backend ->
+          let rejected = run ~root ~env (13215 + index) (resume_args backend) in
+          require_code 1 rejected;
+          require_contains "forged script rejected" rejected.stderr "Monty-owned";
+          if read_file recorded_script <> forged then failwith "forged script was overwritten")
+        [ "dry-run"; "ghostty" ];
       require_empty_log log)
 
 let test_ghostty_launch_script_matches_ensure_worktree_cli () =
@@ -2801,7 +2846,7 @@ let test_lifecycle_rejects_cross_project_and_owned_task_links () =
       then failwith "worker ownership lifecycle guard mutated durable state";
       require_empty_log log)
 
-let test_launch_state_race_preserves_completion_transition () =
+let test_live_resume_excludes_completion () =
   with_temp_root "launch-completion-race" (fun root ->
       let home, _log, env = setup_environment root in
       let repo = Filename.concat root "repo" in
@@ -2812,6 +2857,8 @@ let test_launch_state_race_preserves_completion_transition () =
       let release = Filename.concat root "resume-wt-release" in
       let wt = Filename.concat root "fake-bin/wt" in
       init_git_repo repo;
+      (match Process.run_quiet ~cwd:repo "git checkout -qb cto/race-worker" with
+      | Ok () -> () | Error message -> failwith message);
       add_project ~root ~home ~env repo;
       Shell.write_file context "# Launch completion race\n";
       Shell.ensure_dir worker_dir;
@@ -2852,31 +2899,13 @@ let test_launch_state_race_preserves_completion_transition () =
         run ~root ~env:done_env 1941
           [ "done"; "race-worker"; "--home"; home; "--wt-command"; "wt" ]
       in
-      if interrupted.code = 0 then
-        failwith "completion race setup did not stop after persisted intent";
+      require_code 1 interrupted;
+      require_contains "completion excludes live resume" interrupted.stderr "busy";
       Shell.write_file release "release\n";
       let resumed = await child in
-      if resumed.code = 0 then
-        failwith "resume overwrote a concurrent completion transition";
-      require_contains "launch transition compare-and-update" resumed.stdout
-        "entered a complete transition";
-      let record =
-        match
-          Job_store.parse_job_file ~home (Filename.concat worker_dir "job.json")
-        with
-        | Ok record -> record
-        | Error message -> failwith ("race left unparsable state: " ^ message)
-      in
-      if not (String.equal record.Job_store.status "completing") then
-        failwith "resume changed completing status during race";
-      (match record.transition with
-      | Some transition when transition.operation = Job_store.Complete -> ()
-      | _ -> failwith "completion transition was lost during resume race");
-      let recovered =
-        run ~root ~env 1942
-          [ "done"; "race-worker"; "--home"; home; "--wt-command"; "wt" ]
-      in
-      require_code 0 recovered)
+      require_code 0 resumed;
+      if job_status (Filename.concat worker_dir "job.json") <> "launch-requested" then
+        failwith "completion changed the live resume state")
 
 let test_forged_launch_script_and_resume_mode_are_safe () =
   with_temp_root "forged-launch-script" (fun root ->
@@ -3013,6 +3042,8 @@ let test_forged_launch_script_and_resume_mode_are_safe () =
       let release = Filename.concat root "swap-wt-release" in
       let escaped_target = Filename.concat root "swap-escaped-target" in
       init_git_repo repo;
+      (match Process.run_quiet ~cwd:repo "git checkout -qb cto/swap" with
+      | Ok () -> () | Error message -> failwith message);
       add_project ~root ~home ~env repo;
       Shell.write_file context "# Script swap\n";
       Shell.write_file wt
@@ -3771,6 +3802,58 @@ let test_headless_prepare_begin_and_resume () =
       in
       if recovered_outcome <> Some "needs-attention" then
         failwith "missed Pi callback recovery inferred a successful outcome";
+      let recovered_entry = List.find (fun entry ->
+          json_string "id" (Yojson.Safe.Util.member "handoff" entry) = missed_attempt)
+          recovered_entries in
+      let notice = json_string "id" (Yojson.Safe.Util.member "notice" recovered_entry) in
+      require_code 0 (run ~root ~env 19566
+          [ "handoff"; "acknowledge"; notice; "--home"; home ]);
+      let finish_after_discovery outcome extras =
+        run ~root ~env 19567
+          ([ "headless"; "finish"; "headless-one"; "--attempt"; missed_attempt;
+             "--outcome"; outcome; "--home"; home ] @ extras)
+      in
+      let finished_after_discovery = finish_after_discovery "success" [] in
+      require_code 0 finished_after_discovery;
+      if json_string "outcome" (Yojson.Safe.from_string finished_after_discovery.stdout)
+          <> "ready-for-review" then
+        failwith "pending discovery shadowed the successful Pi callback";
+      require_code 0 (finish_after_discovery "success" []);
+      require_code 1 (finish_after_discovery "failed" [ "--error"; "contradiction" ]);
+      let pending_after_finish = run ~root ~env 19568
+          [ "handoff"; "pending"; "--format"; "json"; "--home"; home ] in
+      require_code 0 pending_after_finish;
+      if Yojson.Safe.Util.(Yojson.Safe.from_string pending_after_finish.stdout
+          |> member "pending" |> to_list |> List.length) <> 2 then
+        failwith "late callback reopened an acknowledged notice";
+      let failed_attempt = run ~root ~env 19569
+          [ "headless"; "resume"; "headless-one"; "--home"; home ] in
+      require_code 0 failed_attempt;
+      let attempt_id = Yojson.Safe.Util.(Yojson.Safe.from_string failed_attempt.stdout
+          |> member "completion" |> member "attempt_id" |> to_string) in
+      let attempt_root = Filename.concat (Filename.dirname (job_file "headless-one"))
+          ("artifacts/headless/" ^ attempt_id) in
+      Shell.write_file (Filename.concat attempt_root "final.md") "Pi final artifact\n";
+      require_code 0 (run ~root ~env 19570
+          [ "handoff"; "pending"; "--format"; "json"; "--home"; home ]);
+      let failure_args =
+        [ "headless"; "finish"; "headless-one"; "--attempt"; attempt_id;
+          "--outcome"; "failed"; "--last-phase"; "review"; "--error";
+          "Late failure callback"; "--home"; home ] in
+      let fault_env = replace_env env
+          [ ("MONTY_FAULT_INJECT", "run-handoff-after-canonical") ] in
+      require_code 1 (run ~root ~env:fault_env 19571 failure_args);
+      require_code 0 (run ~root ~env 19572
+          [ "handoff"; "pending"; "--format"; "json"; "--home"; home ]);
+      let final_failure = run ~root ~env 19573 failure_args in
+      require_code 0 final_failure;
+      let final_json = Yojson.Safe.from_string final_failure.stdout in
+      if json_string "outcome" final_json <> "failed" then
+        failwith "pending discovery shadowed the failed Pi callback";
+      let rendering = Filename.concat home
+          (".monty/handoffs/run-headless/headless-one/" ^ attempt_id ^ ".md") in
+      require_contains "repaired late callback rendering" (read_file rendering)
+        "Late failure callback";
       if job_status (job_file "headless-one") <> "launch-requested" then
         failwith "explicit headless resume changed the open launch state";
       require_no_terminal_script "headless-one";
@@ -4935,6 +5018,260 @@ let test_cli_parser_and_doctor_contracts () =
       require_contains "doctor exit diagnostic" failed.stderr
         "doctor found failing checks")
 
+let test_json_shape_errors_are_actionable () =
+  with_temp_root "json-shapes" (fun root ->
+      let home, log, env = setup_environment root in
+      let repo = Filename.concat root "repo" in
+      let context = Filename.concat root "context.md" in
+      let run_dir = Filename.concat home ".monty/runs/shapes" in
+      let worker_dir = Filename.concat run_dir "workers/healthy" in
+      add_project ~root ~home ~env repo;
+      Shell.write_file context "# JSON shapes\n";
+      Shell.ensure_dir worker_dir;
+      Yojson.Safe.to_file (Filename.concat worker_dir "job.json")
+        (lifecycle_job_json ~id:"healthy" ~title:"Healthy neighbor" ~branch:"cto/healthy"
+           ~repo ~context ~worker_dir ~run_dir ());
+      let corrupt = Filename.concat run_dir "workers/corrupt/job.json" in
+      Shell.ensure_dir (Filename.dirname corrupt);
+      List.iteri (fun index contents ->
+          Shell.write_file corrupt contents;
+          let listed = run ~root ~env (3100 + index)
+              [ "list"; "--no-sync"; "--home"; home ] in
+          require_code 0 listed;
+          require_contains "healthy neighbor survives corrupt state" listed.stdout "Healthy neighbor";
+          require_contains "corrupt path warning" listed.stderr corrupt;
+          let doctor = run ~root ~env (3110 + index)
+              [ "doctor"; "--home"; home; "--terminal"; "dry-run";
+                "--worktree"; "never"; "--pi-command"; "/usr/bin/true" ] in
+          require_code 1 doctor;
+          require_contains "corrupt state doctor" doctor.stdout "FAIL";
+          require_contains "structural JSON diagnostic" doctor.stdout "invalid JSON structure";
+          if read_file corrupt <> contents then failwith "corrupt worker was overwritten")
+        [ "42"; "[]"; "null" ];
+      remove_tree (Filename.dirname corrupt);
+      let manifest = Filename.concat run_dir "jobs.json" in
+      Shell.write_file manifest "{\"jobs\":[42]}";
+      let rejected = run ~root ~env 3120
+          [ "launch-many"; "--manifest"; manifest; "--home"; home;
+            "--terminal"; "dry-run"; "--worktree"; "never" ] in
+      require_code 1 rejected;
+      require_contains "manifest shape error path" rejected.stderr manifest;
+      List.iteri (fun index (name, contents, args) ->
+          let path = Filename.concat home (".monty/" ^ name) in
+          let previous = if Sys.file_exists path then Some (read_file path) else None in
+          Shell.write_file path contents;
+          let rejected = run ~root ~env (3130 + index) (args @ [ "--home"; home ]) in
+          require_code 1 rejected;
+          require_contains "registry shape error path" rejected.stderr path;
+          if read_file path <> contents then failwith "malformed registry was overwritten";
+          match previous with Some contents -> Shell.write_file path contents
+          | None -> Unix.unlink path)
+        [ ("tasks.local.json", "{\"tasks\":[42]}",
+           [ "task"; "add"; "--project"; "repo"; "--title"; "Must not persist" ]);
+          ("projects.json", "{\"projects\":[false]}",
+           [ "projects"; "add"; "--repo"; repo ]);
+          ("settings.json", "[]", [ "settings"; "set"; "harness"; "pi" ]) ];
+      let profile = Filename.concat home "agent-profiles/solo/profile.json" in
+      Shell.write_file profile "42";
+      let rejected = run ~root ~env 3140
+          [ "agent-profiles"; "show"; "solo"; "--home"; home ] in
+      require_code 1 rejected;
+      require_contains "profile shape diagnostic" rejected.stderr "invalid JSON structure";
+      require_contains "profile shape source" rejected.stderr profile;
+      let snapshot = Agent_profile.snapshot_path worker_dir in
+      Shell.write_file snapshot "42";
+      let rejected = run ~root ~env 3141
+          [ "resume"; "healthy"; "--terminal"; "dry-run"; "--home"; home ] in
+      require_code 1 rejected;
+      require_contains "snapshot shape source" rejected.stderr snapshot;
+      require_empty_log log)
+
+let test_worktree_root_and_branch_are_verified () =
+  with_temp_root "workspace-identity" (fun root ->
+      let home, log, env = setup_environment root in
+      let repo = Filename.concat root "repo" in
+      let context = Filename.concat root "context.md" in
+      let manifest = Filename.concat home ".monty/runs/identity/jobs.json" in
+      init_git_repo repo;
+      add_project ~root ~home ~env repo;
+      install_repo_scoped_wt ~root ~log;
+      Shell.write_file context "# Worktree identity\n";
+      write_manifest manifest [ manifest_job ~id:"identity" ~branch:"cto/identity"
+          ~agent_profile:"solo" ~title:"Identity" ~repo ~context () ];
+      require_code 0 (run ~root ~env 3150
+          [ "headless"; "prepare-many"; "--manifest"; manifest; "--home"; home ]);
+      let job_file = Filename.concat home ".monty/runs/identity/workers/identity/job.json" in
+      let worktree = Yojson.Safe.from_file job_file |> json_string "last_known_worktree" in
+      let git command = match Process.run_quiet ~cwd:worktree command with
+        | Ok () -> () | Error message -> failwith message in
+      let rejected index =
+        let before = read_file job_file in
+        let ensure = run ~root ~env index
+            [ "ensure-worktree"; "--repo"; repo; "--branch"; "cto/identity";
+              "--wt-command"; "wt" ] in
+        require_code 1 ensure;
+        let done_result = run ~root ~env (index + 1)
+            [ "done"; "identity"; "--force"; "--home"; home ] in
+        require_code 1 done_result;
+        if read_file job_file <> before then failf "wrong workspace changed lifecycle in case %d" index;
+        if not (Sys.file_exists worktree) then failwith "wrong workspace was removed";
+        if string_contains (read_file log) " db " then failwith "wt removal was attempted"
+      in
+      git "git checkout -qb wrong-branch";
+      rejected 3151;
+      git "git checkout -q --detach";
+      rejected 3153;
+      git "git checkout -q cto/identity";
+      let nested = Filename.concat worktree "nested" in
+      Shell.ensure_dir nested;
+      let wt = Filename.concat root "fake-bin/wt" in
+      let original = read_file wt in
+      let original_job = read_file job_file in
+      let rec replace_worktree = function
+        | `String path when path = worktree -> `String nested
+        | `Assoc fields -> `Assoc (List.map (fun (key, value) -> (key, replace_worktree value)) fields)
+        | `List values -> `List (List.map replace_worktree values)
+        | value -> value
+      in
+      Yojson.Safe.from_string original_job |> replace_worktree |> Yojson.Safe.to_file job_file;
+      Shell.write_file wt (String.concat "\n"
+          [ "#!/bin/sh"; "case \"$1\" in";
+            "b) printf '%s\\n' " ^ Shell.quote nested ^ " ;;";
+            "list) printf 'repo:\\n  cto/identity -> %s\\n' " ^ Shell.quote nested ^ " ;;";
+            "*) exit 92 ;;"; "esac"; "" ]);
+      rejected 3155;
+      Shell.write_file job_file original_job;
+      Shell.write_file wt original;
+      Unix.rmdir nested;
+      require_code 0 (run ~root ~env 3157
+          [ "done"; "identity"; "--home"; home ]))
+
+let test_live_codex_excludes_resume_and_completion () =
+  with_temp_root "codex-worker-lock" (fun root ->
+      let home, log, env = setup_environment root in
+      let env = replace_env env [ ("MONTY_HARNESS", "codex") ] in
+      let repo = Filename.concat root "repo" in
+      let context = Filename.concat root "context.md" in
+      let manifest = Filename.concat home ".monty/runs/lock/jobs.json" in
+      init_git_repo repo;
+      add_project ~root ~home ~env repo;
+      install_repo_scoped_wt ~root ~log;
+      install_codex_exec ~root ~log;
+      Shell.write_file context "# Lock regression\n";
+      write_manifest manifest
+        (List.map (fun id -> manifest_job ~id ~branch:("cto/" ^ id)
+             ~agent_profile:"solo" ~title:id ~repo ~context ())
+           [ "blocked"; "independent" ]);
+      require_code 0 (run ~root ~env 3000
+          [ "headless"; "prepare-many"; "--manifest"; manifest; "--home"; home ]);
+      let missing = run ~root ~env 30001
+          [ "headless"; "run"; "blocked"; "--home"; home;
+            "--codex-command"; "definitely-missing-codex" ] in
+      require_code 1 missing;
+      require_contains "Codex dependency preflight" missing.stderr "definitely-missing-codex";
+      if Sys.file_exists (Filename.concat home ".monty/runs/lock/.worker-locks") then
+        failwith "failed dependency preflight created worker lock state";
+      let worker = Filename.concat home ".monty/runs/lock/workers/blocked" in
+      let job_file = Filename.concat worker "job.json" in
+      let worktree = Yojson.Safe.from_file job_file |> json_string "last_known_worktree" in
+      let started = Filename.concat root "codex-started" in
+      let release = Filename.concat root "codex-release" in
+      let finished = Filename.concat root "codex-finished" in
+      let codex = Filename.concat root "fake-bin/codex" in
+      let original = read_file codex in
+      let block =
+        String.concat "\n"
+          [ "if [ \"$BLOCK_CODEX\" = yes ]; then";
+            "  trap " ^ Shell.quote ("touch " ^ Shell.quote finished) ^ " EXIT";
+            "  echo $$ > " ^ Shell.quote started;
+            "  count=0";
+            "  while [ ! -f " ^ Shell.quote release ^ " ]; do";
+            "    count=$((count + 1)); [ \"$count\" -lt 1000 ] || exit 89";
+            "    sleep 0.01";
+            "  done";
+            "fi"; "" ]
+      in
+      Shell.write_file codex ("#!/bin/sh\n" ^ block ^ original);
+      let blocked_env = replace_env env [ ("BLOCK_CODEX", "yes") ] in
+      let supervisor = spawn ~root ~env:blocked_env 3001
+          [ "headless"; "run"; "blocked"; "--home"; home ] in
+      let awaited = ref false in
+      let wait_file path =
+        let rec loop remaining =
+          if Sys.file_exists path then ()
+          else if remaining = 0 then failf "timed out waiting for %s" path
+          else (Unix.sleepf 0.01; loop (remaining - 1))
+        in loop 500
+      in
+      Fun.protect
+        ~finally:(fun () ->
+          Shell.write_file release "release\n";
+          if not !awaited then ignore (await supervisor);
+          if Sys.file_exists started then wait_file finished)
+        (fun () ->
+          wait_file started;
+          let original_job = read_file job_file in
+          let attempts = Sys.readdir (Filename.concat worker "artifacts/headless") in
+          let rejected index args =
+            let result = run ~root ~env index (args @ [ "--home"; home ]) in
+            require_code 1 result;
+            require_contains "worker busy" (result.stderr ^ result.stdout) "busy";
+            if read_file job_file <> original_job then failwith "busy operation mutated job";
+            if Sys.readdir (Filename.concat worker "artifacts/headless") <> attempts then
+              failwith "busy operation created an attempt";
+            if not (Sys.file_exists worktree) then failwith "busy worker was deleted"
+          in
+          rejected 3002 [ "headless"; "resume"; "blocked" ];
+          rejected 30021 [ "headless"; "resume"; "blocked"; "--harness"; "pi" ];
+          rejected 3003 [ "resume"; "blocked"; "--terminal"; "ghostty" ];
+          rejected 3004 [ "done"; "blocked" ];
+          rejected 3005 [ "done"; "blocked"; "--force" ];
+          require_code 0 (run ~root ~env 3006
+              [ "settings"; "set"; "branch-prefix"; "other"; "--home"; home ]);
+          require_code 0 (run ~root ~env 3007
+              [ "headless"; "run"; "independent"; "--home"; home ]);
+          Unix.kill supervisor.pid Sys.sigkill;
+          ignore (await supervisor);
+          awaited := true;
+          rejected 3008 [ "headless"; "resume"; "blocked" ];
+          rejected 3009 [ "done"; "blocked"; "--force" ];
+          Shell.write_file release "release\n";
+          wait_file finished;
+          let rec resume remaining =
+            let result = run ~root ~env 3010
+                [ "headless"; "resume"; "blocked"; "--home"; home ] in
+            if result.code <> 0 && string_contains result.stderr "busy" && remaining > 0 then
+              (Unix.sleepf 0.01; resume (remaining - 1))
+            else require_code 0 result
+          in
+          resume 100;
+          require_code 0 (run ~root ~env 3011
+              [ "done"; "blocked"; "--home"; home ]);
+          if Sys.file_exists worktree then failwith "finished worker worktree was retained";
+          let archived = match Job_store.find ~home ~scope:Job_store.All "blocked" with
+            | Ok record -> record | Error message -> failwith message in
+          let archived_job = read_file archived.path in
+          let task_file = Filename.concat home ".monty/tasks.local.json" in
+          let archived_tasks = read_file task_file in
+          let resume_args = [ "resume"; "--archived"; "blocked"; "--home"; home;
+              "--terminal"; "ghostty"; "--harness"; "pi" ] in
+          (match Worker_lock.with_lock ~home ~record:archived (fun () ->
+               let rejected = run ~root ~env 3012 resume_args in
+               require_code 1 rejected;
+               require_contains "archive lock precedes reactivation" rejected.stderr "busy";
+               if read_file archived.path <> archived_job
+                  || read_file task_file <> archived_tasks
+                  || Sys.file_exists worker then
+                 failwith "busy archived resume mutated lifecycle state";
+               Ok ()) with
+          | Ok () -> () | Error message -> failwith message);
+          let osascript = Filename.concat root "fake-bin/osascript" in
+          Shell.write_file osascript "#!/bin/sh\nexit 0\n";
+          Shell.chmod_executable osascript;
+          require_code 0 (run ~root ~env 3013 resume_args);
+          if not (Sys.file_exists worktree) || job_status job_file <> "launch-requested" then
+            failwith "archived resume did not recover after the lock was released"))
+
 let run_named name test =
   try
     test ();
@@ -4942,7 +5279,15 @@ let run_named name test =
   with exn -> failwith (Printf.sprintf "%s: %s" name (Printexc.to_string exn))
 
 let () =
-  [ ("cli_concurrent_task_adds_keep_unique_tasks", test_concurrent_task_adds_keep_unique_tasks);
+  Unix.putenv "GIT_CONFIG_NOSYSTEM" "1";
+  Unix.putenv "GIT_CONFIG_SYSTEM" "/dev/null";
+  Unix.putenv "GIT_CONFIG_GLOBAL" "/dev/null";
+  Unix.putenv "GIT_CONFIG_COUNT" "0";
+  Unix.putenv "GIT_TEMPLATE_DIR" "/dev/null";
+  [ ("cli_live_codex_excludes_resume_and_completion", test_live_codex_excludes_resume_and_completion);
+    ("cli_json_shape_errors_are_actionable", test_json_shape_errors_are_actionable);
+    ("cli_worktree_root_and_branch_are_verified", test_worktree_root_and_branch_are_verified);
+    ("cli_concurrent_task_adds_keep_unique_tasks", test_concurrent_task_adds_keep_unique_tasks);
     ("cli_malformed_json_is_not_overwritten", test_malformed_json_is_not_overwritten);
     ( "cli_dry_run_rejects_unsafe_manifest_before_side_effects",
       test_dry_run_rejects_unsafe_manifest_before_side_effects );
@@ -5003,8 +5348,8 @@ let () =
       test_ghostty_launch_script_matches_ensure_worktree_cli );
     ( "cli_lifecycle_rejects_cross_project_and_owned_task_links",
       test_lifecycle_rejects_cross_project_and_owned_task_links );
-    ( "cli_launch_state_race_preserves_completion_transition",
-      test_launch_state_race_preserves_completion_transition );
+    ( "cli_live_resume_excludes_completion",
+      test_live_resume_excludes_completion );
     ( "cli_forged_launch_script_and_resume_mode_are_safe",
       test_forged_launch_script_and_resume_mode_are_safe );
     ( "cli_multi_workspace_sonnet_task_lifecycle",

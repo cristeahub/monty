@@ -205,9 +205,12 @@ let show_task ~home id =
           when not (Sys.file_exists path && Sys.is_directory path) ->
             (Some path, "missing")
         | Some { worktree = Some path; _ } -> (
-            match Wt.validate_worktree ~repo:workspace.repo path with
+            let branch =
+              if record.worktree_mode = "never" then None else Some workspace.branch
+            in
+            match Wt.validate_worktree ~repo:workspace.repo ?branch path with
             | Ok path -> (Some path, "present")
-            | Error _ -> (Some path, "invalid-repo")))
+            | Error _ -> (Some path, "invalid-workspace")))
   in
   let project_label repo =
     projects

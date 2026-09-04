@@ -551,34 +551,38 @@ let claim_begin (plan : begin_plan) =
           profile = plan.prepared.profile;
         }
 
+let begin_worker_unlocked ~explicit_resume options worker =
+  let* plan = prepare_begin ~explicit_resume options worker in
+  let preview =
+    {
+      id = plan.prepared.id;
+      title = plan.prepared.job.Job.title;
+      repo = plan.prepared.repo;
+      branch = plan.prepared.branch;
+      worktree =
+        Option.value ~default:plan.prepared.repo
+          plan.record.last_known_worktree;
+      workspaces = plan.record.workspaces;
+      worker_dir = plan.prepared.worker_dir;
+      instructions = plan.prepared.instructions;
+      context = plan.prepared.context;
+      home = plan.options.home;
+      profile = plan.prepared.profile;
+    }
+  in
+  let attempt_id = fresh_attempt_id () in
+  let paths = attempt_paths preview attempt_id in
+  let* () = prepare_attempt plan preview paths "headless-pi" in
+  let* dispatch = claim_begin plan in
+  Ok (dispatch_json ~attempt_id dispatch)
+
 let begin_worker ~explicit_resume options worker =
   if options.Launcher.harness <> Harness.Pi then
-    Error
-      "headless begin emits a Pi subagent call, but the effective harness is codex; use monty headless run"
+    Error "headless begin emits a Pi subagent call, but the effective harness is codex; use monty headless run"
   else
-    let* plan = prepare_begin ~explicit_resume options worker in
-    let preview =
-      {
-        id = plan.prepared.id;
-        title = plan.prepared.job.Job.title;
-        repo = plan.prepared.repo;
-        branch = plan.prepared.branch;
-        worktree =
-          Option.value ~default:plan.prepared.repo
-            plan.record.last_known_worktree;
-        workspaces = plan.record.workspaces;
-        worker_dir = plan.prepared.worker_dir;
-        instructions = plan.prepared.instructions;
-        context = plan.prepared.context;
-        home = plan.options.home;
-        profile = plan.prepared.profile;
-      }
-    in
-    let attempt_id = fresh_attempt_id () in
-    let paths = attempt_paths preview attempt_id in
-    let* () = prepare_attempt plan preview paths "headless-pi" in
-    let* dispatch = claim_begin plan in
-    Ok (dispatch_json ~attempt_id dispatch)
+    let* record = Job_store.find ~home:options.Launcher.home ~scope:Job_store.Active worker in
+    Worker_lock.with_lock ~home:options.home ~record (fun () ->
+        begin_worker_unlocked ~explicit_resume options worker)
 
 let read_required_file ~label path =
   try Ok (Shell.read_file path)
@@ -913,7 +917,7 @@ let preflight_codex_worker ~explicit_resume options worker =
   let* inputs = load_codex_inputs plan in
   Ok (plan, inputs)
 
-let run_codex_worker ~explicit_resume options worker =
+let run_codex_worker_unlocked ~explicit_resume options worker =
   let* plan, inputs = preflight_codex_worker ~explicit_resume options worker in
   let preview = provisional_dispatch plan in
   let paths = attempt_paths preview (fresh_attempt_id ()) in
@@ -1030,40 +1034,47 @@ let run_codex_worker ~explicit_resume options worker =
       in
       Ok (codex_run_result_json plan.options dispatch paths published))
 
+let run_codex_worker ~explicit_resume options worker =
+  let* () = require_codex_harness options in
+  let* record = Job_store.find ~home:options.Launcher.home ~scope:Job_store.Active worker in
+  Worker_lock.with_lock ~home:options.home ~record (fun () ->
+      run_codex_worker_unlocked ~explicit_resume options worker)
+
 let read_attempt_descriptor ~record ~profile paths ~expected_source =
-  let* () = Run_handoff.require_regular_file paths.descriptor in
-  let* json = State_store.read_json ~path:paths.descriptor in
-  match json with
-  | None -> Error (Printf.sprintf "headless attempt descriptor is missing: %s" paths.descriptor)
-  | Some json ->
-      let string name =
-        match Yojson.Safe.Util.member name json with
-        | `String value -> Ok value
-        | _ -> Error (Printf.sprintf "headless attempt descriptor missing %S" name)
-      in
-      let* schema = string "schema" in
-      let* attempt_id = string "attempt_id" in
-      let* worker_id = string "worker_id" in
-      let* source = string "source" in
-      let* agent_profile =
-        match Yojson.Safe.Util.member "agent_profile" json with
-        | `Null -> Ok Agent_profile.default_id
-        | `String value -> Ok value
-        | _ -> Error "headless attempt descriptor has invalid agent_profile"
-      in
-      if schema <> attempt_schema then Error "unsupported headless attempt descriptor"
-      else if attempt_id <> paths.id || worker_id <> record.Job_store.id then
-        Error "headless attempt descriptor identity does not match the requested worker"
-      else if source <> expected_source then
-        Error
-          (Printf.sprintf "headless attempt source is %S, expected %S" source
-             expected_source)
-      else if agent_profile <> profile.Agent_profile.id then
-        Error
-          (Printf.sprintf
-             "headless attempt agent profile is %S, pinned snapshot is %S"
-             agent_profile profile.id)
-      else Ok ()
+  State_store.decode_json ~path:paths.descriptor (fun () ->
+    let* () = Run_handoff.require_regular_file paths.descriptor in
+    let* json = State_store.read_json ~path:paths.descriptor in
+    match json with
+    | None -> Error (Printf.sprintf "headless attempt descriptor is missing: %s" paths.descriptor)
+    | Some json ->
+        let string name =
+          match Yojson.Safe.Util.member name json with
+          | `String value -> Ok value
+          | _ -> Error (Printf.sprintf "headless attempt descriptor missing %S" name)
+        in
+        let* schema = string "schema" in
+        let* attempt_id = string "attempt_id" in
+        let* worker_id = string "worker_id" in
+        let* source = string "source" in
+        let* agent_profile =
+          match Yojson.Safe.Util.member "agent_profile" json with
+          | `Null -> Ok Agent_profile.default_id
+          | `String value -> Ok value
+          | _ -> Error "headless attempt descriptor has invalid agent_profile"
+        in
+        if schema <> attempt_schema then Error "unsupported headless attempt descriptor"
+        else if attempt_id <> paths.id || worker_id <> record.Job_store.id then
+          Error "headless attempt descriptor identity does not match the requested worker"
+        else if source <> expected_source then
+          Error
+            (Printf.sprintf "headless attempt source is %S, expected %S" source
+               expected_source)
+        else if agent_profile <> profile.Agent_profile.id then
+          Error
+            (Printf.sprintf
+               "headless attempt agent profile is %S, pinned snapshot is %S"
+               agent_profile profile.id)
+        else Ok ())
 
 let require_attempt_hierarchy (record : Job_store.record) paths =
   let directories =
@@ -1282,7 +1293,7 @@ let recover_finished_pi ~home =
                         let* json = State_store.read_json ~path:paths.descriptor in
                         let* source =
                           match json with
-                          | Some json -> (
+                          | Some (`Assoc _ as json) -> (
                               match Yojson.Safe.Util.member "source" json with
                               | `String value -> Ok value
                               | _ ->
@@ -1290,6 +1301,8 @@ let recover_finished_pi ~home =
                                     (Printf.sprintf
                                        "headless attempt descriptor missing source: %s"
                                        paths.descriptor))
+                          | Some _ ->
+                              Error (Printf.sprintf "headless attempt descriptor must be an object: %s" paths.descriptor)
                           | None ->
                               Error
                                 (Printf.sprintf

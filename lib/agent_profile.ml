@@ -81,29 +81,30 @@ let parse_reviews ~instructions json =
       else Ok reviews
   | _ -> Error "agent profile headless field \"reviews\" must be an array"
 
-let parse ~expected_schema ~instructions json =
-  let* parsed_schema = string_field json "schema" in
-  if parsed_schema <> expected_schema then
-    Error (Printf.sprintf "unsupported agent profile schema %S" parsed_schema)
-  else
-    let* id = string_field json "id" in
-    let* id = safe_id "agent profile id" id in
-    let* description = string_field json "description" in
-    let* interactive_name = string_field json "interactive" in
-    let* interactive = instructions interactive_name in
-    let headless = Util.member "headless" json in
-    let* implementation_name = string_field headless "implementation" in
-    let* implementation = instructions implementation_name in
-    let* reviews = parse_reviews ~instructions headless in
-    let* fix_name = optional_string_field headless "fix" in
-    let* fix =
-      match fix_name with
-      | None -> Ok None
-      | Some name -> instructions name |> Result.map Option.some
-    in
-    if reviews = [] && fix <> None then
-      Error "agent profile cannot define a fix stage without reviewers"
-    else Ok { id; description; interactive; implementation; reviews; fix }
+let parse ?(path = "agent profile") ~expected_schema ~instructions json =
+  State_store.decode_json ~path (fun () ->
+    let* parsed_schema = string_field json "schema" in
+    if parsed_schema <> expected_schema then
+      Error (Printf.sprintf "unsupported agent profile schema %S" parsed_schema)
+    else
+      let* id = string_field json "id" in
+      let* id = safe_id "agent profile id" id in
+      let* description = string_field json "description" in
+      let* interactive_name = string_field json "interactive" in
+      let* interactive = instructions interactive_name in
+      let headless = Util.member "headless" json in
+      let* implementation_name = string_field headless "implementation" in
+      let* implementation = instructions implementation_name in
+      let* reviews = parse_reviews ~instructions headless in
+      let* fix_name = optional_string_field headless "fix" in
+      let* fix =
+        match fix_name with
+        | None -> Ok None
+        | Some name -> instructions name |> Result.map Option.some
+      in
+      if reviews = [] && fix <> None then
+        Error "agent profile cannot define a fix stage without reviewers"
+      else Ok { id; description; interactive; implementation; reviews; fix })
 
 let load_directory path =
   let* state = State_store.lstat path in
@@ -118,7 +119,7 @@ let load_directory path =
           try
             let json = Yojson.Safe.from_file metadata in
             let* profile =
-              parse ~expected_schema:schema
+              parse ~path:metadata ~expected_schema:schema
                 ~instructions:(read_regular_file ~profile_dir:path) json
             in
             let directory_id = Filename.basename path in
@@ -223,7 +224,7 @@ let load_snapshot worker_dir =
   | Some { Unix.st_kind = Unix.S_REG; _ } -> (
       try
         let json = Yojson.Safe.from_file path in
-        parse ~expected_schema:snapshot_schema
+        parse ~path ~expected_schema:snapshot_schema
           ~instructions:(fun value -> Ok value) json
       with
       | Sys_error message -> Error message

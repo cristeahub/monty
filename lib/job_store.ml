@@ -407,6 +407,8 @@ let parse_job_file ?home path =
   with
   | Sys_error msg -> Error msg
   | Yojson.Json_error msg -> Error ("invalid JSON in " ^ path ^ ": " ^ msg)
+  | Yojson.Safe.Util.Type_error (msg, _) ->
+      Error ("invalid JSON structure in " ^ path ^ ": " ^ msg)
 
 let is_archived record =
   match record.state_path with

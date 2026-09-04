@@ -34,6 +34,10 @@ Git inspection happens before Monty takes its state lock. Publication then
 reloads the exact worker identity and atomically writes the canonical record,
 rendering, and notice while holding the one-home lock. Reusing the same handoff
 id returns the existing canonical run and never reopens an acknowledged notice.
+The sole exception is a provisional `headless-pi` / `needs-attention` record
+from callback-loss recovery: a late explicit Pi callback replaces its outcome
+and rendering with `ready-for-review` or `failed`, preserving the receipt and
+any acknowledgement. Confirmed final outcomes still reject conflicting callbacks.
 Interactive publication prints the compact rendering directly in the worker's
 Ghostty session and creates an already-acknowledged delivery receipt, so it is
 not surfaced again by the head butler. Headless publication leaves its notice

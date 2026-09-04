@@ -356,6 +356,9 @@ let test_wt_disambiguates_repo_when_branch_name_collides () =
   let branch = "same-name" in
   init_git_repo repo_one;
   init_git_repo repo_two;
+  List.iter (fun repo ->
+      must (Process.run_quiet ~cwd:repo
+              ("git checkout -qb " ^ Shell.quote branch))) [ repo_one; repo_two ];
   let wt_command = fake_prompting_wt ~dir:root ~branch ~repo_one ~repo_two in
   let selected = must (Wt.create_or_reuse ~wt_command ~repo:repo_two ~branch) in
   assert_equal "selected repo" (Unix.realpath repo_two) selected;
@@ -995,7 +998,7 @@ let test_codex_harness_command () =
       ~branch:"cto/task-1" ~source_repo:"/repo" ~initial_workdir:"/repo"
       ~home:"/monty" ~context:job.context ~instructions:"/monty/MONTY.md"
       ~worker_dir:"/monty/workers/task-1" ~worktree_mode:"always"
-      ~wt_command:"wt"
+      ~wt_command:"wt" ()
   in
   assert_contains "single workspace uses raw ensure-worktree"
     single_always_script
@@ -1027,7 +1030,7 @@ let test_codex_harness_command () =
       ~branch:"cto/task-1" ~source_repo:"/repo" ~initial_workdir:"/repo"
       ~home:"/monty" ~context:multi_job.context ~instructions:"/monty/MONTY.md"
       ~worker_dir:"/monty/workers/task-1" ~worktree_mode:"never"
-      ~wt_command:"wt"
+      ~wt_command:"wt" ()
   in
   assert_contains "multi never first workspace" never_script
     "MONTY_WORKSPACE_1='/repo'";
@@ -1040,7 +1043,7 @@ let test_codex_harness_command () =
       ~branch:"cto/task-1" ~source_repo:"/repo" ~initial_workdir:"/repo"
       ~home:"/monty" ~context:multi_job.context ~instructions:"/monty/MONTY.md"
       ~worker_dir:"/monty/workers/task-1" ~worktree_mode:"always"
-      ~wt_command:"wt"
+      ~wt_command:"wt" ()
   in
   assert_contains "multi workspace rehydration uses explicit Monty home"
     always_script
@@ -1061,7 +1064,7 @@ let test_codex_harness_command () =
       ~initial_workdir:"/repo" ~home:"/monty"
       ~context:unlinked_multi_job.context ~instructions:"/monty/MONTY.md"
       ~worker_dir:"/monty/workers/task-1" ~worktree_mode:"always"
-      ~wt_command:"wt"
+      ~wt_command:"wt" ()
   in
   assert_contains "unlinked multi workspace uses raw ensure-worktree"
     unlinked_always_script
@@ -1326,6 +1329,11 @@ let run_named name test =
   with exn -> failwith (Printf.sprintf "%s: %s" name (Printexc.to_string exn))
 
 let () =
+  Unix.putenv "GIT_CONFIG_NOSYSTEM" "1";
+  Unix.putenv "GIT_CONFIG_SYSTEM" "/dev/null";
+  Unix.putenv "GIT_CONFIG_GLOBAL" "/dev/null";
+  Unix.putenv "GIT_CONFIG_COUNT" "0";
+  Unix.putenv "GIT_TEMPLATE_DIR" "/dev/null";
   [ ("slug", test_slug);
     ("shell_quote", test_shell_quote);
     ("manifest", test_manifest);

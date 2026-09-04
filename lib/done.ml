@@ -78,7 +78,7 @@ let locate_workspace ~wt_command ~worktree_mode
   | _ -> (
       match existing_dir workspace.worktree with
       | Some path ->
-          Wt.validate_worktree ~repo path
+          Wt.validate_worktree ~repo ~branch path
           |> Result.map (fun path -> (workspace, branch, Some path))
       | None ->
           Wt.locate_existing ~wt_command ~repo ~branch
@@ -164,7 +164,7 @@ let prepare_fresh ~home ~wt_command ~force record =
   let* record = Job_store.prepare_completion record ~task_key ~force in
   Ok (record, workspaces)
 
-let complete ?worker ~home ~wt_command ~force () =
+let complete_unlocked ?worker ~home ~wt_command ~force () =
   let home = Shell.normalize (Shell.abs_path home) in
   let ( let* ) = Result.bind in
   let* initial = resolve ~home worker in
@@ -243,3 +243,9 @@ let complete ?worker ~home ~wt_command ~force () =
       workspaces
   else Fmt.pr "Deleted workspaces: <skipped, worktree mode never>\n";
   Ok ()
+
+let complete ?worker ~home ~wt_command ~force () =
+  let ( let* ) = Result.bind in
+  let* record = resolve ~home worker in
+  Worker_lock.with_lock ~home ~record (fun () ->
+      complete_unlocked ?worker ~home ~wt_command ~force ())

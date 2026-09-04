@@ -31,7 +31,6 @@ version_previous=
 transaction_active=0
 home_backup_present=0
 home_activated=0
-state_moved=0
 dev_state_reset=0
 dev_state_created=0
 version_created=0
@@ -555,46 +554,38 @@ rollback_files() {
 
 rollback_home() {
   failed=0
-  if [ "$dev_install" -eq 1 ]; then
-    if [ "$dev_state_reset" -eq 1 ]; then
-      if path_exists "$dev_state_backup"; then
-        rm -rf "$state_dir" || failed=1
-        if [ "$failed" -eq 0 ]; then
-          mv "$dev_state_backup" "$state_dir" || failed=1
-        fi
-      elif ! path_exists "$state_dir"; then
-        failed=1
-      fi
-    elif [ "$dev_state_created" -eq 1 ]; then
+  if [ "$dev_state_reset" -eq 1 ]; then
+    if path_exists "$dev_state_backup"; then
       rm -rf "$state_dir" || failed=1
-    elif [ "$version_created" -eq 1 ]; then
-      rm -f "$version_file" || failed=1
-    elif [ "$version_migrated" -eq 1 ]; then
-      restore_previous_state_version || failed=1
+      if [ "$failed" -eq 0 ]; then
+        mv "$dev_state_backup" "$state_dir" || failed=1
+      fi
+    elif ! path_exists "$state_dir"; then
+      failed=1
     fi
-    return "$failed"
+  elif [ "$dev_state_created" -eq 1 ]; then
+    # A runtime writer may have populated the new home. Preserve its data.
+    rm -f "$version_file" || failed=1
+    rmdir "$state_dir" 2>/dev/null || true
+  elif [ "$version_created" -eq 1 ]; then
+    rm -f "$version_file" || failed=1
+  elif [ "$version_migrated" -eq 1 ]; then
+    restore_previous_state_version || failed=1
   fi
 
-  if [ "$home_activated" -eq 1 ]; then
-    if [ "$state_moved" -eq 1 ] && ! path_exists "$backup_home/.monty"; then
-      if [ "$version_created" -eq 1 ]; then
-        rm -f "$version_file" || failed=1
-      elif [ "$version_migrated" -eq 1 ]; then
-        restore_previous_state_version || failed=1
-      fi
-      if [ "$failed" -eq 0 ] && path_exists "$state_dir"; then
-        mv "$state_dir" "$backup_home/.monty" || failed=1
-      else
-        failed=1
-      fi
+  if [ "$dev_install" -eq 0 ]; then
+    if [ "$home_activated" -eq 1 ]; then
+      for entry in "$stage_dir"/* "$stage_dir"/.[!.]* "$stage_dir"/..?*; do
+        path_exists "$entry" || continue
+        rm -rf "$monty_home/${entry##*/}" || failed=1
+      done
     fi
-    if [ "$failed" -eq 0 ]; then
-      rm -rf "$monty_home" || failed=1
+    if [ "$home_backup_present" -eq 1 ]; then
+      for entry in "$backup_home"/* "$backup_home"/.[!.]* "$backup_home"/..?*; do
+        path_exists "$entry" || continue
+        mv "$entry" "$monty_home/" || failed=1
+      done
     fi
-  fi
-  if [ "$home_backup_present" -eq 1 ] && path_exists "$backup_home" &&
-     ! path_exists "$monty_home"; then
-    mv "$backup_home" "$monty_home" || failed=1
   fi
   return "$failed"
 }
@@ -695,60 +686,39 @@ EOF
 }
 
 activate_control_room() {
-  if [ "$dev_install" -eq 1 ]; then
-    case "$state_kind" in
-      none)
-        dev_state_created=1
-        write_state_version
-        ;;
-      legacy)
-        version_created=1
-        write_state_version
-        ;;
-      migratable)
-        version_previous=$installed_state_version
-        version_migrated=1
-        write_state_version
-        ;;
-      matching) ;;
-      mismatch)
-        dev_state_reset=1
-        mv "$state_dir" "$dev_state_backup"
-        write_state_version
-        ;;
-    esac
-    return 0
-  fi
-
-  if path_exists "$monty_home"; then
-    if [ -L "$monty_home" ] || [ ! -d "$monty_home" ]; then
-      echo "install.sh: Monty home is not a safe directory: $monty_home" >&2
-      return 1
-    fi
+  if [ "$dev_install" -eq 0 ]; then
+    ensure_directory "$monty_home" "Monty home" || return 1
+    mkdir "$backup_home"
     home_backup_present=1
-    mv "$monty_home" "$backup_home"
+    # Keep both the home and .monty in place: existing runtimes must keep
+    # addressing the same registry and state-lock inode throughout upgrades.
+    for entry in "$monty_home"/* "$monty_home"/.[!.]* "$monty_home"/..?*; do
+      path_exists "$entry" || continue
+      [ "${entry##*/}" != .monty ] || continue
+      mv "$entry" "$backup_home/"
+    done
+    home_activated=1
+    cp -Rp "$stage_dir/." "$monty_home/"
   fi
-  home_activated=1
-  mv "$stage_dir" "$monty_home"
-  stage_dir=
 
   case "$state_kind" in
-    matching|migratable)
-      state_moved=1
-      mv "$backup_home/.monty" "$state_dir"
-      if [ "$state_kind" = migratable ]; then
-        version_previous=$installed_state_version
-        version_migrated=1
-        write_state_version
-      fi
+    none)
+      dev_state_created=1
+      write_state_version
       ;;
     legacy)
-      state_moved=1
-      mv "$backup_home/.monty" "$state_dir"
       version_created=1
       write_state_version
       ;;
-    none|mismatch)
+    migratable)
+      version_previous=$installed_state_version
+      version_migrated=1
+      write_state_version
+      ;;
+    matching) ;;
+    mismatch)
+      dev_state_reset=1
+      mv "$state_dir" "$dev_state_backup"
       write_state_version
       ;;
   esac

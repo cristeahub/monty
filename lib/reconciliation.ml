@@ -59,26 +59,27 @@ let linked_job_display_ids records =
   |> List.map (fun (task_key, record) -> (task_key, record.Job_store.id))
 
 let parse_github_issue ~(project : project) ~repo json =
-  match (Util.member "number" json, Util.member "title" json) with
-  | `Int number, `String title ->
-      let key = Printf.sprintf "github:%s#%d" repo number in
-      let status =
-        match Util.member "state" json with `String value -> value | _ -> "open"
-      in
-      let url = match Util.member "url" json with `String value -> Some value | _ -> None in
-      Ok
-        {
-          key;
-          display_id = key;
-          project = project.id;
-          origin = "github";
-          title;
-          status;
-          branch = None;
-          workspaces = [];
-          url;
-        }
-  | _ -> Error "GitHub issue JSON missing number or title"
+  State_store.decode_json ~path:("GitHub issues for " ^ repo) (fun () ->
+    match (Util.member "number" json, Util.member "title" json) with
+    | `Int number, `String title ->
+        let key = Printf.sprintf "github:%s#%d" repo number in
+        let status =
+          match Util.member "state" json with `String value -> value | _ -> "open"
+        in
+        let url = match Util.member "url" json with `String value -> Some value | _ -> None in
+        Ok
+          {
+            key;
+            display_id = key;
+            project = project.id;
+            origin = "github";
+            title;
+            status;
+            branch = None;
+            workspaces = [];
+            url;
+          }
+    | _ -> Error "GitHub issue JSON missing number or title")
 
 let fetch_github_tasks ~project { repo; query } =
   Result.bind (External_metadata.fetch_github_issues ~repo ~query) (fun issues ->

@@ -42,7 +42,7 @@ Install the `monty` CLI without opam:
 ```
 
 The installer builds with Dune, copies the Monty control room to `~/.local/share/monty`, installs the real binary at `~/.local/libexec/monty/monty-real`, and writes a wrapper at `~/.local/bin/monty`.
-Control-room, binary, and wrapper activation is rollback-protected, and matching `.monty` state is preserved across reinstallations.
+Control-room, binary, and wrapper activation is rollback-protected. Compatible reinstallations keep the home and `.monty` directory in place, so concurrent Monty processes retain access to the same registry while source files are replaced.
 The repository and installer currently use Monty state version `2`, stored in `.monty/version`.
 Existing unversioned state is adopted as version `2` without deleting it, and
 version `1` state is migrated in place because singleton records remain readable
@@ -301,6 +301,7 @@ Codex progress, JSONL events, prompts, and final phase messages are kept under t
 Before returning success, Codex also writes the canonical `monty:run-handoff:v1` record and a pending finished-run notice.
 Failures after the worker is claimed write the same record with outcome `failed`, the last known phase, useful error text, workspace identity, and artifact paths.
 The CLI returns a compact JSON summary that references the canonical handoff; it does not close the task.
+While a Codex chain or its inherited child process is alive, another run, resume, or completion of the same worker fails with a busy diagnostic. This guard also applies to forced completion and survives termination of the Monty supervisor. Other workers and registry commands remain available.
 
 ### Pi headless execution
 
@@ -379,7 +380,7 @@ butler. Its canonical record remains available for later inspection.
 
 Headless completion uses Monty's home-level `.monty/inbox/run-handoffs/`, whose small `monty:run-handoff-notice:v1` records reference canonical handoffs.
 Reading is at-least-once: `pending` never acknowledges implicitly, and acknowledgement is idempotent.
-If publication stopped after the canonical record was written, `pending` repairs its rendering and delivery receipt without turning an interactive result into a head-butler notification. If a Pi chain wrote its final artifact after the original head-butler callback became unavailable, `pending` publishes a `needs-attention` receipt without inferring success from `final.md`; it never launches or resumes a run and never changes task status.
+If publication stopped after the canonical record was written, `pending` repairs its rendering and delivery receipt without turning an interactive result into a head-butler notification. If a Pi chain wrote its final artifact after the original head-butler callback became unavailable, `pending` publishes a provisional `needs-attention` receipt without inferring success from `final.md`. A later callback replaces that provisional outcome with its confirmed result and preserves any acknowledgement. Discovery never launches or resumes a run and never changes task status.
 
 ```sh
 monty handoff pending
@@ -510,6 +511,7 @@ Completion and archived resume are recoverable phase workflows.
 Monty persists `completing` or `reopening` intent before moving state, updating the linked local task, and finalizing status.
 A retry can continue from either canonical physical location.
 The original `--force` decision is persisted for the whole completion retry.
+If a failed removal leaves an existing directory without verifiable Git identity, Monty stops before changing permissions or deleting it. Inspect the residual directory and restore its Git metadata, or remove the verified residual directory, before retrying.
 `monty doctor` reports an exact recovery command for every incomplete lifecycle transition.
 
 ## Project overview and local tasks

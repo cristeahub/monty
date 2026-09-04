@@ -3,6 +3,7 @@ set -eu
 
 installer=$1
 source_version=$2
+checkout_binary=$(CDPATH='' cd -- "$(dirname "$3")" && pwd -P)/$(basename "$3")
 root=$(mktemp -d "${TMPDIR:-/tmp}/monty-install-test.XXXXXX")
 root=$(CDPATH='' cd -- "$root" && pwd -P)
 trap 'rm -rf "$root"' 0 HUP INT TERM
@@ -19,6 +20,7 @@ log=$root/install.log
 real_mv=$(command -v mv)
 fail_wrapper=0
 interrupt_after_source=
+pause_source=
 same_home_argument=$repo
 
 mkdir -p "$repo/.monty" "$fake_bin" "$home"
@@ -68,6 +70,17 @@ if [ -n "${INTERRUPT_AFTER_SOURCE:-}" ] &&
   "$REAL_MV" "$@"
   kill -TERM "$(cat "$INSTALL_PID_FILE")"
   sleep 1
+  exit 0
+fi
+if [ -n "${PAUSE_SOURCE:-}" ] && [ "$source_path" = "$PAUSE_SOURCE" ]; then
+  "$REAL_MV" "$@"
+  touch "$PAUSE_READY"
+  count=0
+  while [ ! -f "$PAUSE_RELEASE" ]; do
+    count=$((count + 1))
+    [ "$count" -lt 1000 ] || exit 48
+    sleep 0.01
+  done
   exit 0
 fi
 exec "$REAL_MV" "$@"
@@ -132,6 +145,7 @@ run_install() {
     PATH="$fake_bin:$PATH" HOME="$home" REAL_MV="$real_mv" \
       FAIL_WRAPPER="$fail_wrapper" \
       INTERRUPT_AFTER_SOURCE="$interrupt_after_source" \
+      PAUSE_SOURCE="$pause_source" PAUSE_READY="$root/paused" PAUSE_RELEASE="$root/released" \
       INSTALL_PID_FILE="$prefix/.monty-install-lock/pid" \
       ./install.sh --prefix "$prefix" --no-shell-rc "$@"
   ) > "$log" 2>&1
@@ -185,9 +199,40 @@ fi
 assert_contents 'updated control room' "$installed_home/control-room.txt" 'release two'
 assert_release 'binary two'
 
+# Hold source activation open while a real Monty process writes registry state.
+# Compatible upgrades must never move either the home or its .monty directory.
+pause_source=$installed_home/control-room.txt
+run_install &
+install_child=$!
+count=0
+while [ ! -f "$root/paused" ]; do
+  count=$((count + 1))
+  if [ "$count" -ge 500 ]; then
+    touch "$root/released"
+    wait "$install_child" || true
+    fail 'installer did not reach the source activation barrier'
+  fi
+  sleep 0.01
+done
+runtime_status=0
+MONTY_HOME="$installed_home" "$checkout_binary" settings set branch-prefix concurrent \
+  --home "$installed_home" > "$root/runtime.log" 2>&1 || runtime_status=$?
+touch "$root/released"
+wait "$install_child" || fail 'concurrent install failed'
+pause_source=
+[ "$runtime_status" -eq 0 ] || fail 'concurrent registry write failed'
+assert_contents 'concurrent install retains tasks' "$state_dir/tasks.local.json" \
+  '{"tasks":[{"id":"keep-me"}]}'
+grep -F 'concurrent' "$state_dir/settings.json" >/dev/null || fail 'runtime write was lost'
+# shellcheck disable=SC2012
+[ "$(ls -di "$state_dir" | awk '{ print $1 }')" = "$state_inode" ] || \
+  fail 'concurrent install replaced the state directory'
+assert_absent 'nested state after concurrent install' "$state_dir/.monty"
+assert_absent 'nested control room after concurrent install' "$installed_home/monty"
+
 printf 'interrupted release\n' > "$repo/control-room.txt"
 printf 'interrupted binary\n' > "$repo/binary-release.txt"
-interrupt_after_source=$installed_home
+interrupt_after_source=$installed_home/control-room.txt
 interrupt_status=0
 run_install || interrupt_status=$?
 interrupt_after_source=

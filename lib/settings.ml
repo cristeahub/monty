@@ -10,38 +10,39 @@ let empty =
 let path ~home = Filename.concat (Filename.concat home ".monty") "settings.json"
 
 let parse json =
-  let open Yojson.Safe.Util in
-  let ( let* ) = Result.bind in
-  let* harness =
-    match member "harness" json with
-    | `Null -> Ok None
-    | `String value ->
-        Harness.of_string value
-        |> Result.map_error (fun (`Msg message) -> message)
-        |> Result.map Option.some
-    | _ -> Error "settings field \"harness\" must be a string"
-  in
-  let* codex_yolo =
-    match member "codex_yolo" json with
-    | `Null -> Ok false
-    | `Bool value -> Ok value
-    | _ -> Error "settings field \"codex_yolo\" must be a boolean"
-  in
-  let* branch_prefix =
-    match member "branch_prefix" json with
-    | `Null -> Ok None
-    | `String value -> Ok (Some value)
-    | _ -> Error "settings field \"branch_prefix\" must be a string"
-  in
-  let* agent_profile =
-    match member "agent_profile" json with
-    | `Null -> Ok None
-    | `String value ->
-        State_path.safe_component ~label:"agent profile setting" value
-        |> Result.map Option.some
-    | _ -> Error "settings field \"agent_profile\" must be a string"
-  in
-  Ok { harness; codex_yolo; branch_prefix; agent_profile }
+  State_store.decode_json ~path:"settings" (fun () ->
+    let open Yojson.Safe.Util in
+    let ( let* ) = Result.bind in
+    let* harness =
+      match member "harness" json with
+      | `Null -> Ok None
+      | `String value ->
+          Harness.of_string value
+          |> Result.map_error (fun (`Msg message) -> message)
+          |> Result.map Option.some
+      | _ -> Error "settings field \"harness\" must be a string"
+    in
+    let* codex_yolo =
+      match member "codex_yolo" json with
+      | `Null -> Ok false
+      | `Bool value -> Ok value
+      | _ -> Error "settings field \"codex_yolo\" must be a boolean"
+    in
+    let* branch_prefix =
+      match member "branch_prefix" json with
+      | `Null -> Ok None
+      | `String value -> Ok (Some value)
+      | _ -> Error "settings field \"branch_prefix\" must be a string"
+    in
+    let* agent_profile =
+      match member "agent_profile" json with
+      | `Null -> Ok None
+      | `String value ->
+          State_path.safe_component ~label:"agent profile setting" value
+          |> Result.map Option.some
+      | _ -> Error "settings field \"agent_profile\" must be a string"
+    in
+    Ok { harness; codex_yolo; branch_prefix; agent_profile })
 
 let load ~home =
   let settings_path = path ~home in

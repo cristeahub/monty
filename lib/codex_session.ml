@@ -94,24 +94,25 @@ let string_field name = function
   | _ -> Error "Codex hook payload must be a JSON object"
 
 let parse_payload input =
-  let ( let* ) = Result.bind in
-  let* json =
-    try Ok (Yojson.Safe.from_string input) with
-    | Yojson.Json_error message -> Error ("invalid Codex hook JSON: " ^ message)
-  in
-  let* event = string_field "hook_event_name" json in
-  if not (String.equal event "SessionStart") then
-    Error
-      (Printf.sprintf "Codex hook event must be SessionStart, got %S" event)
-  else
-    let* source = string_field "source" json in
-    if not (List.mem source [ "startup"; "resume" ]) then
+  State_store.decode_json ~path:"Codex session hook" (fun () ->
+    let ( let* ) = Result.bind in
+    let* json =
+      try Ok (Yojson.Safe.from_string input) with
+      | Yojson.Json_error message -> Error ("invalid Codex hook JSON: " ^ message)
+    in
+    let* event = string_field "hook_event_name" json in
+    if not (String.equal event "SessionStart") then
       Error
-        (Printf.sprintf
-           "Codex SessionStart source must be startup or resume, got %S" source)
+        (Printf.sprintf "Codex hook event must be SessionStart, got %S" event)
     else
-      let* session_id = string_field "session_id" json in
-      validate_id ~label:"Codex hook session_id" session_id
+      let* source = string_field "source" json in
+      if not (List.mem source [ "startup"; "resume" ]) then
+        Error
+          (Printf.sprintf
+             "Codex SessionStart source must be startup or resume, got %S" source)
+      else
+        let* session_id = string_field "session_id" json in
+        validate_id ~label:"Codex hook session_id" session_id)
 
 let worker_state ~home ~getenv =
   let ( let* ) = Result.bind in

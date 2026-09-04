@@ -132,20 +132,21 @@ let duplicate_value values =
          else None)
 
 let load_raw_projects ~home =
-  let path = projects_file home in
-  if not (Sys.file_exists path) then Ok []
-  else
-    let ( let* ) = Result.bind in
-    let* json = read_json_file path in
-    let* projects_json = list_field json "projects" in
-    let* projects =
-      fold_results projects_json ~init:[] ~f:(fun acc json ->
-          parse_raw_project json |> Result.map (fun project -> project :: acc))
-      |> Result.map List.rev
-    in
-    (match duplicate_value (List.map (fun (project : raw_project) -> project.repo) projects) with
-    | Some repo -> Error (Printf.sprintf "duplicate project repo %S in %s" repo path)
-    | None -> Ok projects)
+  State_store.decode_json ~path:(projects_file home) (fun () ->
+    let path = projects_file home in
+    if not (Sys.file_exists path) then Ok []
+    else
+      let ( let* ) = Result.bind in
+      let* json = read_json_file path in
+      let* projects_json = list_field json "projects" in
+      let* projects =
+        fold_results projects_json ~init:[] ~f:(fun acc json ->
+            parse_raw_project json |> Result.map (fun project -> project :: acc))
+        |> Result.map List.rev
+      in
+      (match duplicate_value (List.map (fun (project : raw_project) -> project.repo) projects) with
+      | Some repo -> Error (Printf.sprintf "duplicate project repo %S in %s" repo path)
+      | None -> Ok projects))
 
 let save_raw_projects_unlocked ~home (projects : raw_project list) =
   let path = projects_file home in

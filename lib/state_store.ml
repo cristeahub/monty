@@ -139,6 +139,11 @@ let read_json ~path =
         try Ok (Some (Yojson.Safe.from_file path)) with
         | Yojson.Json_error msg -> Error ("invalid JSON in " ^ path ^ ": " ^ msg))
 
+let decode_json ~path f =
+  try f () with
+  | Yojson.Safe.Util.Type_error (message, _) ->
+      Error (Printf.sprintf "invalid JSON structure in %s: %s" path message)
+
 let write_all fd contents =
   let bytes = Bytes.unsafe_of_string contents in
   let rec loop offset =

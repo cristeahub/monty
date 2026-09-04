@@ -619,53 +619,45 @@ let headless_finish_term =
   Cmdliner.Term.(const headless_finish $ worker $ attempt $ outcome $ last_phase $ error $ home_arg)
  in
 let resume archived fresh worker options =
-  match options with
-  | Error message -> exit_code (Error message)
-  | Ok options ->
-  let record =
-    if archived then Resume.find_reactivatable ~home:options.Launcher.home worker
-    else Resume.find_resumable ~home:options.Launcher.home worker
+  let ( let* ) = Result.bind in
+  let result =
+    let* options = options in
+    let find_record () =
+      if archived then Resume.find_reactivatable ~home:options.Launcher.home worker
+      else Resume.find_resumable ~home:options.Launcher.home worker
+    in
+    let execute () =
+      let* record = find_record () in
+      let* profile =
+        Agent_profile.load_pinned ~home:options.home
+          ~worker_dir:record.Job_store.worker_dir record.job.Job.agent_profile
+      in
+      let* codex_mode =
+        match options.harness with
+        | Harness.Pi -> Ok Codex_session.Fresh
+        | Codex ->
+            Codex_session.resume_mode ~fresh ~worker_dir:record.worker_dir
+      in
+      let* job =
+        if archived then
+          match options.backend with
+          | Terminal.Dry_run -> Resume.plan_reactivate ~home:options.home record
+          | Terminal.Ghostty -> Resume.reactivate ~home:options.home record
+        else Ok record.job
+      in
+      let validate_open_task =
+        (not archived) || options.backend <> Terminal.Dry_run
+      in
+      Launcher.resume_job_unlocked ~validate_open_task ~fresh ~codex_mode
+        ~persisted_worktree_mode:record.worktree_mode ~profile options job
+    in
+    match options.Launcher.backend with
+    | Terminal.Dry_run -> execute ()
+    | Terminal.Ghostty ->
+        let* record = find_record () in
+        Worker_lock.with_lock ~home:options.home ~record execute
   in
-  match record with
-  | Error msg -> exit_code (Error msg)
-  | Ok record -> (
-      match
-        Agent_profile.load_pinned ~home:options.Launcher.home
-          ~worker_dir:record.Job_store.worker_dir
-          record.job.Job.agent_profile
-      with
-      | Error msg -> exit_code (Error msg)
-      | Ok profile ->
-          let codex_mode =
-            match options.Launcher.harness with
-            | Harness.Pi -> Ok Codex_session.Fresh
-            | Codex ->
-                Codex_session.resume_mode ~fresh
-                  ~worker_dir:record.Job_store.worker_dir
-          in
-          (match codex_mode with
-          | Error msg -> exit_code (Error msg)
-          | Ok codex_mode ->
-          let job =
-            if archived then
-              match options.Launcher.backend with
-              | Terminal.Dry_run ->
-                  Resume.plan_reactivate ~home:options.Launcher.home record
-              | Terminal.Ghostty ->
-                  Resume.reactivate ~home:options.Launcher.home record
-            else Ok record.Job_store.job
-          in
-          (match job with
-          | Error msg -> exit_code (Error msg)
-          | Ok job ->
-          let validate_open_task =
-            (not archived)
-            || options.Launcher.backend <> Terminal.Dry_run
-          in
-          Launcher.resume_job ~validate_open_task ~fresh ~codex_mode
-            ~persisted_worktree_mode:record.Job_store.worktree_mode ~profile
-            options job
-          |> exit_code)))
+  exit_code result
  in
 let resume_term =
   let worker =

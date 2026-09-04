@@ -12,10 +12,11 @@
 
 (rule
  (alias runtest)
- (deps test_install.sh ../install.sh ../.monty/version)
+ (deps test_install.sh ../install.sh ../.monty/version ../bin/main.exe)
  (action
   (run
    sh
    %{dep:test_install.sh}
    %{dep:../install.sh}
-   %{dep:../.monty/version})))
+   %{dep:../.monty/version}
+   %{dep:../bin/main.exe})))
