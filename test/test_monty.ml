@@ -609,6 +609,35 @@ let test_list_jobs_render () =
   assert_contains "list branch" output "cto/issue-123";
   assert_not_contains "list should not use job-only status" output "ACTIVE"
 
+let test_task_row_numbers () =
+  assert_equal "empty numbered inventory" "# ID PROJECT STATUS TITLE BRANCH\n"
+    (Project_overview.render_tasks []);
+  let tasks =
+    List.init 12 (fun index ->
+        Overview_types.
+          { key = Printf.sprintf "local:local-%03d" (index + 1);
+            display_id = Printf.sprintf "worker-%02d" (index + 1);
+            project = if index < 6 then "beta" else "alpha";
+            origin = "local";
+            title = "Task";
+            status = "open";
+            branch = Some "cto/task";
+            workspaces = [];
+            url = None })
+    |> List.rev
+  in
+  let expected_rows =
+    [ 7; 8; 9; 10; 11; 12; 1; 2; 3; 4; 5; 6 ]
+    |> List.mapi (fun index id ->
+           Printf.sprintf "%-2d worker-%02d %-7s open   Task  cto/task"
+             (index + 1) id (if id > 6 then "alpha" else "beta"))
+  in
+  assert_equal "numbers follow project/key order with aligned multi-digit rows"
+    (String.concat "\n"
+       ("#  ID        PROJECT STATUS TITLE BRANCH" :: expected_rows)
+    ^ "\n")
+    (Project_overview.render_tasks tasks)
+
 let test_tasks_sync_jobs_to_local_source () =
   let root = temp_root "tasks-sync" in
   let home = Filename.concat root "home" in
@@ -1429,6 +1458,7 @@ let () =
     ("launch_many_multiple_defaults", test_launch_many_multiple_jobs_keeps_numbered_defaults);
     ("ghostty_tab_focus", test_ghostty_tab_launch_focuses_new_terminal);
     ("list_jobs_render", test_list_jobs_render);
+    ("task_row_numbers", test_task_row_numbers);
     ("tasks_sync", test_tasks_sync_jobs_to_local_source);
     ("project_overview_local_tasks", test_project_overview_local_tasks);
     ("state_path_safe_components", test_state_path_safe_components);

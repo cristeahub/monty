@@ -65,24 +65,27 @@ let render_tasks tasks =
                label ^ "=" ^ workspace.branch)
         |> String.concat "; "
   in
-  let branches = List.map branch_label tasks in
+  let number_width = String.length (string_of_int (List.length tasks)) in
   let id_width = width 2 ("ID" :: ids) in
   let project_width = width 7 ("PROJECT" :: projects) in
   let status_width = width 6 ("STATUS" :: statuses) in
   let title_width = width 5 ("TITLE" :: titles) in
-  let render_row id project status title branch =
+  let render_row number id project status title branch =
     String.concat " "
-      [ pad_right id_width id;
+      [ pad_right number_width number;
+        pad_right id_width id;
         pad_right project_width project;
         pad_right status_width status;
         pad_right title_width title;
         branch ]
   in
-  let header = render_row "ID" "PROJECT" "STATUS" "TITLE" "BRANCH" in
+  let header = render_row "#" "ID" "PROJECT" "STATUS" "TITLE" "BRANCH" in
   let lines =
-    List.map2
-      (fun task branch -> render_row task.display_id task.project task.status task.title branch)
-      tasks branches
+    List.mapi
+      (fun index task ->
+        render_row (string_of_int (index + 1)) task.display_id task.project task.status
+          task.title (branch_label task))
+      tasks
   in
   String.concat "\n" (header :: lines) ^ "\n"
 

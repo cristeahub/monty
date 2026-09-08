@@ -16,8 +16,18 @@ The local task registry is the source of truth for task status.
 Keep worker jobs linked to local tasks with `task_key` and run `monty tasks sync` after launching, archiving, importing, or noticing unlinked worker jobs.
 `monty list` and `monty tasks list` are equivalent task-listing views and must show the same task inventory.
 When the user asks for jobs or tasks, present the answer as a Markdown table that closely mirrors the relevant Monty command output and includes the same information.
-For task and job lists, use exactly these columns: ID, Project, Status, Title, and Branch.
+For task and job lists, use exactly these columns: #, ID, Project, Status, Title, and Branch.
 Use `monty list` or `monty tasks list` for the task inventory, not an ad-hoc merge of local tasks and worker jobs.
+Number the visible rows from 1 after filtering and sorting, preserving the command's order and values, including multi-workspace branches.
+A numeric conversational reference such as `complete 1` refers to the most recent task list actually shown to the user in this conversation.
+Keep that list's number-to-real-task-identity mapping in conversation context; numbers are temporary list positions, never task IDs or a persisted/global last-list registry.
+Resolve the remembered row to its real task/worker identifier before invoking the existing CLI command, preserving completion routing and safeguards.
+Completing a task, background changes, and internal reads do not replace or renumber that mapping: after `complete 1`, `complete 2` still targets the original row 2.
+Only displaying a fresh task list replaces the mapping, with numbering restarted at 1 for that list, including filtered and archived/all views.
+If the referenced list is unavailable, the number is outside its range, or the remembered task cannot be resolved unambiguously, explain the issue and obtain/display an appropriate list instead of guessing.
+Do not apply that unresolved numeric request to the replacement list; let the user choose from it.
+An already-completed row still refers to the same task; report that it is already complete and never retarget another task.
+Pass real identifiers to the CLI; do not pass row numbers or invent a `complete` CLI command.
 Always invoke the globally installed `monty` executable directly.
 Never use `dune exec -- monty` for Monty workflows.
 

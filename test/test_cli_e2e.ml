@@ -1489,6 +1489,78 @@ let write_worker ~home ~run_id ~id ~title ~repo ~context ?branch ?task_key () =
        ~context ~worker_dir ~run_dir ());
   Filename.concat worker_dir "job.json"
 
+let test_task_list_numbers () =
+  with_temp_root "task-list-numbers" (fun root ->
+      let home, log, env = setup_environment root in
+      let alpha = Filename.concat root "alpha" in
+      let beta = Filename.concat root "beta" in
+      let context = Filename.concat root "context.md" in
+      add_project ~root ~home ~env alpha;
+      add_project ~root ~home ~env beta;
+      Shell.write_file context "# Numbered tasks\n";
+      [ ("beta", "First"); ("alpha", "Second"); ("alpha", "Closed") ]
+      |> List.iteri (fun index (project, title) ->
+             require_code 0
+               (run ~root ~env (7000 + index)
+                  [ "task"; "add"; "--project"; project; "--title"; title ]);
+             if index < 2 then
+               require_code 0
+                 (run ~root ~env (7020 + index)
+                    [ "task"; "workspace"; "add";
+                      Printf.sprintf "local-%03d" (index + 1);
+                      "--repo"; Filename.concat root project;
+                      "--branch"; Printf.sprintf "cto/worker-%d" (index + 1) ]));
+      ignore
+        (write_worker ~home ~run_id:"run-1" ~id:"worker-1" ~title:"First"
+           ~repo:beta ~context ~task_key:"local:local-001" ());
+      ignore
+        (write_worker ~home ~run_id:"run-2" ~id:"worker-2" ~title:"Second"
+           ~repo:alpha ~context ~task_key:"local:local-002" ());
+      require_code 0 (run ~root ~env 7003 [ "task"; "done"; "local-003" ]);
+      let inventory index args expected =
+        let result = run ~root ~env index args in
+        require_code 0 result;
+        let rows =
+          String.split_on_char '\n' (String.trim result.stdout)
+          |> List.map (fun line ->
+                 String.split_on_char ' ' line
+                 |> List.filter (fun word -> word <> "") |> String.concat " ")
+        in
+        if rows <> "# ID PROJECT STATUS TITLE BRANCH" :: expected then
+          failf "unexpected numbered inventory for %s:\n%s" (command result)
+            result.stdout;
+        result.stdout
+      in
+      let active =
+        [ "1 worker-2 alpha open Second cto/worker-2";
+          "2 worker-1 beta open First cto/worker-1" ]
+      in
+      let listed = inventory 7004 [ "list" ] active in
+      let tasks = inventory 7005 [ "tasks"; "list" ] active in
+      if listed <> tasks then failwith "numbered list entry points diverged";
+      let task_bytes = read_file (Filename.concat home ".monty/tasks.local.json") in
+      ignore (inventory 7006 [ "tasks"; "list"; "--no-sync"; "--project"; "beta" ]
+                [ "1 worker-1 beta open First cto/worker-1" ]);
+      ignore (inventory 7007 [ "list"; "--no-sync"; "--run"; "run-1" ]
+                [ "1 worker-1 beta open First cto/worker-1" ]);
+      ignore (inventory 7008 [ "list"; "--no-sync"; "--archived" ]
+                [ "1 local:local-003 alpha done Closed" ]);
+      let all =
+        [ "1 worker-2 alpha open Second cto/worker-2";
+          "2 local:local-003 alpha done Closed";
+          "3 worker-1 beta open First cto/worker-1" ]
+      in
+      let listed_all = inventory 7009 [ "list"; "--no-sync"; "--all" ] all in
+      let tasks_all = inventory 7010 [ "tasks"; "list"; "--no-sync"; "--all" ] all in
+      if listed_all <> tasks_all then failwith "numbered all entry points diverged";
+      ignore (inventory 7011 [ "list"; "--no-sync"; "--run"; "missing" ] []);
+      let numeric = run ~root ~env 7012 [ "task"; "done"; "1" ] in
+      if numeric.code = 0 then failwith "CLI accepted a row number as a task ID";
+      require_contains "numeric selector rejected" numeric.stderr "no local Monty task";
+      if read_file (Filename.concat home ".monty/tasks.local.json") <> task_bytes then
+        failwith "numbered reads or rejected selector changed task state";
+      require_empty_log log)
+
 let test_reconciliation_replay_idempotence_and_legacy_repair () =
   with_temp_root "reconcile-replay" (fun root ->
       let home, log, env = setup_environment root in
@@ -3232,7 +3304,7 @@ let test_multi_workspace_sonnet_task_lifecycle () =
       in
       require_code 0 admin_inventory;
       require_contains "secondary project filter" admin_inventory.stdout
-        "local:local-005";
+        "1 local:local-005";
       let premature_ensure =
         run ~root ~env 21135
           [ "task"; "workspace"; "ensure"; "local-005"; "--repo"; admin;
@@ -5889,6 +5961,7 @@ let () =
       test_invalid_explicit_local_task_key_is_never_inferred );
     ( "cli_reconciliation_replay_idempotence_and_legacy_repair",
       test_reconciliation_replay_idempotence_and_legacy_repair );
+    ("cli_task_list_numbers", test_task_list_numbers);
     ( "cli_reconciliation_diagnostics_no_sync_and_unknown_launch",
       test_reconciliation_diagnostics_no_sync_and_unknown_launch );
     ( "cli_external_import_local_ownership_and_stable_projects",

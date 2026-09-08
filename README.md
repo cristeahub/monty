@@ -552,8 +552,15 @@ dune exec -- monty tasks list
 dune exec -- monty tasks list --project monty
 ```
 
-`list` and `tasks list` are equivalent task-listing views and show `ID`, `PROJECT`, `STATUS`, `TITLE`, and `BRANCH`.
-They automatically reconcile worker jobs into the local task source of truth before rendering.
+`list` and `tasks list` are equivalent task-listing views and show `#`, `ID`, `PROJECT`, `STATUS`, `TITLE`, and `BRANCH`.
+Visible rows are numbered from 1 after filtering and sorting; every fresh list restarts at 1, including project/run filters and archived/all views where supported.
+In a head-butler conversation, `complete 1` refers to row 1 of the most recent task list actually shown to you.
+After completing it, `complete 2` still refers to the original row 2 until a fresh list is displayed; background changes and internal reads do not renumber those references.
+Displaying a fresh list replaces the conversation's mapping. Numbers are temporary positions, never stored task IDs or a global last-list registry.
+If the list is unavailable, a number is out of range, or a task is ambiguous, the head butler explains and obtains/displays an appropriate list instead of guessing. An already-completed row never targets another task.
+The head butler resolves each number to a real task/worker identifier and uses the existing completion command and safeguards. CLI commands still require real identifiers; there is no numeric selector or `complete` CLI command.
+
+Both list commands automatically reconcile worker jobs into the local task source of truth before rendering.
 Worker jobs are linked back to local tasks with exact `task_key` values and stable workspace-set-plus-worker identities.
 Reconciliation is sorted and replay-safe.
 It writes tasks before patching job links, so interruption can be retried without creating duplicate tasks.
