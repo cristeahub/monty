@@ -248,6 +248,35 @@ let done_local_task ~home id = set_local_task_status ~home id "done"
 let normalize_local_id id =
   match strip_prefix "local:" id with Some value -> value | None -> id
 
+let project_suffixed_workspaces projects = function
+  | ([] | [ _ ]) as workspaces -> Ok workspaces
+  | workspaces ->
+      fold_results workspaces ~init:[] ~f:(fun acc (workspace : task_workspace) ->
+          match
+            List.find_opt
+              (fun (project : project) -> String.equal project.repo workspace.repo)
+              projects
+          with
+          | None -> Error ("workspace repo is not registered: " ^ workspace.repo)
+          | Some project ->
+              let suffix = "-" ^ Slug.of_title project.id in
+              let branch =
+                if String.ends_with ~suffix workspace.branch then workspace.branch
+                else workspace.branch ^ suffix
+              in
+              Ok ({ workspace with branch } :: acc))
+      |> Result.map List.rev
+
+let planned_workspaces projects (task : local_task) =
+  if task.workspaces <> [] then task.workspaces
+  else
+    match task.branch with
+    | None -> []
+    | Some branch -> (
+        match List.find_opt (fun (project : project) -> project.id = task.project) projects with
+        | None -> []
+        | Some project -> [ Overview_types.{ repo = project.repo; branch } ])
+
 let add_task_workspace ~home ~id ~repo ~branch =
   if Filename.is_relative repo then
     Error (Printf.sprintf "workspace repo must be an absolute path: %s" repo)
@@ -285,20 +314,21 @@ let add_task_workspace ~home ~id ~repo ~branch =
       | Some task
         when List.exists
                (fun (workspace : task_workspace) -> String.equal workspace.repo repo)
-               task.workspaces ->
+               (planned_workspaces projects task) ->
           Error
             (Printf.sprintf "local Monty task %s already has workspace repo %s"
                task.id repo)
       | Some task ->
           let workspace = Overview_types.{ repo; branch } in
-          let branch_alias =
-            match task.branch with None -> Some branch | Some _ as value -> value
+          let* workspaces =
+            project_suffixed_workspaces projects
+              (planned_workspaces projects task @ [ workspace ])
           in
           let updated =
             {
               task with
-              branch = branch_alias;
-              workspaces = task.workspaces @ [ workspace ];
+              branch = Some (List.hd workspaces).branch;
+              workspaces;
               updated_at = Some (now_utc ());
             }
           in
@@ -345,22 +375,10 @@ let merge_local_tasks ~home ~source ~target =
             in
             let* () = reject source_task in
             let* () = reject target_task in
-            let task_workspaces (task : local_task) =
-              if task.workspaces <> [] then task.workspaces
-              else
-                match task.branch with
-                | None -> []
-                | Some branch -> (
-                    match
-                      List.find_opt
-                        (fun (project : project) ->
-                          String.equal project.id task.project)
-                        projects
-                    with
-                    | None -> []
-                    | Some project -> [ Overview_types.{ repo = project.repo; branch } ])
+            let combined =
+              planned_workspaces projects target_task
+              @ planned_workspaces projects source_task
             in
-            let combined = task_workspaces target_task @ task_workspaces source_task in
             let* () =
               match
                 duplicate_value
@@ -374,16 +392,16 @@ let merge_local_tasks ~home ~source ~target =
                        "cannot merge tasks with duplicate canonical workspace repo %s"
                        repo)
             in
+            let* combined = project_suffixed_workspaces projects combined in
             let now = now_utc () in
             let target_task =
               {
                 target_task with
                 workspaces = combined;
                 branch =
-                  (match (target_task.branch, combined) with
-                  | Some _ as value, _ -> value
-                  | None, first :: _ -> Some first.branch
-                  | None, [] -> None);
+                  (match combined with
+                  | first :: _ -> Some first.branch
+                  | [] -> target_task.branch);
                 updated_at = Some now;
               }
             in

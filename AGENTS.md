@@ -79,11 +79,11 @@ ordered `workspaces` array:
       "workspaces": [
         {
           "repo": "/absolute/path/to/django-backend",
-          "branch": "monty/invoice-parser-sonnet-5"
+          "branch": "monty/invoice-parser-sonnet-5-django-backend"
         },
         {
           "repo": "/absolute/path/to/admin",
-          "branch": "monty/admin-invoice-sonnet-5"
+          "branch": "monty/admin-invoice-sonnet-5-admin"
         }
       ],
       "context": ".monty/runs/<run-id>/invoice-sonnet-5.md",
@@ -112,6 +112,14 @@ Prefer setting it when the issue number or task name gives a clear branch name.
 Use the configured branch prefix for branch names.
 The default prefix is `monty`, but users may persist another value with `monty settings set branch-prefix <prefix>` or use the `MONTY_BRANCH_PREFIX` fallback, for example `cto`.
 When omitting `branch`, Monty derives `<branch-prefix>/<title-slug>` automatically.
+For new tasks spanning multiple repositories, Monty appends the slugged registered
+project id to every generated or explicit branch, for example
+`cto/my-feature-django-backend` and `cto/my-feature-admin`. An already matching
+suffix stays unchanged, as do explicit prefixes and feature stems. Adding a second
+planned workspace or merging unlaunched plans updates all planned branches together;
+use those branches in the manifest. Single-repository naming stays unchanged.
+Persisted worker branches are never renamed by retry, resume, ensure, reconciliation,
+completion, or reopening.
 Create or sync a local task for every worker before launch so the local task registry remains the source of truth.
 Set `task_key` for workers launched from local tasks, for example `local:local-001`.
 When `task_key` is present, `monty done <worker-id>` closes the linked local task while archiving the worker.

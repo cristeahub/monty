@@ -1047,9 +1047,12 @@ let task_show_term =
 let task_workspace_add id repo branch home =
   match Project_overview.add_task_workspace ~home ~id ~repo ~branch with
   | Error msg -> exit_code (Error msg)
-  | Ok _ ->
-      Fmt.pr "Added workspace to local task %s: %s | %s\n" id
-        (Shell.normalize (Shell.abs_path repo)) branch;
+  | Ok task ->
+      Fmt.pr "Added workspace to local task %s:\n" task.id;
+      List.iter
+        (fun (workspace : Overview_types.task_workspace) ->
+          Fmt.pr "  %s | %s\n" workspace.repo workspace.branch)
+        task.workspaces;
       0
  in
 let task_workspace_add_term =

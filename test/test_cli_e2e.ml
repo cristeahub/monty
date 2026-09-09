@@ -3434,6 +3434,360 @@ let test_forged_launch_script_and_resume_mode_are_safe () =
       require_contains "atomically republished script"
         (Shell.read_file owned_script) "# monty-launch-script-v1")
 
+let test_multi_workspace_project_suffixes () =
+  with_temp_root "project-suffixes" (fun root ->
+      let home, log, env = setup_environment root in
+      let cli args = run ~root ~env 2200 (args @ [ "--home"; home ]) in
+      let backend = Filename.concat root "django-backend" in
+      let apps = Filename.concat root "apps" in
+      List.iter (fun repo -> init_git_repo repo; add_project ~root ~home ~env repo)
+        [ backend; apps ];
+      install_repo_scoped_wt ~root ~log;
+      require_code 0 (cli [ "settings"; "set"; "branch-prefix"; "cto" ]);
+      require_code 0 (cli [ "task"; "add"; "--project"; "django-backend";
+                            "--title"; "Planned feature" ]);
+      let add repo branch =
+        let result = cli [ "task"; "workspace"; "add"; "local-001";
+                           "--repo"; repo; "--branch"; branch ] in
+        require_code 0 result;
+        result
+      in
+      let single = add backend "custom/Planned.Feature" in
+      require_line "single-workspace confirmation" single.stdout
+        ("  " ^ backend ^ " | custom/Planned.Feature");
+      if json_string "branch" (List.hd (local_tasks_json home)) <> "custom/Planned.Feature" then
+        failwith "single-workspace add changed its explicit branch";
+      let promoted = add apps "custom/Planned.Feature" in
+      let expected_plan =
+        [ "custom/Planned.Feature-django-backend"; "custom/Planned.Feature-apps" ]
+      in
+      List.iter2 (fun repo branch ->
+          require_line "saved workspace confirmation" promoted.stdout
+            ("  " ^ repo ^ " | " ^ branch)) [ backend; apps ] expected_plan;
+      let branches json =
+        Yojson.Safe.Util.(json |> member "workspaces" |> to_list)
+        |> List.map (json_string "branch")
+      in
+      let planned = List.hd (local_tasks_json home) in
+      if branches planned <> expected_plan
+         || json_string "branch" planned <> List.hd expected_plan then
+        failwith "promotion did not update both workspace branches and the alias";
+      let context = Filename.concat root "context.md" in
+      Shell.write_file context "# Project suffixes\n";
+      let manifest = Filename.concat home ".monty/runs/suffixes/jobs.json" in
+      let workspace repo branch =
+        `Assoc ([ ("repo", `String repo) ]
+                @ Option.fold ~none:[] ~some:(fun value -> [ ("branch", `String value) ]) branch)
+      in
+      let job id title workspaces extra =
+        `Assoc ([ ("id", `String id); ("title", `String title);
+                  ("context", `String context); ("workspaces", `List workspaces) ] @ extra)
+      in
+      let generated = job "generated" "Shared feature"
+          [ workspace backend None; workspace apps None ] [] in
+      let explicit = job "explicit" "Explicit feature"
+          [ workspace backend (Some "other/Keep.Feature");
+            workspace apps (Some "other/Keep.Feature-apps") ] [] in
+      let planned_job = job "planned" "Planned feature"
+          [ workspace backend (Some "custom/Planned.Feature");
+            workspace apps (Some "custom/Planned.Feature-apps") ]
+          [ ("task_key", `String "local:local-001") ] in
+      let single = job "single" "Single feature" [ workspace apps None ] [] in
+      let jobs = [ generated; explicit; planned_job; single ] in
+      write_manifest manifest jobs;
+      let expected =
+        [ [ "cto/01-shared-feature-django-backend"; "cto/01-shared-feature-apps" ];
+          [ "other/Keep.Feature-django-backend"; "other/Keep.Feature-apps" ];
+          expected_plan; [ "cto/04-single-feature" ] ]
+      in
+      let rec snapshot path =
+        match (Unix.lstat path).Unix.st_kind with
+        | Unix.S_DIR ->
+            (path, "directory") ::
+            (Sys.readdir path |> Array.to_list |> List.sort String.compare
+             |> List.concat_map (fun name -> snapshot (Filename.concat path name)))
+        | Unix.S_REG -> [ (path, Shell.read_file path) ]
+        | _ -> failf "unexpected state entry: %s" path
+      in
+      let dry_commands =
+        [ [ "launch-many"; "--terminal"; "dry-run" ];
+          [ "headless"; "prepare-many"; "--dry-run"; "--harness"; "codex" ] ]
+      in
+      let dry_jobs () =
+        List.iter (fun command ->
+            let before = snapshot home in
+            let result = cli (command @ [ "--manifest"; manifest ]) in
+            require_code 0 result;
+            List.iter (List.iter (require_contains "dry-run project branch" result.stdout)) expected;
+            if snapshot home <> before then failwith "suffix dry-run mutated Monty state";
+            require_empty_log log) dry_commands
+      in
+      dry_jobs ();
+      let without_id = match generated with
+        | `Assoc fields -> `Assoc (List.remove_assoc "id" fields)
+        | _ -> assert false
+      in
+      write_manifest manifest [ without_id ];
+      List.iter (fun command ->
+          let before = snapshot home in
+          let result = cli (command @ [ "--manifest"; manifest ]) in
+          require_code 0 result;
+          List.iter (require_contains "single-job generated project branch" result.stdout)
+            [ "cto/shared-feature-django-backend"; "cto/shared-feature-apps";
+              "/workers/shared-feature" ];
+          if snapshot home <> before then failwith "single-job dry-run mutated state";
+          require_empty_log log) dry_commands;
+      (* Both dry-run paths reject collisions after suffixing, including an
+         explicit branch that already has the final suffix. *)
+      let collision = job "collision" "Collision"
+          [ workspace backend (Some "other/Keep.Feature-django-backend") ] [] in
+      let invalid_batches =
+        [ (jobs @ [ collision ], "canonical repo+branch");
+          (jobs @ [ job "duplicate" "Duplicate repo"
+                      [ workspace backend None; workspace (backend ^ "/.") None ] [] ],
+           "duplicate workspace repo");
+          (jobs @ [ job "unknown" "Unknown project"
+                      [ workspace backend None; workspace root None ] [] ],
+           "not registered") ]
+      in
+      List.iter (fun (jobs, error) ->
+          write_manifest manifest jobs;
+          List.iter (fun command ->
+              let before = snapshot home in
+              let result = cli (command @ [ "--manifest"; manifest ]) in
+              if result.code = 0 then failwith "invalid suffix batch passed preflight";
+              require_contains "suffix preflight rejection" result.stderr error;
+              if snapshot home <> before then failwith "rejected suffix batch mutated state";
+              require_empty_log log) dry_commands) invalid_batches;
+      write_manifest manifest jobs;
+      let prepare () =
+        cli [ "headless"; "prepare-many"; "--harness"; "codex"; "--manifest"; manifest ]
+      in
+      let prepared = prepare () in
+      require_code 0 prepared;
+      let returned = Yojson.Safe.Util.(Yojson.Safe.from_string prepared.stdout |> member "jobs" |> to_list) in
+      if List.map branches returned <> expected then
+        failwith "preparation differed from dry-run branches";
+      List.iter2 (fun returned expected_branches ->
+          let job_file = Filename.concat (json_string "worker_dir" returned) "job.json" in
+          let persisted = Yojson.Safe.from_file job_file in
+          if branches persisted <> expected_branches then failwith "worker branches differ from preflight";
+          let task_id = json_string "task_key" persisted |> Task_storage.normalize_local_id in
+          let task = List.find (fun task -> json_string "id" task = task_id) (local_tasks_json home) in
+          if branches task <> expected_branches
+             || json_string "branch" task <> List.hd expected_branches then
+            failwith "linked task branches differ from worker branches";
+          Yojson.Safe.Util.(persisted |> member "workspaces" |> to_list)
+          |> List.iter (fun workspace ->
+                 require_contains "repo-scoped wt invocation" (read_file log)
+                   (json_string "repo" workspace ^ " b " ^ json_string "branch" workspace);
+                 if not (Sys.file_exists (json_string "worktree" workspace)) then
+                   failwith "prepared workspace was not materialized")) returned expected;
+      let retried = prepare () in
+      require_code 0 retried;
+      let retried = Yojson.Safe.Util.(Yojson.Safe.from_string retried.stdout |> member "jobs" |> to_list) in
+      if List.map branches retried <> expected then failwith "retry appended a duplicate suffix";
+      (* Existing unlaunched metadata is normalized only when launch reserves it. *)
+      require_code 0 (cli [ "task"; "add"; "--project"; "apps"; "--title"; "Older plan" ]);
+      let tasks = match Task_storage.load_local_tasks ~home with Ok tasks -> tasks | Error msg -> failwith msg in
+      let older = List.hd (List.rev tasks) in
+      let older = { older with Overview_types.workspaces =
+          [ { repo = backend; branch = "cto/older" }; { repo = apps; branch = "cto/older" } ];
+          branch = Some "cto/older" } in
+      (match Task_storage.save_local_tasks_unlocked ~home
+               (List.map (fun (task : Overview_types.local_task) -> if task.id = older.id then older else task) tasks) with
+      | Ok () -> () | Error msg -> failwith msg);
+      write_manifest manifest
+        [ job "older" "Older plan"
+            [ workspace backend (Some "cto/older"); workspace apps (Some "cto/older") ]
+            [ ("task_key", `String ("local:" ^ older.id)) ] ];
+      let before = snapshot home in
+      require_code 0 (cli [ "launch-many"; "--terminal"; "dry-run"; "--manifest"; manifest ]);
+      if snapshot home <> before then failwith "old plan dry-run wrote normalized metadata";
+      require_code 0 (prepare ()))
+
+let test_legacy_multi_workspace_reservations () =
+  List.iter (fun checkpoint ->
+      List.iter (fun explicit_link ->
+          with_temp_root "legacy-workspace-reservation" (fun root ->
+              let home, log, env = setup_environment root in
+              let cli args = run ~root ~env 2205 (args @ [ "--home"; home ]) in
+              let repos = List.map (Filename.concat root) [ "backend"; "apps" ] in
+              List.iter (fun repo -> init_git_repo repo; add_project ~root ~home ~env repo) repos;
+              install_repo_scoped_wt ~root ~log;
+              let osascript = Filename.concat root "fake-bin/osascript" in
+              Shell.write_file osascript "#!/bin/sh\nexit 0\n";
+              Shell.chmod_executable osascript;
+              let context = Filename.concat root "context.md" in
+              Shell.write_file context "# Legacy reservation\n";
+              let manifest = Filename.concat home ".monty/runs/legacy/jobs.json" in
+              let branch = "old/shared-feature" in
+              let workspaces = `List (List.map (fun repo ->
+                  `Assoc [ ("repo", `String repo); ("branch", `String branch) ]) repos) in
+              if explicit_link then
+                require_code 0 (cli [ "task"; "add"; "--project"; "backend";
+                                     "--title"; "Legacy reservation" ]);
+              write_manifest manifest
+                [ `Assoc ([ ("id", `String "legacy"); ("title", `String "Legacy reservation");
+                            ("context", `String context); ("workspaces", workspaces) ]
+                          @ if explicit_link then [ ("task_key", `String "local:local-001") ] else []) ];
+              let options = Launcher.
+                { backend = Terminal.Ghostty; target = Terminal.Tab;
+                  harness = Harness.Codex; harness_command = "codex";
+                  codex_yolo = false; container_workers = false;
+                  wt_command = Filename.concat root "fake-bin/wt"; worktree_mode = Always;
+                  branch_prefix = "monty"; agent_profile = "reviewed"; fork = None;
+                  home; script_dir = Home.runtime_script_dir ~home (); monty_command = executable }
+              in
+              let must = function Ok value -> value | Error msg -> failwith msg in
+              let index, job = List.hd (must (Manifest.load ~home manifest)) in
+              (* Reserve the pre-upgrade identity, bypassing new-job suffixing. *)
+              let prepared = must (Launcher.prepare_identity options index job) in
+              let old_fault = Option.value ~default:"" (Sys.getenv_opt "MONTY_FAULT_INJECT") in
+              let interrupted = Fun.protect
+                  ~finally:(fun () -> Unix.putenv "MONTY_FAULT_INJECT" old_fault)
+                  (fun () ->
+                    Unix.putenv "MONTY_FAULT_INJECT" checkpoint;
+                    Launcher.reserve_batch options [ prepared ]) in
+              (match interrupted with
+              | Ok _ -> failf "legacy reservation fault %s unexpectedly succeeded" checkpoint
+              | Error msg -> require_contains "legacy reservation fault" msg checkpoint);
+              let task_path = Task_storage.local_tasks_file home in
+              let task_before = Shell.read_file task_path in
+              let task = List.hd (local_tasks_json home) in
+              let task_id = json_string "id" task in
+              if Yojson.Safe.Util.member "workspaces" task <> workspaces then
+                failwith "legacy fixture did not reserve unsuffixed branches";
+              let job_file = Filename.concat prepared.worker_dir "job.json" in
+              if Sys.file_exists job_file then failwith "fault installed worker state";
+              let staging = Filename.concat home ".monty/runs/legacy/.reservations/legacy" in
+              let abrupt = checkpoint = "reserve-abrupt-after-tasks" in
+              if Sys.file_exists staging <> abrupt then failwith "unexpected legacy staging state";
+              if abrupt then Shell.write_file (Filename.concat staging "memory.md") "preserve legacy staging\n";
+              let staged_job = read_file (Filename.concat staging "job.json") in
+              List.iter (fun command ->
+                  let result = cli (command @ [ "--manifest"; manifest ]) in
+                  require_code 0 result;
+                  require_contains "legacy reservation dry-run branch" result.stdout branch;
+                  List.iter (fun suffix ->
+                      if string_contains result.stdout (branch ^ suffix) then
+                        failwith "legacy reservation dry-run renamed branches") [ "-backend"; "-apps" ];
+                  if Shell.read_file task_path <> task_before || Sys.file_exists job_file
+                     || read_file (Filename.concat staging "job.json") <> staged_job then
+                    failwith "legacy reservation dry-run mutated state";
+                  require_empty_log log)
+                [ [ "launch-many"; "--terminal"; "dry-run" ];
+                  [ "headless"; "prepare-many"; "--harness"; "codex"; "--dry-run" ] ];
+              let command =
+                if explicit_link then [ "headless"; "prepare-many"; "--harness"; "codex" ]
+                else [ "launch-many"; "--terminal"; "ghostty" ] in
+              require_code 0 (cli (command @ [ "--manifest"; manifest ]));
+              let persisted = Yojson.Safe.from_file job_file in
+              if (Yojson.Safe.Util.member "workspaces" persisted
+                  |> Yojson.Safe.Util.to_list
+                  |> List.map (json_string "branch")) <> [ branch; branch ] then
+                failwith "legacy reservation retry renamed branches";
+              if json_string "task_key" persisted <> "local:" ^ task_id
+                 || Shell.read_file task_path <> task_before then
+                failwith "legacy reservation retry replaced or duplicated its task";
+              if abrupt && read_file (Filename.concat prepared.worker_dir "memory.md")
+                           <> "preserve legacy staging\n" then
+                failwith "legacy reservation retry overwrote staged memory";
+              if Sys.file_exists staging then failwith "legacy retry left staging behind"))
+        [ false; true ])
+    [ "reserve-after-tasks"; "reserve-abrupt-after-tasks" ]
+
+let test_legacy_multi_workspace_branches () =
+  with_temp_root "legacy-project-branches" (fun root ->
+      let home, log, env = setup_environment root in
+      let cli args = run ~root ~env 2210 (args @ [ "--home"; home ]) in
+      let backend = Filename.concat root "backend" in
+      let apps = Filename.concat root "apps" in
+      List.iter (fun repo -> init_git_repo repo; add_project ~root ~home ~env repo)
+        [ backend; apps ];
+      install_repo_scoped_wt ~root ~log;
+      let osascript = Filename.concat root "fake-bin/osascript" in
+      Shell.write_file osascript "#!/bin/sh\nexit 0\n";
+      Shell.chmod_executable osascript;
+      let context = Filename.concat root "context.md" in
+      Shell.write_file context "# Legacy worker\n";
+      let worker_dir = Filename.concat home ".monty/runs/legacy/workers/legacy" in
+      let manifest = Filename.concat home ".monty/runs/legacy/jobs.json" in
+      let branch = "old/shared-feature" in
+      let job = Job.make_with_workspaces ~id:"legacy" ~title:"Legacy worker"
+          ~worker_dir ~context
+          ~workspaces:[ Job.workspace ~branch backend; Job.workspace ~branch apps ] () in
+      (* Seed the on-disk format written before project suffixes existed. *)
+      ignore (Worker_memory.ensure ~home ~job ~profile:reviewed_profile ~branch
+                ~repo:backend ~context ~worktree_mode:"always" ~last_known_worktree:None);
+      let job_file = Filename.concat worker_dir "job.json" in
+      let script = Filename.concat (Home.runtime_script_dir ~home ()) "monty-legacy-launch.sh" in
+      (match State_store.with_lock ~home (fun () ->
+          Job_store.update_file_unlocked job_file
+            [ Job_store.string "status" "prepared"; Job_store.string "launch_script" script ]) with
+      | Ok () -> () | Error msg -> failwith msg);
+      require_code 0 (cli [ "tasks"; "sync" ]);
+      let task = List.hd (local_tasks_json home) in
+      let task_id = json_string "id" task in
+      let workspaces =
+        `List (List.map (fun repo -> `Assoc [ ("repo", `String repo); ("branch", `String branch) ])
+                 [ backend; apps ])
+      in
+      write_manifest manifest
+        [ `Assoc [ ("id", `String "legacy"); ("title", `String "Legacy worker");
+                   ("context", `String context); ("workspaces", workspaces);
+                   ("task_key", `String ("local:" ^ task_id)) ] ];
+      let assert_identity path =
+        let job = Yojson.Safe.from_file path in
+        let actual = Yojson.Safe.Util.(job |> member "workspaces" |> to_list)
+            |> List.map (fun workspace -> (json_string "repo" workspace, json_string "branch" workspace)) in
+        if actual <> [ (backend, branch); (apps, branch) ] || json_string "branch" job <> branch then
+          failwith "legacy worker repo/branch identity changed";
+        let task = List.find (fun task -> json_string "id" task = task_id) (local_tasks_json home) in
+        if Yojson.Safe.Util.member "workspaces" task <> workspaces
+           || json_string "branch" task <> branch then
+          failwith "legacy linked task identity changed"
+      in
+      let unchanged command =
+        let task_path = Filename.concat home ".monty/tasks.local.json" in
+        let before = (Shell.read_file job_file, Shell.read_file task_path) in
+        let result = cli command in
+        require_code 0 result;
+        require_contains "legacy dry-run branch" result.stdout branch;
+        if before <> (Shell.read_file job_file, Shell.read_file task_path) then
+          failwith "legacy dry-run rewrote persisted state";
+        require_empty_log log
+      in
+      unchanged [ "launch-many"; "--terminal"; "dry-run"; "--manifest"; manifest ];
+      unchanged [ "headless"; "prepare-many"; "--dry-run"; "--manifest"; manifest ];
+      (* Early task links can lack the ownership fields; matching persisted
+         workspace metadata must still survive resume and reservation. *)
+      (match State_store.with_lock ~home (fun () ->
+          Result.bind (Task_storage.load_local_tasks ~home) (fun tasks ->
+              Task_storage.save_local_tasks_unlocked ~home
+                (List.map (fun (task : Overview_types.local_task) ->
+                     { task with worker_id = None; worker_key = None }) tasks))) with
+      | Ok () -> () | Error msg -> failwith msg);
+      unchanged [ "resume"; "legacy"; "--terminal"; "dry-run" ];
+      require_code 0 (cli [ "headless"; "prepare-many"; "--manifest"; manifest ]);
+      assert_identity job_file;
+      require_code 0 (cli [ "task"; "workspace"; "ensure"; task_id ]);
+      assert_identity job_file;
+      require_code 0 (cli [ "headless"; "begin"; "legacy"; "--harness"; "pi" ]);
+      assert_identity job_file;
+      require_code 0 (cli [ "headless"; "resume"; "legacy"; "--harness"; "pi" ]);
+      require_code 0 (cli [ "resume"; "legacy"; "--terminal"; "ghostty" ]);
+      require_code 0 (cli [ "tasks"; "sync" ]);
+      assert_identity job_file;
+      require_code 0 (cli [ "done"; "legacy" ]);
+      let archive = Filename.concat home ".monty/runs/legacy/archive/legacy/job.json" in
+      assert_identity archive;
+      require_code 0 (cli [ "resume"; "--archived"; "legacy"; "--terminal"; "ghostty" ]);
+      assert_identity job_file;
+      let logs = read_file log in
+      if string_contains logs (branch ^ "-backend") || string_contains logs (branch ^ "-apps") then
+        failwith "legacy lifecycle asked wt for renamed branches")
+
 let test_multi_workspace_sonnet_task_lifecycle () =
   with_temp_root "multi-workspace-sonnet" (fun root ->
       let home, log, env = setup_environment root in
@@ -3447,8 +3801,10 @@ let test_multi_workspace_sonnet_task_lifecycle () =
         Filename.concat home
           ".monty/runs/2026-08-13-sonnet-5-invoices/jobs.json"
       in
-      let backend_branch = "cto/invoice-parser-sonnet-5" in
-      let admin_branch = "cto/admin-invoice-sonnet-5" in
+      let backend_stem = "cto/invoice-parser-sonnet-5" in
+      let admin_stem = "cto/admin-invoice-sonnet-5" in
+      let backend_branch = backend_stem ^ "-django-backend" in
+      let admin_branch = admin_stem ^ "-admin" in
       init_git_repo backend;
       init_git_repo admin;
       add_project ~root ~home ~env backend;
@@ -3483,11 +3839,11 @@ let test_multi_workspace_sonnet_task_lifecycle () =
       require_code 0
         (run ~root ~env 2109
            [ "task"; "workspace"; "add"; "local-005"; "--repo";
-             backend; "--branch"; backend_branch; "--home"; home ]);
+             backend; "--branch"; backend_stem; "--home"; home ]);
       require_code 0
         (run ~root ~env 2110
            [ "task"; "workspace"; "add"; "local-007"; "--repo"; admin;
-             "--branch"; admin_branch; "--home"; home ]);
+             "--branch"; admin_stem; "--home"; home ]);
       let before_merge =
         run ~root ~env 2111 [ "task"; "show"; "local-005"; "--home"; home ]
       in
@@ -3496,6 +3852,8 @@ let test_multi_workspace_sonnet_task_lifecycle () =
         backend;
       require_contains "pre-launch workspace state" before_merge.stdout
         "<not materialized>";
+      if json_string "branch" (List.nth (local_tasks_json home) 4) <> backend_stem then
+        failwith "single-workspace planning changed its branch";
       let merge =
         run ~root ~env 2112
           [ "task"; "merge"; "local-007"; "--into"; "local-005";
@@ -3528,6 +3886,10 @@ let test_multi_workspace_sonnet_task_lifecycle () =
       in
       if List.length retained_workspaces <> 2 then
         failwith "local-005 did not retain both repository workspaces";
+      if List.map (json_string "branch") retained_workspaces
+         <> [ backend_branch; admin_branch ]
+         || json_string "branch" retained <> backend_branch then
+        failwith "merge did not suffix both branches and the task branch alias";
       let open_inventory =
         run ~root ~env 2113 [ "list"; "--no-sync"; "--home"; home ]
       in
@@ -3574,8 +3936,8 @@ let test_multi_workspace_sonnet_task_lifecycle () =
                   "Upgrade invoice parsing and admin reprocessing to Claude Sonnet 5" );
               ( "workspaces",
                 `List
-                  [ workspace backend backend_branch;
-                    workspace admin admin_branch ] );
+                  [ workspace backend backend_stem;
+                    workspace admin admin_stem ] );
               ("context", `String context);
               ("task_key", `String "local:local-005") ] ];
       let dry =
@@ -6572,6 +6934,12 @@ let () =
       test_forged_launch_script_and_resume_mode_are_safe );
     ( "cli_multi_workspace_sonnet_task_lifecycle",
       test_multi_workspace_sonnet_task_lifecycle );
+    ( "cli_multi_workspace_project_suffixes",
+      test_multi_workspace_project_suffixes );
+    ( "cli_legacy_multi_workspace_reservations",
+      test_legacy_multi_workspace_reservations );
+    ( "cli_legacy_multi_workspace_branches",
+      test_legacy_multi_workspace_branches );
     ( "cli_headless_prepare_begin_and_resume",
       test_headless_prepare_begin_and_resume );
     ( "cli_agent_profiles_selection_snapshot_and_solo",

@@ -198,11 +198,11 @@ top-level `repo` and `branch` fields:
       "workspaces": [
         {
           "repo": "/Users/cristea/code/django-backend",
-          "branch": "cto/invoice-parser-sonnet-5"
+          "branch": "cto/invoice-parser-sonnet-5-django-backend"
         },
         {
           "repo": "/Users/cristea/code/admin",
-          "branch": "cto/admin-invoice-sonnet-5"
+          "branch": "cto/admin-invoice-sonnet-5-admin"
         }
       ],
       "context": ".monty/runs/run-1/sonnet-5-invoices.md",
@@ -224,6 +224,14 @@ The manifest can also omit `branch`.
 Monty then derives a safe branch name from the title using the branch prefix.
 The default is `monty`, so `Fix issue 123` becomes `monty/fix-issue-123` for one launch or `monty/01-fix-issue-123` in `launch-many`.
 With `monty settings set branch-prefix cto`, `--branch-prefix cto`, or `MONTY_BRANCH_PREFIX=cto`, the same task becomes `cto/fix-issue-123` or `cto/01-fix-issue-123`.
+For a new task spanning multiple repositories, each branch also ends with the
+slugged registered project id: for example, `cto/my-feature-django-backend` and
+`cto/my-feature-admin`. This applies to generated branches and explicit stems;
+explicit prefixes and feature stems are preserved, and an already correct suffix
+is not appended twice. Single-repository tasks keep their existing naming behavior.
+Interactive launch and headless preparation use the same rule, including dry-run.
+Persisted worker branches remain unchanged on retry, resume, ensure, reconciliation,
+completion, and reopening; Monty does not rename existing Git branches or worktrees.
 A manifest entry can include `task_key` to link a worker to a Monty-owned local task.
 When `monty done` archives that worker, it also marks the linked local task done.
 Ordinary launch and reconciliation use only explicit task keys and stable workspace-set-plus-worker identities.
@@ -651,6 +659,14 @@ launched, combine them explicitly:
 monty task merge local-007 --into local-005
 monty task show local-005
 ```
+
+Adding a second planned workspace or merging unlaunched plans applies project
+suffixes to every workspace and updates the task's branch alias to its first
+workspace. In this example the merged branches become
+`cto/invoice-parser-sonnet-5-django-backend` and `cto/admin-invoice-sonnet-5-admin`.
+Use the displayed branches in the manifest; unsuffixed stems resolve to the same
+names. Workspace order is preserved, and membership is immutable once a worker
+is reserved.
 
 The merge closes `local-007` with durable provenance and gives `local-005` the
 ordered workspace set. It does not create branches or worktrees; launch or

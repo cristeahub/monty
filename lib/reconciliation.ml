@@ -734,6 +734,12 @@ let plan_launch_task_links ~home (jobs : (string * Job.t) list) =
     let job_workspaces = task_workspaces_of_job job in
     let stable_key = worker_key_for_job ~id:worker_id job in
     let link (task : local_task) =
+      let* planned_workspaces =
+        if task.worker_id = None && task.worker_key = None
+           && not (workspace_sets_equal task.workspaces job_workspaces) then
+          Task_storage.project_suffixed_workspaces projects task.workspaces
+        else Ok task.workspaces
+      in
       if not (String.equal task.status "open") then
         Error
           (Printf.sprintf "linked local Monty task %s is %s, not open"
@@ -749,8 +755,8 @@ let plan_launch_task_links ~home (jobs : (string * Job.t) list) =
              "linked task local:%s belongs to project %s, which is absent from the worker workspace set"
              task.id task.project)
       else if
-        task.workspaces <> []
-        && not (workspace_sets_equal task.workspaces job_workspaces)
+        planned_workspaces <> []
+        && not (workspace_sets_equal planned_workspaces job_workspaces)
       then
         Error
           (Printf.sprintf

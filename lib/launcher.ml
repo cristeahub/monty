@@ -707,6 +707,11 @@ let map_task_jobs (prepared : prepared list) planned =
          | None -> item)
 
 let preflight_batch options indexed_jobs =
+  (* Read identities for legacy retries, but report scan failures after the
+     manifest and task-link checks, as before. *)
+  let records = Job_store.load_all ~home:options.home in
+  let tasks = Task_storage.load_local_tasks ~home:options.home in
+  let* projects = Project_storage.load_projects ~home:options.home in
   let use_indices = List.length indexed_jobs <> 1 in
   let rec prepare acc = function
     | [] -> Ok (List.rev acc)
@@ -714,6 +719,42 @@ let preflight_batch options indexed_jobs =
         let* item =
           if use_indices then prepare_identity ~index options index job
           else prepare_identity options index job
+        in
+        let planned_workspaces = Reconciliation.task_workspaces_of_job item.job in
+        (* An old batch retry must keep its persisted branches. Resume bypasses
+           new-job naming entirely through prepare_identity. A reservation may
+           have saved its task before installing the worker's job.json. *)
+        let persisted =
+          List.exists
+            (fun (record : Job_store.record) ->
+              canonical_path_equal record.worker_dir item.worker_dir
+              && Reconciliation.workspace_sets_equal planned_workspaces
+                   (Reconciliation.task_workspaces_of_job record.job))
+            (Result.value ~default:[] records)
+          || List.exists
+               (fun (task : Overview_types.local_task) ->
+                 Reconciliation.workspace_sets_equal planned_workspaces task.workspaces)
+               (Reconciliation.find_tasks_by_worker (Result.value ~default:[] tasks)
+                  (Reconciliation.worker_key_for_job ~id:item.id item.job))
+        in
+        let* resolved =
+          if persisted then Ok planned_workspaces
+          else Task_storage.project_suffixed_workspaces projects planned_workspaces
+        in
+        let workspaces =
+          List.map2
+            (fun (workspace : prepared_workspace) (resolved : Overview_types.task_workspace) ->
+              { workspace with branch = resolved.branch })
+            item.workspaces resolved
+        in
+        let job_workspaces =
+          List.map (fun (workspace : prepared_workspace) ->
+              Job.workspace ~branch:workspace.branch workspace.repo) workspaces
+        in
+        let item =
+          { item with workspaces;
+            branch = (List.hd workspaces).branch;
+            job = Job.with_workspaces item.job job_workspaces }
         in
         prepare (item :: acc) rest
   in
@@ -757,7 +798,7 @@ let preflight_batch options indexed_jobs =
         Option.value ~default:"<missing>" item.job.Job.task_key)
       prepared
   in
-  let* records = Job_store.load_all ~home:options.home in
+  let* records = records in
   let rec classify acc = function
     | [] -> Ok (List.rev acc)
     | item :: rest ->

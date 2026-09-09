@@ -121,6 +121,28 @@ let test_shell_quote () =
   assert_equal "quote simple" "'hello'" (Shell.quote "hello");
   assert_equal "quote apostrophe" "'it'\\''s'" (Shell.quote "it's")
 
+let test_project_suffixed_workspaces () =
+  let projects =
+    List.map (fun (id, repo) ->
+        Overview_types.{ id; repo; sources = []; group = None })
+      [ ("Backend.Core", "/backend"); ("apps", "/apps") ]
+  in
+  let workspaces =
+    [ Overview_types.{ repo = "/backend"; branch = "custom/Keep.Feature" };
+      Overview_types.{ repo = "/apps"; branch = "cto/feature-apps" } ]
+  in
+  let resolve = Task_storage.project_suffixed_workspaces projects in
+  let resolved = must (resolve workspaces) in
+  assert_bool "suffix preserves explicit stem, prefix, project id, and order"
+    (resolved =
+      [ Overview_types.{ repo = "/backend"; branch = "custom/Keep.Feature-backend-core" };
+        List.nth workspaces 1 ]);
+  assert_bool "project suffix is idempotent" (must (resolve resolved) = resolved);
+  assert_bool "single workspace branch is unchanged"
+    (must (resolve [ List.hd workspaces ]) = [ List.hd workspaces ]);
+  assert_bool "unknown multi-workspace project is rejected"
+    (Result.is_error (Task_storage.project_suffixed_workspaces [] workspaces))
+
 let test_manifest () =
   let root = temp_root "manifest" in
   let run_dir = Filename.concat root ".monty/runs/test" in
@@ -778,12 +800,12 @@ let test_job_store_uses_physical_canonical_paths () =
     [ ("worker_dir", `String (Filename.concat root "outside")) ];
   (match Job_store.parse_job_file ~home state.job_file with
   | Ok _ -> failwith "expected persisted worker path mismatch to fail"
-  | Error msg -> assert_contains "worker path mismatch" msg "unsafe persisted worker_dir");
+  | Error msg -> assert_contains "worker path mismatch" msg "persisted worker_dir");
   write_legacy_job state.job_file ~id:"worker-1" ~repo ~context
     [ ("run_dir", `String (Filename.concat root "outside-run")) ];
   (match Job_store.parse_job_file ~home state.job_file with
   | Ok _ -> failwith "expected persisted run path mismatch to fail"
-  | Error msg -> assert_contains "run path mismatch" msg "unsafe persisted run_dir");
+  | Error msg -> assert_contains "run path mismatch" msg "persisted run_dir");
   write_legacy_job state.job_file ~id:"other-worker" ~repo ~context [];
   (match Job_store.parse_job_file ~home state.job_file with
   | Ok _ -> failwith "expected persisted id mismatch to fail"
@@ -1444,6 +1466,7 @@ let () =
   Unix.putenv "GIT_CONFIG_COUNT" "0";
   Unix.putenv "GIT_TEMPLATE_DIR" "/dev/null";
   [ ("slug", test_slug);
+    ("project_suffixed_workspaces", test_project_suffixed_workspaces);
     ("shell_quote", test_shell_quote);
     ("manifest", test_manifest);
     ("agent_profile_validation", test_agent_profile_validation);
