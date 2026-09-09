@@ -840,14 +840,19 @@ let overview home =
  in
 let overview_term = Cmdliner.Term.(const overview $ home_arg)
  in
-let projects_list home =
-  match Project_overview.load_projects ~home with
+let projects_list group home =
+  match Project_overview.list_projects ~home ?group () with
   | Error msg -> exit_code (Error msg)
   | Ok projects ->
       Fmt.pr "%s" (Project_overview.render_projects projects);
       0
  in
-let projects_list_term = Cmdliner.Term.(const projects_list $ home_arg)
+let projects_list_term =
+  let group =
+    let doc = "Only list projects assigned to this existing project group." in
+    Cmdliner.Arg.(value & opt (some string) None & info [ "group" ] ~docv:"GROUP" ~doc)
+  in
+  Cmdliner.Term.(const projects_list $ group $ home_arg)
  in
 let projects_show project home =
   match Project_overview.load_projects ~home with
@@ -859,12 +864,11 @@ let projects_show project home =
           Fmt.pr "%s\n" (Project_overview.show_project ~home project);
           0)
  in
-let projects_show_term =
-  let project =
-    let doc = "Project id, repo path, or derived repo name." in
-    Cmdliner.Arg.(required & pos 0 (some string) None & info [] ~docv:"PROJECT" ~doc)
-  in
-  Cmdliner.Term.(const projects_show $ project $ home_arg)
+let project_arg =
+  let doc = "Project id, repo path, or derived repo name." in
+  Cmdliner.Arg.(required & pos 0 (some string) None & info [] ~docv:"PROJECT" ~doc)
+ in
+let projects_show_term = Cmdliner.Term.(const projects_show $ project_arg $ home_arg)
  in
 let projects_add repo github query home =
   match Project_overview.add_project ~home ~repo ?github ?query () with
@@ -888,6 +892,23 @@ let projects_add_term =
     Cmdliner.Arg.(value & opt (some string) None & info [ "query" ] ~docv:"QUERY" ~doc)
   in
   Cmdliner.Term.(const projects_add $ repo $ github $ query $ home_arg)
+ in
+let projects_groups_list home =
+  match Project_overview.list_groups ~home with
+  | Error msg -> exit_code (Error msg)
+  | Ok groups ->
+      Fmt.pr "%s\n" (String.concat "\n" ("GROUP" :: List.sort String.compare groups));
+      0
+ in
+let projects_set_group project group home =
+  Project_overview.set_project_group ~home ~project group |> exit_code
+ in
+let projects_set_group_term =
+  let group =
+    let doc = "Existing project group name. Omit to clear the project's group assignment." in
+    Cmdliner.Arg.(value & pos 1 (some string) None & info [] ~docv:"GROUP" ~doc)
+  in
+  Cmdliner.Term.(const projects_set_group $ project_arg $ group $ home_arg)
  in
 let print_sync_warnings warnings =
   List.iter (fun warning -> Fmt.epr "monty: warning: %s\n" warning) warnings
@@ -1300,19 +1321,39 @@ let overview_cmd =
  in
 let projects_cmd =
   let list_cmd =
-    let doc = "List known Monty projects." in
+    let doc = "List known Monty projects and their groups, optionally filtered by --group." in
     Cmdliner.Cmd.v (Cmdliner.Cmd.info "list" ~doc) projects_list_term
   in
   let show_cmd =
-    let doc = "Show project memory and task sources." in
+    let doc = "Show project memory, group, and task sources." in
     Cmdliner.Cmd.v (Cmdliner.Cmd.info "show" ~doc) projects_show_term
   in
   let add_cmd =
     let doc = "Add a project to Monty's overview." in
     Cmdliner.Cmd.v (Cmdliner.Cmd.info "add" ~doc) projects_add_term
   in
-  let doc = "Manage Monty project memory." in
-  Cmdliner.Cmd.group (Cmdliner.Cmd.info "projects" ~doc) [ list_cmd; show_cmd; add_cmd ]
+  let groups_cmd =
+    let name =
+      let doc = "Case-sensitive name using letters, digits, '.', '-' or '_'; '.' and '..' are invalid." in
+      Cmdliner.Arg.(required & pos 0 (some string) None & info [] ~docv:"GROUP" ~doc)
+    in
+    let mutation command doc action =
+      Cmdliner.Cmd.v (Cmdliner.Cmd.info command ~doc)
+        Cmdliner.Term.(const (fun name home -> action ~home name |> exit_code) $ name $ home_arg)
+    in
+    Cmdliner.Cmd.group (Cmdliner.Cmd.info "groups" ~doc:"Create, delete, and list project groups.")
+      [ Cmdliner.Cmd.v (Cmdliner.Cmd.info "list" ~doc:"List project groups, including empty groups.")
+          Cmdliner.Term.(const projects_groups_list $ home_arg);
+        mutation "add" "Create an empty project group." Project_overview.add_group;
+        mutation "delete" "Delete a group and clear its assignments, keeping all projects." Project_overview.delete_group ]
+  in
+  let set_group_cmd =
+    Cmdliner.Cmd.v (Cmdliner.Cmd.info "set-group" ~doc:"Assign a project to a group, or omit GROUP to clear its assignment.")
+      projects_set_group_term
+  in
+  let doc = "Manage Monty projects, memory, and project groups." in
+  Cmdliner.Cmd.group (Cmdliner.Cmd.info "projects" ~doc)
+    [ list_cmd; show_cmd; add_cmd; groups_cmd; set_group_cmd ]
  in
 let tasks_cmd =
   let list_cmd =

@@ -7,12 +7,14 @@ type raw_project = {
   persisted_id : string option;
   repo : string;
   sources : github_source list;
+  group : string option;
 }
 
 type project = {
   id : string;
   repo : string;
   sources : github_source list;
+  group : string option;
 }
 
 type task_workspace = {

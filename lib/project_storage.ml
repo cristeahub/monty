@@ -53,7 +53,19 @@ let json_of_source ({ repo; query } : github_source) =
   in
   `Assoc fields
 
-let parse_raw_project json =
+let group_name = State_path.safe_component ~label:"project group name"
+
+let check_group groups = function
+  | None -> Ok ()
+  | Some name ->
+      let ( let* ) = Result.bind in
+      let* name = group_name name in
+      if List.mem name groups then Ok ()
+      else Error (Printf.sprintf
+          "no Monty project group matching %S; use monty projects groups list or monty projects groups add %s"
+          name (Shell.quote name))
+
+let parse_raw_project ~groups json =
   let ( let* ) = Result.bind in
   let* persisted_id = optional_string json "id" in
   let* persisted_id =
@@ -67,13 +79,16 @@ let parse_raw_project json =
   let repo = Shell.normalize (Shell.abs_path repo) in
   let* sources_json = list_field json "sources" in
   let* sources = fold_results sources_json ~init:[] ~f:(fun acc json -> parse_source json |> Result.map (fun source -> source :: acc)) in
-  Ok { persisted_id; repo; sources = List.rev sources }
+  let group = Util.member "group" json |> Util.to_string_option in
+  let* () = check_group groups group in
+  Ok { persisted_id; repo; sources = List.rev sources; group }
 
 let json_of_raw_project (project : raw_project) =
   let fields =
     [ ("repo", `String project.repo);
       ("sources", `List (List.map json_of_source project.sources)) ]
     @ (match project.persisted_id with None -> [] | Some id -> [ ("id", `String id) ])
+    @ (match project.group with None -> [] | Some name -> [ ("group", `String name) ])
   in
   `Assoc fields
 
@@ -123,7 +138,7 @@ let unique_ids (projects : raw_project list) : (string * raw_project) list =
 let with_ids (projects : raw_project list) : project list =
   unique_ids projects
   |> List.map (fun (id, (project : raw_project)) ->
-         { id; repo = project.repo; sources = project.sources })
+         { id; repo = project.repo; sources = project.sources; group = project.group })
 
 let duplicate_value values =
   values |> List.sort String.compare
@@ -131,31 +146,83 @@ let duplicate_value values =
          if List.length (List.filter (String.equal value) values) > 1 then Some value
          else None)
 
-let load_raw_projects ~home =
+let load_registry ~home =
   State_store.decode_json ~path:(projects_file home) (fun () ->
     let path = projects_file home in
-    if not (Sys.file_exists path) then Ok []
+    if not (Sys.file_exists path) then Ok ([], [])
     else
       let ( let* ) = Result.bind in
       let* json = read_json_file path in
+      let* groups_json = list_field json "groups" in
+      let* groups =
+        fold_results groups_json ~init:[] ~f:(fun groups json ->
+            let* name = group_name (Util.to_string json) in
+            if List.mem name groups then
+              Error (Printf.sprintf "duplicate project group %S in %s" name path)
+            else Ok (name :: groups))
+        |> Result.map List.rev
+      in
       let* projects_json = list_field json "projects" in
       let* projects =
         fold_results projects_json ~init:[] ~f:(fun acc json ->
-            parse_raw_project json |> Result.map (fun project -> project :: acc))
+            parse_raw_project ~groups json |> Result.map (fun project -> project :: acc))
         |> Result.map List.rev
       in
-      (match duplicate_value (List.map (fun (project : raw_project) -> project.repo) projects) with
-      | Some repo -> Error (Printf.sprintf "duplicate project repo %S in %s" repo path)
-      | None -> Ok projects))
+      let* () =
+        match duplicate_value (List.map (fun (project : raw_project) -> project.repo) projects) with
+        | Some repo -> Error (Printf.sprintf "duplicate project repo %S in %s" repo path)
+        | None -> Ok ()
+      in
+      let* () =
+        try ignore (unique_ids projects); Ok ()
+        with Invalid_argument msg -> Error msg
+      in
+      Ok (groups, projects))
 
-let save_raw_projects_unlocked ~home (projects : raw_project list) =
+let save_registry_unlocked ~home groups (projects : raw_project list) =
   let path = projects_file home in
   State_store.write_json_atomic ~path
-    (`Assoc [ ("projects", `List (List.map json_of_raw_project projects)) ])
+    (`Assoc
+      [ ("groups", `List (List.map (fun name -> `String name) groups));
+        ("projects", `List (List.map json_of_raw_project projects)) ])
 
 let load_projects ~home =
-  try load_raw_projects ~home |> Result.map with_ids
-  with Invalid_argument msg -> Error msg
+  load_registry ~home |> Result.map (fun (_, projects) -> with_ids projects)
+
+let list_projects ~home ?group () =
+  let ( let* ) = Result.bind in
+  let* groups, projects = load_registry ~home in
+  let* () = check_group groups group in
+  Ok (with_ids projects |> List.filter (fun (project : project) -> group = None || project.group = group))
+
+let list_groups ~home = load_registry ~home |> Result.map fst
+
+let update_registry ~home change =
+  State_store.with_lock ~home (fun () ->
+      let ( let* ) = Result.bind in
+      let* groups, projects = load_registry ~home in
+      let* groups, projects = change groups projects in
+      save_registry_unlocked ~home groups projects)
+
+let add_group ~home name =
+  update_registry ~home (fun groups projects ->
+      let ( let* ) = Result.bind in
+      let* name = group_name name in
+      if List.mem name groups then
+        Error (Printf.sprintf "project group already exists: %s" name)
+      else Ok (groups @ [ name ], projects))
+
+let delete_group ~home name =
+  update_registry ~home (fun groups projects ->
+      let ( let* ) = Result.bind in
+      let* () = check_group groups (Some name) in
+      let groups = List.filter (fun group -> group <> name) groups in
+      let projects =
+        List.map (fun (project : raw_project) ->
+            if project.group = Some name then { project with group = None }
+            else project) projects
+      in
+      Ok (groups, projects))
 
 let source_label ({ repo; query } : github_source) =
   match query with
@@ -176,7 +243,8 @@ let resolve_project (projects : project list) needle =
            || String.equal needle_slug project.id
            || String.equal needle project.repo
            || String.equal needle_slug
-                (base_id { persisted_id = None; repo = project.repo; sources = project.sources }))
+                (base_id { persisted_id = None; repo = project.repo;
+                           sources = project.sources; group = project.group }))
   in
   match matches with
   | [ project ] -> Ok project
@@ -188,6 +256,18 @@ let resolve_project (projects : project list) needle =
         |> String.concat "\n"
       in
       Error (Printf.sprintf "multiple Monty projects match %S:\n%s" needle labels)
+
+let set_project_group ~home ~project group =
+  update_registry ~home (fun groups projects ->
+      let ( let* ) = Result.bind in
+      let* selected = resolve_project (with_ids projects) project in
+      let* () = check_group groups group in
+      let projects =
+        List.map (fun (raw : raw_project) ->
+            if String.equal raw.repo selected.repo then { raw with group }
+            else raw) projects
+      in
+      Ok (groups, projects))
 
 let project_memory_template (project : project) =
   String.concat "\n"
@@ -253,7 +333,7 @@ let add_project ~home ~repo ?github ?query () =
   else
     State_store.with_lock ~home (fun () ->
         let ( let* ) = Result.bind in
-        let* projects = load_raw_projects ~home in
+        let* groups, projects = load_registry ~home in
         if List.exists (fun (project : raw_project) -> String.equal project.repo repo) projects then
           Error (Printf.sprintf "project already exists for repo: %s" repo)
         else
@@ -270,7 +350,7 @@ let add_project ~home ~repo ?github ?query () =
             | None -> []
             | Some repo -> [ Overview_types.{ repo; query } ]
           in
-          let candidates = stabilized @ [ { persisted_id = None; repo; sources } ] in
+          let candidates = stabilized @ [ { persisted_id = None; repo; sources; group = None } ] in
           let* assigned =
             try Ok (with_ids candidates) with Invalid_argument msg -> Error msg
           in
@@ -279,7 +359,7 @@ let add_project ~home ~repo ?github ?query () =
               (fun raw (project : project) -> { raw with persisted_id = Some project.id })
               candidates assigned
           in
-          let* () = save_raw_projects_unlocked ~home persisted in
+          let* () = save_registry_unlocked ~home groups persisted in
           let* projects = load_projects ~home in
           let* () = migrate_project_memory ~home old_projects projects in
           let* project = resolve_project projects repo in

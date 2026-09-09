@@ -5,6 +5,11 @@ let project_memory_file = Project_storage.project_memory_file
 let load_projects = Project_storage.load_projects
 let resolve_project = Project_storage.resolve_project
 let add_project = Project_storage.add_project
+let list_projects = Project_storage.list_projects
+let list_groups = Project_storage.list_groups
+let add_group = Project_storage.add_group
+let delete_group = Project_storage.delete_group
+let set_project_group = Project_storage.set_project_group
 
 let load_local_tasks = Task_storage.load_local_tasks
 let add_local_task = Task_storage.add_local_task

@@ -9,11 +9,12 @@ let sync_jobs_to_local_tasks = Reconciliation.sync_jobs_to_local_tasks
 
 let render_projects (projects : project list) =
   let projects = List.sort compare_project projects in
-  let header = Printf.sprintf "%-20s %-48s %s" "ID" "REPO" "SOURCES" in
+  let header = Printf.sprintf "%-20s %-48s %-16s %s" "ID" "REPO" "GROUP" "SOURCES" in
   let lines =
     projects
     |> List.map (fun (project : project) ->
-           Printf.sprintf "%-20s %-48s %s" project.id project.repo
+           Printf.sprintf "%-20s %-48s %-16s %s" project.id project.repo
+             (Option.value ~default:"<ungrouped>" project.group)
              (sources_label project.sources))
   in
   String.concat "\n" (header :: lines) ^ "\n"
@@ -27,6 +28,7 @@ let show_project ~home (project : project) =
   String.concat "\n"
     [ "Project: " ^ project.id;
       "Repo: " ^ project.repo;
+      "Group: " ^ Option.value ~default:"<ungrouped>" project.group;
       "Sources: " ^ sources_label project.sources;
       "Memory: " ^ memory;
       "";

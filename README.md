@@ -525,7 +525,7 @@ Monty-owned local tasks are the task inventory for both external and local work.
 Add a project with optional GitHub issues as its task source:
 
 ```sh
-dune exec -- monty projects add \
+monty projects add \
   --repo /path/to/repo \
   --github owner/repo \
   --query "is:open"
@@ -534,22 +534,41 @@ dune exec -- monty projects add \
 List or show project memory:
 
 ```sh
-dune exec -- monty projects list
-dune exec -- monty projects show monty
+monty projects list
+monty projects show monty
 ```
+
+Projects can belong to one user-created group; existing projects start ungrouped.
+Names are case-sensitive and use letters, digits, `.`, `-`, or `_` (except `.` and `..`).
+
+```sh
+monty projects groups add Work
+monty projects groups add Private
+monty projects groups list
+monty projects set-group monty Work
+monty projects list --group Work
+monty projects set-group monty Private  # Reassign the project
+monty projects set-group monty          # Clear its assignment
+monty projects groups delete Work
+```
+
+Groups and assignments persist in `.monty/projects.json`. Listings are read-only;
+without `--group`, all projects appear. `projects show` also displays the group.
+Empty groups are allowed; unknown groups are errors. Deleting a group atomically
+clears its assignments and keeps projects and all their associated data intact.
 
 Show a cross-project overview:
 
 ```sh
-dune exec -- monty overview
+monty overview
 ```
 
 List tasks:
 
 ```sh
-dune exec -- monty list
-dune exec -- monty tasks list
-dune exec -- monty tasks list --project monty
+monty list
+monty tasks list
+monty tasks list --project monty
 ```
 
 `list` and `tasks list` are equivalent task-listing views and show `#`, `ID`, `PROJECT`, `STATUS`, `TITLE`, and `BRANCH`.
@@ -566,13 +585,13 @@ Reconciliation is sorted and replay-safe.
 It writes tasks before patching job links, so interruption can be retried without creating duplicate tasks.
 Corrupt or unknown neighboring workers produce diagnostics while healthy records continue.
 Use `--no-sync` with either inventory command for a read-only view with no reconciliation writes or external metadata fetches.
-You can run `dune exec -- monty tasks sync` explicitly when repairing or inspecting sync behavior.
+You can run `monty tasks sync` explicitly when repairing or inspecting sync behavior.
 
 Add or complete a local task:
 
 ```sh
-dune exec -- monty task add --project monty --title "Design overview"
-dune exec -- monty task done local-001
+monty task add --project monty --title "Design overview"
+monty task done local-001
 ```
 
 Attach planned repository work to an open task and inspect its absolute paths:

@@ -5913,6 +5913,222 @@ let test_live_codex_excludes_resume_and_completion () =
           if not (Sys.file_exists worktree) || job_status job_file <> "launch-requested" then
             failwith "archived resume did not recover after the lock was released"))
 
+let test_project_groups_crud_and_legacy_projects () =
+  with_temp_root "project-groups" (fun root ->
+      let home, log, env = setup_environment root in
+      let cli args = run ~root ~env 4000 ("projects" :: args) in
+      let ok args = let result = cli args in require_code 0 result; result.stdout in
+      ignore (ok [ "list" ]);
+      if ok [ "groups"; "list" ] <> "GROUP\n" then failwith "new home has groups";
+      require_code 1 (cli [ "list"; "--group"; "Work" ]);
+      if Sys.file_exists (Filename.concat home ".monty") then
+        failwith "read-only project/group listings created state";
+      let repo = Filename.concat root "one/repo" in
+      init_git_repo repo;
+      let registry = Filename.concat home ".monty/projects.json" in
+      Shell.ensure_dir (Filename.dirname registry);
+      let legacy_project =
+        `Assoc [ ("repo", `String repo);
+                 ("sources", `List [ `Assoc [ ("kind", `String "github_issues");
+                                              ("repo", `String "owner/repo");
+                                              ("query", `String "is:open") ] ]) ]
+      in
+      Yojson.Safe.to_file registry (`Assoc [ ("projects", `List [ legacy_project ]) ]);
+      let memory = Filename.concat home ".monty/projects/repo.md" in
+      Shell.ensure_dir (Filename.dirname memory);
+      Shell.write_file memory "# Important project memory\nKeep me.\n";
+      require_code 0
+        (run ~root ~env 4001 [ "task"; "add"; "--project"; "repo"; "--title"; "Keep task" ]);
+      let run_dir = Filename.concat home ".monty/runs/groups" in
+      let worker = Filename.concat run_dir "workers/keep" in
+      let job_file = Filename.concat worker "job.json" in
+      Shell.ensure_dir worker;
+      Yojson.Safe.to_file job_file
+        (job_json ~id:"keep" ~repo ~context:memory ~worker_dir:worker ~run_dir);
+      let tasks_file = Filename.concat home ".monty/tasks.local.json" in
+      let preserved = List.map (fun path -> (path, read_file path)) [ memory; tasks_file; job_file ] in
+      let before = read_file registry in
+      let stamp = Unix.stat registry in
+      require_contains "legacy ungrouped listing" (ok [ "list" ]) "<ungrouped>";
+      require_contains "legacy show" (ok [ "show"; "repo" ]) "Group: <ungrouped>";
+      ignore (ok [ "groups"; "list" ]);
+      if read_file registry <> before || (Unix.stat registry).Unix.st_mtime <> stamp.Unix.st_mtime then
+        failwith "legacy listings rewrote the registry";
+      List.iter (fun name -> ignore (ok [ "groups"; "add"; name ])) [ "Work"; "Private" ];
+      if ok [ "groups"; "list" ] <> "GROUP\nPrivate\nWork\n" then
+        failwith "empty groups were not persisted and sorted";
+      let empty = ok [ "list"; "--group"; "Private" ] in
+      if List.length (String.split_on_char '\n' (String.trim empty)) <> 1 then
+        failwith "empty group listed projects";
+      ignore (ok [ "set-group"; "repo"; "Work" ]);
+      require_contains "assigned project filter" (ok [ "list"; "--group"; "Work" ]) repo;
+      require_contains "assigned project show" (ok [ "show"; "repo" ]) "Group: Work";
+      ignore (ok [ "set-group"; repo; "Private" ]);
+      if ok [ "list"; "--group"; "Work" ] <> empty then failwith "reassignment left old membership";
+      ignore (ok [ "set-group"; "repo" ]);
+      if ok [ "list"; "--group"; "Private" ] <> empty then failwith "clear left membership";
+      ignore (ok [ "set-group"; "repo"; "Work" ]);
+      let second = Filename.concat root "two/repo" in
+      init_git_repo second;
+      ignore (ok [ "add"; "--repo"; second ]);
+      require_contains "registration preserved group assignment"
+        (ok [ "list"; "--group"; "Work" ]) repo;
+      let members () = Yojson.Safe.Util.(Yojson.Safe.from_file registry |> member "projects" |> to_list) in
+      let without_group = function `Assoc fields -> `Assoc (List.remove_assoc "group" fields) | _ -> assert false in
+      let before_delete = List.map without_group (members ()) in
+      let ids = List.map (json_string "id") (members ()) in
+      if not (List.mem "repo" ids) || list_unique ids <> 2 then
+        failwith "group edits or same-basename registration changed stable IDs";
+      let first = List.find (fun p -> json_string "repo" p = repo) (members ()) in
+      if Yojson.Safe.Util.member "sources" first <> Yojson.Safe.Util.member "sources" legacy_project then
+        failwith "group mutations lost legacy sources";
+      ignore (ok [ "set-group"; second; "Work" ]);
+      ignore (ok [ "groups"; "delete"; "Work" ]);
+      if List.map without_group (members ()) <> before_delete
+         || List.exists (fun p -> Yojson.Safe.Util.member "group" p <> `Null) (members ()) then
+        failwith "populated group deletion changed projects or left dangling memberships";
+      require_code 1 (cli [ "list"; "--group"; "Work" ]);
+      require_contains "all projects remain" (ok [ "list" ]) second;
+      let stamp = Unix.stat registry in
+      let before = read_file registry in
+      ignore (ok [ "groups"; "list" ]);
+      ignore (ok [ "list"; "--group"; "Private" ]);
+      ignore (ok [ "show"; repo ]);
+      if read_file registry <> before || (Unix.stat registry).Unix.st_ino <> stamp.Unix.st_ino then
+        failwith "group-aware reads replaced registry";
+      ignore (ok [ "groups"; "delete"; "Private" ]);
+      if ok [ "groups"; "list" ] <> "GROUP\n" then failwith "empty group deletion failed";
+      List.iter (fun (path, contents) ->
+          if read_file path <> contents then failf "group commands changed %s" path) preserved;
+      List.iter (fun repo ->
+          match Process.run_quiet ~cwd:repo "git diff --exit-code HEAD" with
+          | Ok () -> () | Error msg -> failwith msg) [ repo; second ];
+      require_empty_log log)
+
+let test_project_groups_invalid_input_and_atomic_failure () =
+  with_temp_root "project-groups-errors" (fun root ->
+      let home, log, env = setup_environment root in
+      let repo = Filename.concat root "repo" in
+      add_project ~root ~home ~env repo;
+      let cli ?(env = env) args = run ~root ~env 4100 ("projects" :: args) in
+      let ok args = require_code 0 (cli args) in
+      ok [ "groups"; "add"; "Work" ];
+      ok [ "groups"; "add"; "Private" ];
+      ok [ "set-group"; "repo"; "Work" ];
+      let registry = Filename.concat home ".monty/projects.json" in
+      let previous = read_file registry in
+      let reject args message =
+        let result = cli args in
+        require_code 1 result;
+        require_contains "group validation error" result.stderr message;
+        if read_file registry <> previous then failwith "invalid input changed registry"
+      in
+      List.iter (fun name ->
+          reject [ "groups"; "add"; name ] "project group name";
+          reject [ "groups"; "delete"; name ] "project group name";
+          reject [ "set-group"; "repo"; name ] "project group name";
+          reject [ "list"; "--group"; name ] "project group name")
+        [ ""; " "; " Work"; "Work "; "."; ".."; "a/b"; "a\\b"; "a\nb"; "a\tb" ];
+      reject [ "groups"; "add"; "Work" ] "already exists";
+      reject [ "groups"; "delete"; "Missing" ] "monty projects groups list";
+      reject [ "list"; "--group"; "Missing" ] "monty projects groups add";
+      reject [ "list"; "--group"; "work" ] "no Monty project group";
+      reject [ "set-group"; "repo"; "Missing" ] "no Monty project group";
+      reject [ "set-group"; "missing-project"; "Work" ] "no Monty project";
+      reject [ "set-group"; "missing-project" ] "no Monty project";
+      List.iter (fun args ->
+          let result = cli ~env:(replace_env env [ ("MONTY_FAULT_INJECT", "state-store-before-rename") ]) args in
+          require_code 1 result;
+          require_contains "group atomic fault" result.stderr "fault injected before atomic state rename";
+          if read_file registry <> previous then failwith "atomic group failure partially wrote state";
+          if tree_has home (fun path -> string_contains path "monty-tmp") then
+            failwith "atomic group failure left a temporary file")
+        [ [ "groups"; "add"; "New" ]; [ "groups"; "delete"; "Work" ];
+          [ "set-group"; "repo"; "Private" ]; [ "set-group"; "repo" ] ];
+      let json = Yojson.Safe.from_string previous in
+      let projects = Yojson.Safe.Util.(json |> member "projects" |> to_list) in
+      let first = List.hd projects in
+      let fields = Yojson.Safe.Util.to_assoc first in
+      List.iter (fun (groups, projects) ->
+          Yojson.Safe.to_file registry (`Assoc [ ("groups", groups); ("projects", `List projects) ]);
+          let malformed = read_file registry in
+          List.iter (fun args ->
+              require_code 1 (cli args);
+              if read_file registry <> malformed then failwith "malformed group registry was overwritten")
+            [ [ "groups"; "list" ]; [ "groups"; "add"; "New" ];
+              [ "groups"; "delete"; "Work" ]; [ "set-group"; "repo" ]; [ "list" ] ])
+        [ (`String "Work", projects);
+          (`List [ `Bool true ], projects);
+          (`List [ `String "Work"; `String "Work" ], projects);
+          (`List [ `String "../bad" ], projects);
+          (`List [], projects);
+          (`List [ `String "Work" ], [ `Assoc (("group", `Int 1) :: List.remove_assoc "group" fields) ]);
+          (`List [ `String "Work" ], [ `Assoc (("group", `String "") :: List.remove_assoc "group" fields) ]);
+          (`List [ `String "Work" ], [ first; first ]);
+          (`List [ `String "Work" ],
+           [ first; `Assoc (("repo", `String (Filename.concat root "other")) :: List.remove_assoc "repo" fields) ]) ];
+      Shell.write_file registry previous;
+      let second = Filename.concat root "two/repo" in
+      add_project ~root ~home ~env second;
+      let previous = read_file registry in
+      let ambiguous = cli [ "set-group"; "repo"; "Private" ] in
+      require_code 1 ambiguous;
+      require_contains "ambiguous project reference" ambiguous.stderr "multiple Monty projects";
+      if read_file registry <> previous then failwith "ambiguous project assignment changed state";
+      require_empty_log log)
+
+let test_project_groups_concurrent_mutations () =
+  with_temp_root "project-groups-concurrent" (fun root ->
+      let home, log, env = setup_environment root in
+      let cli args = run ~root ~env 4200 ("projects" :: args) in
+      require_code 0 (cli [ "groups"; "add"; "Work" ]);
+      let repos = List.init 8 (fun index ->
+          let name = Printf.sprintf "repo-%d" index in
+          add_project ~root ~home ~env (Filename.concat root name);
+          name) in
+      let children = List.mapi (fun index repo ->
+          let added = Filename.concat root (Printf.sprintf "new-%d" index) in
+          Shell.ensure_dir added;
+          [ spawn ~root ~env (4210 + index * 3) [ "projects"; "set-group"; repo; "Work" ];
+            spawn ~root ~env (4211 + index * 3) [ "projects"; "groups"; "add"; Printf.sprintf "Extra-%d" index ];
+            spawn ~root ~env (4212 + index * 3) [ "projects"; "add"; "--repo"; added ] ]) repos
+        |> List.concat in
+      List.map await children |> List.iter (require_code 0);
+      let registry = Filename.concat home ".monty/projects.json" in
+      let read () =
+        let json = Yojson.Safe.from_file registry in
+        Yojson.Safe.Util.(json |> member "groups" |> to_list |> List.map to_string,
+                          json |> member "projects" |> to_list)
+      in
+      let groups, projects = read () in
+      if List.length groups <> 9 || List.length projects <> 16 then
+        failwith "concurrent group/project additions lost records";
+      List.iter (fun repo ->
+          let project = List.find (fun p -> json_string "id" p = repo) projects in
+          if json_string "group" project <> "Work" then failwith "concurrent mutation lost assignment") repos;
+      let results = List.init 8 (fun index ->
+          spawn ~root ~env (4300 + index) [ "projects"; "groups"; "add"; "Duplicate" ])
+        |> List.map await in
+      if List.length (List.filter (fun result -> result.code = 0) results) <> 1 then
+        failwith "concurrent duplicate group creation did not have exactly one winner";
+      List.iter (fun result -> if result.code <> 0 then (
+          require_code 1 result;
+          require_contains "concurrent duplicate" result.stderr "already exists")) results;
+      let results =
+        (spawn ~root ~env 4400 [ "projects"; "groups"; "delete"; "Work" ]
+         :: List.mapi (fun index repo ->
+             spawn ~root ~env (4401 + index) [ "projects"; "set-group"; repo; "Work" ]) repos)
+        |> List.map await in
+      require_code 0 (List.hd results);
+      List.iter (fun result -> if result.code <> 0 then (
+          require_code 1 result;
+          require_contains "assignment after concurrent delete" result.stderr "no Monty project group")) (List.tl results);
+      let groups, projects = read () in
+      if List.mem "Work" groups || List.length groups <> 9 || List.length projects <> 16
+         || List.exists (fun p -> Yojson.Safe.Util.member "group" p <> `Null) projects then
+        failwith "concurrent deletion/assignment left dangling references or lost unrelated records";
+      require_empty_log log)
+
 let run_named name test =
   try
     test ();
@@ -5925,7 +6141,10 @@ let () =
   Unix.putenv "GIT_CONFIG_GLOBAL" "/dev/null";
   Unix.putenv "GIT_CONFIG_COUNT" "0";
   Unix.putenv "GIT_TEMPLATE_DIR" "/dev/null";
-  [ ("cli_live_codex_excludes_resume_and_completion", test_live_codex_excludes_resume_and_completion);
+  [ ("cli_project_groups_crud_and_legacy_projects", test_project_groups_crud_and_legacy_projects);
+    ("cli_project_groups_invalid_input_and_atomic_failure", test_project_groups_invalid_input_and_atomic_failure);
+    ("cli_project_groups_concurrent_mutations", test_project_groups_concurrent_mutations);
+    ("cli_live_codex_excludes_resume_and_completion", test_live_codex_excludes_resume_and_completion);
     ("cli_json_shape_errors_are_actionable", test_json_shape_errors_are_actionable);
     ("cli_worktree_root_and_branch_are_verified", test_worktree_root_and_branch_are_verified);
     ("cli_concurrent_task_adds_keep_unique_tasks", test_concurrent_task_adds_keep_unique_tasks);
