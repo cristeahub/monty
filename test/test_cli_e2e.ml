@@ -153,7 +153,7 @@ type result = {
   argv : string array;
 }
 
-let spawn ?(stdin_path = "/dev/null") ~root ~env index args =
+let spawn ?(program = executable) ?(stdin_path = "/dev/null") ~root ~env index args =
   let stdout_path = Filename.concat root (Printf.sprintf "stdout-%d" index) in
   let stderr_path = Filename.concat root (Printf.sprintf "stderr-%d" index) in
   let stdout_fd =
@@ -163,8 +163,8 @@ let spawn ?(stdin_path = "/dev/null") ~root ~env index args =
     Unix.openfile stderr_path [ Unix.O_WRONLY; Unix.O_CREAT; Unix.O_TRUNC ] 0o600
   in
   let stdin_fd = Unix.openfile stdin_path [ Unix.O_RDONLY ] 0 in
-  let argv = Array.of_list (executable :: args) in
-  let pid = Unix.create_process_env executable argv env stdin_fd stdout_fd stderr_fd in
+  let argv = Array.of_list (program :: args) in
+  let pid = Unix.create_process_env program argv env stdin_fd stdout_fd stderr_fd in
   Unix.close stdin_fd;
   Unix.close stdout_fd;
   Unix.close stderr_fd;
@@ -185,7 +185,7 @@ let await child =
     argv = child.argv;
   }
 
-let run ~root ~env index args = spawn ~root ~env index args |> await
+let run ?program ~root ~env index args = spawn ?program ~root ~env index args |> await
 
 let run_with_stdin ~root ~env index input args =
   let stdin_path = Filename.concat root (Printf.sprintf "stdin-%d" index) in
@@ -2096,7 +2096,7 @@ let test_codex_session_capture_and_resume_modes () =
           (fun () ->
             Unix.putenv "PATH"
               (Filename.concat root "fake-bin" ^ ":/usr/bin:/bin");
-            Harness_command.launch_script_contents ~codex_hook:false
+            Harness_command.launch_script_contents ~profile_environment:[] ~codex_hook:false
               ~codex_mode:Codex_session.Fresh ~codex_trusted_paths:[]
               ~options:harness_options ~job:legacy_job ~id:legacy_id
               ~branch:legacy_branch ~source_repo:repo ~initial_workdir:repo ~home
@@ -2740,6 +2740,246 @@ let test_launch_rejects_global_identity_conflicts_and_races () =
           (List.length successes);
       if count_lines_containing log "race-terminal-request" <> 1 then
         failwith "concurrent duplicate identity requested more than one terminal")
+
+let test_codex_launch_preserves_mantle_environment () =
+  with_temp_root "codex-mantle-environment" (fun root ->
+      let home, log, base_env = setup_environment root in
+      let names =
+        [ "CODEX_HOME"; "MANTLE_CONTEXT"; "_MANTLE_SELECTED_HOME";
+          "_MANTLE_PREV_STATE"; "_MANTLE_PREV_HOME" ]
+      in
+      let clean_env =
+        Array.to_list base_env
+        |> List.filter (fun entry ->
+               not (List.exists (fun name -> String.starts_with ~prefix:(name ^ "=") entry) names))
+        |> Array.of_list
+      in
+      let caller bindings =
+        replace_env clean_env (("OPENAI_API_KEY", "unrelated-secret-sentinel") :: bindings)
+      in
+      let repo = Filename.concat root "repo" in
+      let context = Filename.concat root "context.md" in
+      init_git_repo repo;
+      add_project ~root ~home ~env:clean_env repo;
+      Shell.write_file context "# Mantle environment\n";
+      let osascript = Filename.concat root "fake-bin/osascript" in
+      Shell.write_file osascript "#!/bin/sh\nexit 0\n";
+      Shell.chmod_executable osascript;
+      let observed = Filename.concat root "observed" in
+      Shell.ensure_dir observed;
+      let observe =
+        names
+        |> List.map (fun name ->
+               Printf.sprintf "printf '%%s\\n%%s' \"${%s+x}\" \"${%s-}\" > %s"
+                 name name (Shell.quote (Filename.concat observed name)))
+        |> String.concat "\n"
+      in
+      let codex = Filename.concat root "fake-bin/codex" in
+      let observe =
+        observe ^ "\n" ^ Shell.quote executable
+        ^ " projects list --all-groups --home " ^ Shell.quote home
+        ^ " > " ^ Shell.quote (Filename.concat observed "projects") ^ "\n"
+      in
+      Shell.write_file codex
+        ("#!/bin/sh\nset -eu\n" ^ observe);
+      Shell.chmod_executable codex;
+      let injection_marker = Filename.concat root "SHOULD_NOT_EXIST" in
+      let attack = "touch " ^ Shell.quote injection_marker in
+      let special =
+        Filename.concat root
+          ("quote'\"\\$(" ^ attack ^ ")`" ^ attack ^ "`;\nexport CODEX_HOME=forged\n")
+      in
+      let profile name previous home_path =
+        [ ("CODEX_HOME", home_path); ("MANTLE_CONTEXT", name);
+          ("_MANTLE_SELECTED_HOME", home_path); ("_MANTLE_PREV_STATE", previous);
+          ("_MANTLE_PREV_HOME", if previous = "unset" then "" else special) ]
+      in
+      let work = profile "work" "unset" (Filename.concat root "work") in
+      let private_profile = profile "private" "export" (Filename.concat root "private") in
+      let cases =
+        [ ("work", work, Some "work");
+          ("private", private_profile, Some "private");
+          ("client-a", profile "client-a" "local" special, Some "client-a");
+          ("off", [], None);
+          ("custom-home", [ ("CODEX_HOME", special) ], None);
+          ("empty", List.map (fun name -> (name, "")) names, None);
+          ("mixed", [ ("CODEX_HOME", ""); ("_MANTLE_PREV_HOME", "") ], None) ]
+      in
+      let check_received bindings selected =
+        List.iter (fun name ->
+            let expected =
+              match List.assoc_opt name bindings with
+              | None -> "\n"
+              | Some value -> "x\n" ^ value
+            in
+            if Shell.read_file (Filename.concat observed name) <> expected then
+              failf "Codex received the wrong %s (including set/unset state)" name) names;
+        let projects = Shell.read_file (Filename.concat observed "projects") in
+        match selected with
+        | Some profile ->
+            require_line "child Monty profile" projects
+              ("Profile: " ^ profile ^ " (Mantle) | Groups: all (--all-groups)")
+        | None ->
+            if string_contains projects "Profile:" then
+              failwith "child Monty inherited a stale Mantle profile"
+      in
+      let options terminal =
+        [ "--home"; home; "--harness"; "codex"; "--codex-command"; "codex";
+          "--terminal"; terminal ]
+      in
+      let counter = ref 13200 in
+      let cli bindings args =
+        incr counter;
+        run ~root ~env:(caller bindings) !counter args
+      in
+      let terminal_home = Filename.concat root "terminal-home" in
+      Shell.ensure_dir terminal_home;
+      let execute script bindings selected =
+        List.iter (fun conflicting ->
+            (* Exercise Ghostty's actual login-shell command with an isolated
+               startup file, not the developer's shell configuration. *)
+            let terminal_bindings =
+              if conflicting then profile "stale" "export" "/stale/codex" else []
+            in
+            Shell.write_file (Filename.concat terminal_home ".zprofile")
+              (terminal_bindings
+              |> List.map (fun (name, value) -> "export " ^ name ^ "=" ^ Shell.quote value)
+              |> String.concat "\n");
+            let terminal_env =
+              replace_env
+                [| "HOME=" ^ terminal_home; "ZDOTDIR=" ^ terminal_home;
+                   "PATH=/usr/bin:/bin" |] terminal_bindings
+            in
+            List.iter (fun name ->
+                let path = Filename.concat observed name in
+                if Sys.file_exists path then Sys.remove path) names;
+            let program, args =
+              if Sys.file_exists "/bin/zsh" then ("/bin/zsh", [ "-l"; script ])
+              else ("/bin/sh", [ script ])
+            in
+            incr counter;
+            require_code 0
+              (run ~program ~root ~env:terminal_env !counter args);
+            check_received bindings selected) [ false; true ]
+      in
+      let script_for id =
+        Filename.concat home (".monty/runs/manual/workers/" ^ id ^ "/job.json")
+        |> Yojson.Safe.from_file |> json_string "launch_script"
+      in
+      List.iter (fun (label, bindings, selected) ->
+          require_code 0
+            (cli bindings
+               ([ "launch"; "--repo"; repo; "--title"; label; "--context"; context;
+                  "--branch"; "cto/" ^ label; "--worktree"; "never" ]
+               @ options "ghostty"));
+          let script = script_for label in
+          execute script bindings selected;
+          if string_contains (Shell.read_file script) "unrelated-secret-sentinel" then
+            failwith "launch script captured an unrelated credential";
+          (* These paths already inherit the caller's environment without Ghostty. *)
+          List.iter (fun command ->
+              require_code 0
+                (cli bindings (command @ [ "--home"; home; "--harness"; "codex";
+                                           "--codex-command"; "codex" ]));
+              check_received bindings selected) [ [ "start" ]; [ "continue"; "--last" ] ]) cases;
+      let script = script_for "work" in
+      let resume terminal = [ "resume"; "work" ] @ options terminal in
+      (* Repeatedly change/disable the profile of the same worker. Its historical
+         values must authenticate, but the next execution must use today's values. *)
+      List.iter (fun (_, bindings, selected) ->
+          require_code 0 (cli bindings (resume "dry-run"));
+          require_code 0 (cli bindings (resume "ghostty"));
+          execute script bindings selected) cases;
+      let sidecar = Filename.concat home ".monty/runs/manual/workers/work/codex-session-id" in
+      Shell.write_file sidecar "exact-session";
+      require_code 0 (cli work (resume "ghostty"));
+      execute script work (Some "work");
+      (* A newly captured id must not invalidate the previous exact template. *)
+      Shell.write_file sidecar "successor-session";
+      require_code 0 (cli private_profile (resume "ghostty"));
+      execute script private_profile (Some "private");
+      require_code 0 (cli [] (resume "ghostty" @ [ "--fresh" ]));
+      execute script [] None;
+      (* Retry a failed request after changing the profile. *)
+      let retry_args =
+        [ "launch"; "--repo"; repo; "--title"; "Retry profile"; "--context"; context;
+          "--branch"; "cto/retry-profile"; "--worktree"; "never" ] @ options "ghostty"
+      in
+      incr counter;
+      let failed =
+        run ~root
+          ~env:(replace_env (caller work) [ ("MONTY_FAULT_INJECT", "launch-before-request-state") ])
+          !counter retry_args
+      in
+      require_code 1 failed;
+      require_code 0 (cli private_profile retry_args);
+      execute (script_for "retry-profile") private_profile (Some "private");
+      (* Genuine pre-profile template: remove the complete, simple empty block. *)
+      require_code 0 (cli [] (resume "ghostty"));
+      let current = Shell.read_file script in
+      List.iter (fun markerless ->
+          let legacy =
+            current |> String.split_on_char '\n'
+            |> List.filter (fun line ->
+                   not (List.exists (fun name -> line = "unset " ^ name) names)
+                   && not (markerless &&
+                           (line = "# monty-launch-script-v1"
+                            || String.starts_with ~prefix:"export MONTY_JOB_FILE=" line)))
+            |> String.concat "\n"
+          in
+          Shell.write_file script legacy;
+          require_code 0 (cli work (resume "dry-run"));
+          require_code 0 (cli work (resume "ghostty"));
+          execute script work (Some "work")) [ false; true ];
+      let valid = Shell.read_file script in
+      let replace_line replacement =
+        valid |> String.split_on_char '\n'
+        |> List.map (fun line ->
+               if String.starts_with ~prefix:"export CODEX_HOME=" line then replacement else line)
+        |> String.concat "\n"
+      in
+      let forged =
+        [ valid ^ attack ^ "\n";
+          replace_line ("export CODEX_HOME=$(" ^ attack ^ ")");
+          replace_line ("export CODEX_HOME='safe'; " ^ attack);
+          replace_line "export CODEX_HOME='safe'\nexport OPENAI_API_KEY='forged'";
+          replace_line "export CODEX_HOME='safe'\nunset CODEX_HOME";
+          replace_line "unset CODEX_HOME\nunset MANTLE_CONTEXT";
+          replace_line "# missing CODEX_HOME" ]
+      in
+      let tasks = Filename.concat home ".monty/tasks.local.json" in
+      let tasks_before = Shell.read_file tasks in
+      List.iter (fun contents ->
+          Shell.write_file script contents;
+          List.iter (fun terminal ->
+              let rejected = cli [] (resume terminal) in
+              require_code 1 rejected;
+              require_contains "tampered environment rejected" rejected.stderr "Monty-owned";
+              if Shell.read_file script <> contents || Shell.read_file tasks <> tasks_before then
+                failwith "tampered script rejection mutated script or tasks") [ "dry-run"; "ghostty" ]) forged;
+      if Sys.file_exists injection_marker then failwith "quoted environment executed shell code";
+      require_empty_log log;
+      (* Host headless phases inherit the current caller, even when preparation
+         happened under a different profile. Use the existing fake Codex runner. *)
+      install_create_wt ~root ~log;
+      install_codex_exec ~root ~log;
+      Shell.write_file codex ("#!/bin/sh\n" ^ observe ^ Shell.read_file codex);
+      let manifest = Filename.concat home ".monty/runs/headless-profile/jobs.json" in
+      write_manifest manifest
+        [ manifest_job ~id:"headless-profile" ~branch:"cto/headless-profile"
+            ~title:"Headless profile" ~repo ~context () ];
+      let headless_options =
+        [ "--home"; home; "--harness"; "codex"; "--codex-command"; "codex";
+          "--agent-profile"; "solo" ]
+      in
+      require_code 0
+        (cli work ([ "headless"; "prepare-many"; "--manifest"; manifest ] @ headless_options));
+      require_code 0
+        (cli private_profile ([ "headless"; "run"; "headless-profile" ] @ headless_options));
+      check_received private_profile (Some "private");
+      require_code 0
+        (cli [] ([ "headless"; "resume"; "headless-profile" ] @ headless_options));
+      check_received [] None)
 
 let test_retry_uses_recorded_script_and_absolute_commands () =
   with_temp_root "launch-script-owner" (fun root ->
@@ -6320,6 +6560,8 @@ let () =
       test_launch_rejects_global_identity_conflicts_and_races );
     ( "cli_retry_uses_recorded_script_and_absolute_commands",
       test_retry_uses_recorded_script_and_absolute_commands );
+    ( "cli_codex_launch_preserves_mantle_environment",
+      test_codex_launch_preserves_mantle_environment );
     ( "cli_ghostty_launch_script_matches_ensure_worktree_cli",
       test_ghostty_launch_script_matches_ensure_worktree_cli );
     ( "cli_lifecycle_rejects_cross_project_and_owned_task_links",

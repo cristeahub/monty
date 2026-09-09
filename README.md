@@ -774,6 +774,14 @@ Monty likewise sets `tui.vim_mode_default=true`, so each Codex composer starts
 in Vim normal mode. Use `/vim` inside Codex to toggle it for the current
 session.
 
+Interactive worker launches, retries, and resumes use the invoking shell's
+`CODEX_HOME` and Mantle state (`MANTLE_CONTEXT`, `_MANTLE_SELECTED_HOME`,
+`_MANTLE_PREV_STATE`, and `_MANTLE_PREV_HOME`), even if Ghostty or its login
+startup has a different profile. Unset and empty values stay distinct, so
+`mantle off` and a custom `CODEX_HOME` also carry through. Each request captures
+the current environment; it does not pin an account to the task. Start/continue
+and host headless Codex inherit the invoking environment directly.
+
 Harness selection uses this precedence:
 
 1. `--harness pi|codex`

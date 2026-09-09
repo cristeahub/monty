@@ -348,45 +348,86 @@ let script_has_owner_marker (options : options) (prepared : prepared)
         without_lines [ job_file ] expected;
         without_lines [ marker; job_file ] expected ]
     in
-    let decode_generated_shell_quote value =
+    let decode_generated_shell_quote_at value start =
       let length = String.length value in
-      if length < 2 || value.[0] <> '\'' || value.[length - 1] <> '\'' then
+      if start >= length || value.[start] <> '\'' then
         None
       else
         let decoded = Buffer.create length in
         let rec loop index =
-          if index = length - 1 then Some (Buffer.contents decoded)
+          if index >= length then None
           else if value.[index] <> '\'' then (
             Buffer.add_char decoded value.[index];
             loop (index + 1))
           else if
-            index + 4 < length
+            index + 3 < length
             && value.[index + 1] = '\\'
             && value.[index + 2] = '\''
             && value.[index + 3] = '\''
           then (
             Buffer.add_char decoded '\'';
             loop (index + 4))
-          else None
+          else Some (Buffer.contents decoded, index + 1)
         in
-        loop 1
+        loop (start + 1)
     in
-    let contents = Shell.read_file path in
-    let environment_path =
-      let prefix = "export PATH=" in
-      match String.split_on_char '\n' contents
-            |> List.filter (String.starts_with ~prefix) with
-      | [ line ] ->
-          decode_generated_shell_quote
-            (String.sub line (String.length prefix)
-               (String.length line - String.length prefix))
+    let decode_generated_shell_quote value =
+      match decode_generated_shell_quote_at value 0 with
+      | Some (decoded, finish) when finish = String.length value -> Some decoded
       | _ -> None
     in
-    (* Authenticate the entire old template using its safely quoted PATH.
+    let contents = Shell.read_file path in
+    let environment =
+      let ( let* ) = Option.bind in
+      let consume prefix index =
+        let length = String.length prefix in
+        if index + length <= String.length contents
+           && String.sub contents index length = prefix
+        then Some (index + length) else None
+      in
+      let export name index =
+        let* start = consume ("export " ^ name ^ "=") index in
+        let* value, finish = decode_generated_shell_quote_at contents start in
+        let* next = consume "\n" finish in
+        Some (value, next)
+      in
+      let* start = consume "#!/bin/sh\n" 0 in
+      let start =
+        Option.value ~default:start (consume "# monty-launch-script-v1\n" start)
+      in
+      let* start = consume "set -eu\n" start in
+      let* environment_path, start = export "PATH" start in
+      let rec profiles index = function
+        | [] -> Some []
+        | name :: rest ->
+            let* value, next =
+              match consume ("unset " ^ name ^ "\n") index with
+              | Some next -> Some (None, next)
+              | None ->
+                  let* value, next = export name index in
+                  Some (Some value, next)
+            in
+            let* rest = profiles next rest in
+            Some ((name, value) :: rest)
+      in
+      let* profile_environment =
+        (* Pre-profile scripts go straight from PATH to the title. *)
+        match consume "printf " start with
+        | Some _ -> Some []
+        | None -> profiles start Harness_command.profile_environment_names
+      in
+      Some (environment_path, profile_environment)
+    in
+    match environment with
+    | None -> false
+    | Some (environment_path, profile_environment) ->
+    (* Decode only the fixed preamble, including multiline quoted values, then
+       authenticate the entire template using its historical environment.
        Resume replaces it with a fresh script before requesting execution. *)
     let expected ?(codex_hook = true) ?(job = prepared.job) codex_mode
         codex_trusted_paths =
-      Harness_command.launch_script_contents ?environment_path ~options:harness_options
+      Harness_command.launch_script_contents ~environment_path ~profile_environment
+        ~options:harness_options
         ~codex_hook ~codex_mode ~codex_trusted_paths ~job ~id:prepared.id
         ~branch:prepared.branch
         ~source_repo:prepared.repo ~initial_workdir:prepared.repo

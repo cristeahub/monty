@@ -162,7 +162,14 @@ let static_workspace_lines (job : Job.t) =
   @ [ "MONTY_JOB_WORKTREE=$MONTY_WORKSPACE_1";
       "cd \"$MONTY_JOB_WORKTREE\"" ]
 
-let launch_script_contents ?environment_path ~codex_hook ~codex_mode ~codex_trusted_paths ~options
+let profile_environment_names =
+  [ "CODEX_HOME"; "MANTLE_CONTEXT"; "_MANTLE_SELECTED_HOME";
+    "_MANTLE_PREV_STATE"; "_MANTLE_PREV_HOME" ]
+
+let launch_script_contents ?environment_path
+    ?(profile_environment =
+      List.map (fun name -> (name, Sys.getenv_opt name)) profile_environment_names)
+    ~codex_hook ~codex_mode ~codex_trusted_paths ~options
     ~job ~id ~branch ~source_repo ~initial_workdir ~home ~context ~instructions
     ~worker_dir ~worktree_mode ~wt_command () =
   let command =
@@ -195,8 +202,15 @@ let launch_script_contents ?environment_path ~codex_hook ~codex_mode ~codex_trus
              (Option.value
                 ~default:(Option.value
                   ~default:"/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
-                  (Sys.getenv_opt "PATH")) environment_path);
-         "printf '\\033]0;%s\\007' " ^ Shell.quote job.Job.title;
+                  (Sys.getenv_opt "PATH")) environment_path) ]
+      (* Ghostty's login shell may carry a different (or stale) Mantle profile. *)
+      @ List.map
+          (fun (name, value) ->
+            match value with
+            | None -> "unset " ^ name
+            | Some value -> "export " ^ name ^ "=" ^ Shell.quote value)
+          profile_environment
+      @ [ "printf '\\033]0;%s\\007' " ^ Shell.quote job.Job.title;
          "export MONTY_BRANCH_PREFIX=" ^ Shell.quote options.branch_prefix;
          "export MONTY_RUN_DIR=" ^ Shell.quote (Worker_memory.run_dir_of_worker_dir worker_dir);
          "export MONTY_WORKER_DIR=" ^ Shell.quote worker_dir;
