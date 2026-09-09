@@ -34,8 +34,13 @@ let task_matches_run task_keys task =
 let print_warnings warnings =
   List.iter (fun warning -> Fmt.epr "monty: warning: %s\n" warning) warnings
 
-let run ~home ~scope ?run ?project ?(sync = true) () =
+let run ~home ~scope ?run ?project ?group ?(banner = "") ?(sync = true) () =
   let ( let* ) = Result.bind in
+  let* () =
+    match group with
+    | None -> Ok ()
+    | Some _ -> Project_storage.list_projects ~home ?group () |> Result.map ignore
+  in
   let* sync_warnings =
     if sync then
       Project_overview.sync_jobs_to_local_tasks ~home
@@ -45,7 +50,7 @@ let run ~home ~scope ?run ?project ?(sync = true) () =
   let* scan = Job_store.scan ~home in
   let task_keys = task_keys_for_run scan.records run in
   let* tasks, inventory_warnings =
-    Project_overview.load_tasks_with_warnings ~home ?project ~all:true ()
+    Project_overview.load_tasks_with_warnings ~home ?project ?group ~all:true ()
   in
   print_warnings
     (List.sort_uniq String.compare (sync_warnings @ scan.warnings @ inventory_warnings));
@@ -53,5 +58,5 @@ let run ~home ~scope ?run ?project ?(sync = true) () =
     tasks |> List.filter (task_in_scope scope)
     |> List.filter (task_matches_run task_keys)
   in
-  Fmt.pr "%s" (Project_overview.render_tasks tasks);
+  Fmt.pr "%s%s" banner (Project_overview.render_tasks tasks);
   Ok ()

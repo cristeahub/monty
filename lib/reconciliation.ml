@@ -593,13 +593,18 @@ let diagnostic_task projects (record : Job_store.record) =
     url = None;
   }
 
-let load_tasks_with_warnings ~home ?project ?(all = false) () =
+let load_tasks_with_warnings ~home ?project ?group ?(all = false) () =
   let ( let* ) = Result.bind in
-  let* projects = load_projects ~home in
+  let* groups, raw_projects = Project_storage.load_registry ~home in
+  let* () = Project_storage.check_group groups group in
+  let projects = Project_storage.with_ids raw_projects in
   let* selected_projects =
     match project with
     | None -> Ok projects
     | Some needle -> resolve_project projects needle |> Result.map (fun value -> [ value ])
+  in
+  let selected_projects =
+    selected_projects |> List.filter (fun (project : project) -> group = None || project.group = group)
   in
   let* local_tasks = load_local_tasks ~home in
   let* scan = Job_store.scan ~home in
@@ -617,9 +622,9 @@ let load_tasks_with_warnings ~home ?project ?(all = false) () =
     |> List.map (task_of_local_with_projects projects)
   in
   let orphan_tasks =
-    match project with
-    | Some _ -> []
-    | None ->
+    match project, group with
+    | Some _, _ | _, Some _ -> []
+    | None, None ->
         local_tasks
         |> List.filter (fun (task : local_task) ->
                not
@@ -648,9 +653,10 @@ let load_tasks_with_warnings ~home ?project ?(all = false) () =
          (fun (items, warnings) record ->
            let linked = valid_local_task_link projects local_tasks record in
            let selected =
-             match projects_for_job selected_projects record.job with
-             | Ok (_ :: _) -> true
-             | Ok [] | Error _ -> project = None
+             (project = None && group = None)
+             || List.exists
+                  (fun (workspace : Job.workspace) -> project_for_repo_opt selected_projects workspace.repo <> None)
+                  record.job.Job.workspaces
            in
            let visible = all || not (Job_store.is_archived record) in
            let missing_workspace_warnings =

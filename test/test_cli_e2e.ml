@@ -220,6 +220,7 @@ let setup_environment root =
   let env =
     env_with
       [ ("MONTY_HOME", home);
+        ("MANTLE_CONTEXT", "");
         ("CODEX_HOME", Filename.concat root "codex-home");
         ("PATH", fake_bin ^ ":/usr/bin:/bin");
         ("MONTY_WT_COMMAND", "wt");
@@ -5957,16 +5958,19 @@ let test_project_groups_crud_and_legacy_projects () =
       List.iter (fun name -> ignore (ok [ "groups"; "add"; name ])) [ "Work"; "Private" ];
       if ok [ "groups"; "list" ] <> "GROUP\nPrivate\nWork\n" then
         failwith "empty groups were not persisted and sorted";
-      let empty = ok [ "list"; "--group"; "Private" ] in
+      let filtered_table group =
+        ok [ "list"; "--group"; group ] |> String.split_on_char '\n' |> List.tl |> String.concat "\n"
+      in
+      let empty = filtered_table "Private" in
       if List.length (String.split_on_char '\n' (String.trim empty)) <> 1 then
         failwith "empty group listed projects";
       ignore (ok [ "set-group"; "repo"; "Work" ]);
       require_contains "assigned project filter" (ok [ "list"; "--group"; "Work" ]) repo;
       require_contains "assigned project show" (ok [ "show"; "repo" ]) "Group: Work";
       ignore (ok [ "set-group"; repo; "Private" ]);
-      if ok [ "list"; "--group"; "Work" ] <> empty then failwith "reassignment left old membership";
+      if filtered_table "Work" <> empty then failwith "reassignment left old membership";
       ignore (ok [ "set-group"; "repo" ]);
-      if ok [ "list"; "--group"; "Private" ] <> empty then failwith "clear left membership";
+      if filtered_table "Private" <> empty then failwith "clear left membership";
       ignore (ok [ "set-group"; "repo"; "Work" ]);
       let second = Filename.concat root "two/repo" in
       init_git_repo second;
@@ -6129,6 +6133,116 @@ let test_project_groups_concurrent_mutations () =
         failwith "concurrent deletion/assignment left dangling references or lost unrelated records";
       require_empty_log log)
 
+let test_mantle_profile_filters_project_and_task_lists () =
+  with_temp_root "mantle-lists" (fun root ->
+      let home, log, env = setup_environment root in
+      let cli ?(env = env) args = run ~root ~env 4500 args in
+      let ok ?env args = let result = cli ?env args in require_code 0 result; result.stdout in
+      let absent text value =
+        if string_contains text value then failf "unexpected %S in:\n%s" value text
+      in
+      List.iter (fun name ->
+          ignore (ok [ "projects"; "groups"; "add"; name ])) [ "work"; "private"; "client-a"; "Work" ];
+      List.iter (fun (name, group) ->
+          let repo = Filename.concat root name in
+          Shell.ensure_dir repo;
+          ignore (ok [ "projects"; "add"; "--repo"; repo; "--github"; "owner/" ^ name ]);
+          Option.iter (fun group -> ignore (ok [ "projects"; "set-group"; name; group ])) group)
+        [ ("work-repo", Some "work"); ("private-repo", Some "private"); ("local-repo", None) ];
+      List.iter (fun (project, title) ->
+          ignore (ok [ "task"; "add"; "--project"; project; "--title"; title ]))
+        [ ("work-repo", "Work item"); ("private-repo", "Private item");
+          ("local-repo", "Ungrouped item"); ("private-repo", "Shared item");
+          ("work-repo", "Completed work item") ];
+      ignore (ok [ "task"; "done"; "local-005" ]);
+      List.iter (fun name ->
+          ignore (ok [ "task"; "workspace"; "add"; "local-004"; "--repo";
+                       Filename.concat root name; "--branch"; "cto/shared" ])) [ "private-repo"; "work-repo" ];
+      let context = Filename.concat root "context.md" in
+      Shell.write_file context "# Cross-group diagnostic\n";
+      let job_file = write_worker ~home ~run_id:"mantle-run" ~id:"cross-group"
+          ~title:"Cross-group diagnostic" ~repo:(Filename.concat root "private-repo")
+          ~branch:"cto/shared" ~context () in
+      Yojson.Safe.from_file job_file
+      |> replace_assoc_field "workspaces" (`List (List.map (fun name ->
+             `Assoc [ ("repo", `String (Filename.concat root name)); ("branch", `String "cto/shared") ])
+             [ "private-repo"; "work-repo" ]))
+      |> Yojson.Safe.to_file job_file;
+      let preserved = List.map (fun path -> (path, read_file path, (Unix.stat path).Unix.st_mtime))
+          [ Filename.concat home ".monty/projects.json"; Filename.concat home ".monty/tasks.local.json"; job_file ] in
+      let profile name = replace_env env
+          [ ("MANTLE_CONTEXT", name); ("_MANTLE_PREV_STATE", "unset");
+            ("_MANTLE_SELECTED_HOME", Filename.concat root "codex-home") ] in
+      let work = profile "work" in
+      let projects = ok ~env:work [ "projects"; "list" ] in
+      require_line "Mantle project scope" projects "Profile: work (Mantle) | Group: work";
+      require_contains "work project" projects "work-repo";
+      absent projects "private-repo";
+      absent projects "local-repo";
+      let private_projects = ok ~env:(profile "private") [ "projects"; "list" ] in
+      require_line "changed Mantle profile" private_projects "Profile: private (Mantle) | Group: private";
+      require_contains "private project" private_projects "private-repo";
+      absent private_projects "work-repo";
+      List.iter (fun command ->
+          let args = command @ [ "--no-sync" ] in
+          let listed = ok ~env:work args in
+          require_line "task profile banner" listed "Profile: work (Mantle) | Group: work";
+          List.iter (require_contains "work task selection" listed) [ "Work item"; "Shared item"; "Cross-group diagnostic" ];
+          List.iter (absent listed) [ "Private item"; "Ungrouped item"; "Completed work item" ];
+          require_contains "shared branches remain intact" listed "private-repo=cto/shared; work-repo=cto/shared";
+          let rows = listed |> String.trim |> String.split_on_char '\n' |> List.tl |> List.tl in
+          List.iteri (fun index row ->
+              if not (String.starts_with ~prefix:(string_of_int (index + 1) ^ " ") row) then
+                failwith "profile filtering did not renumber visible rows") rows;
+          let overridden = ok ~env:work (args @ [ "--group"; "private" ]) in
+          require_line "explicit group caption" overridden "Profile: work (Mantle) | Group: private (--group)";
+          require_contains "explicit group override" overridden "Private item";
+          absent overridden "Work item";
+          let selected = ok ~env:work (args @ [ "--project"; "private-repo" ]) in
+          require_line "explicit project caption" selected "Profile: work (Mantle) | Project: private-repo (--project)";
+          require_contains "explicit project overrides profile" selected "Private item";
+          absent selected "Work item";
+          let all = ok ~env:work (args @ [ "--all-groups" ]) in
+          require_line "all groups caption" all "Profile: work (Mantle) | Groups: all (--all-groups)";
+          require_contains "all groups includes ungrouped tasks" all "Ungrouped item";
+          let completed = ok ~env:work (args @ [ "--all" ]) in
+          require_contains "--all retains done-task meaning" completed "Completed work item";
+          absent completed "Private item") [ [ "list" ]; [ "tasks"; "list" ] ];
+      let by_run = ok ~env:work [ "list"; "--no-sync"; "--run"; "mantle-run" ] in
+      require_contains "run and profile intersect" by_run "Cross-group diagnostic";
+      absent by_run "Work item";
+      if ok ~env:work [ "list"; "--no-sync" ] <> ok ~env:work [ "tasks"; "list"; "--no-sync" ] then
+        failwith "profile-aware task list aliases diverged";
+      let archived = ok ~env:work [ "list"; "--no-sync"; "--archived" ] in
+      require_contains "archived profile filter" archived "Completed work item";
+      absent archived "Shared item";
+      List.iter (fun command ->
+          let args = if command = [ "projects"; "list" ] then command else command @ [ "--no-sync" ] in
+          let empty = ok ~env:(profile "client-a") args in
+          require_line "custom empty Mantle profile" empty "Profile: client-a (Mantle) | Group: client-a";
+          if List.length (String.split_on_char '\n' (String.trim empty)) <> 2 then failwith "empty group listed rows";
+          let capital = ok ~env:work (args @ [ "--group"; "Work" ]) in
+          if List.length (String.split_on_char '\n' (String.trim capital)) <> 2 then failwith "group identity became case-insensitive";
+          require_code 1 (cli ~env:work (command @ [ "--group"; "work"; "--all-groups" ]));
+          let unknown = cli ~env:(profile "missing") command in
+          require_code 1 unknown;
+          require_contains "missing Mantle group is actionable" unknown.stderr "monty projects groups add 'missing'";
+          ignore (ok ~env:(profile "missing") (args @ [ "--all-groups" ])))
+        [ [ "projects"; "list" ]; [ "list" ]; [ "tasks"; "list" ] ];
+      List.iter (fun overrides ->
+          let inactive = replace_env work overrides in
+          let listed = ok ~env:inactive [ "projects"; "list" ] in
+          absent listed "Profile:";
+          List.iter (require_contains "inactive profile includes every group" listed)
+            [ "work-repo"; "private-repo"; "local-repo" ])
+        [ [ ("MANTLE_CONTEXT", "") ]; [ ("MANTLE_CONTEXT", "bad\nname") ];
+          [ ("MANTLE_CONTEXT", "off") ]; [ ("_MANTLE_PREV_STATE", "") ];
+          [ ("_MANTLE_SELECTED_HOME", "") ]; [ ("CODEX_HOME", Filename.concat root "other-home") ] ];
+      List.iter (fun (path, bytes, mtime) ->
+          if read_file path <> bytes || (Unix.stat path).Unix.st_mtime <> mtime then
+            failf "profile listing mutated %s" path) preserved;
+      require_empty_log log)
+
 let run_named name test =
   try
     test ();
@@ -6141,7 +6255,8 @@ let () =
   Unix.putenv "GIT_CONFIG_GLOBAL" "/dev/null";
   Unix.putenv "GIT_CONFIG_COUNT" "0";
   Unix.putenv "GIT_TEMPLATE_DIR" "/dev/null";
-  [ ("cli_project_groups_crud_and_legacy_projects", test_project_groups_crud_and_legacy_projects);
+  [ ("cli_mantle_profile_filters_project_and_task_lists", test_mantle_profile_filters_project_and_task_lists);
+    ("cli_project_groups_crud_and_legacy_projects", test_project_groups_crud_and_legacy_projects);
     ("cli_project_groups_invalid_input_and_atomic_failure", test_project_groups_invalid_input_and_atomic_failure);
     ("cli_project_groups_concurrent_mutations", test_project_groups_concurrent_mutations);
     ("cli_live_codex_excludes_resume_and_completion", test_live_codex_excludes_resume_and_completion);

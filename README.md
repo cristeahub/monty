@@ -542,20 +542,45 @@ Projects can belong to one user-created group; existing projects start ungrouped
 Names are case-sensitive and use letters, digits, `.`, `-`, or `_` (except `.` and `..`).
 
 ```sh
-monty projects groups add Work
-monty projects groups add Private
+monty projects groups add work
+monty projects groups add private
 monty projects groups list
-monty projects set-group monty Work
-monty projects list --group Work
-monty projects set-group monty Private  # Reassign the project
+monty projects set-group monty work
+monty projects list --group work
+monty projects set-group monty private  # Reassign the project
 monty projects set-group monty          # Clear its assignment
-monty projects groups delete Work
+monty projects groups delete work
 ```
 
-Groups and assignments persist in `.monty/projects.json`. Listings are read-only;
-without `--group`, all projects appear. `projects show` also displays the group.
+Groups and assignments persist in `.monty/projects.json`. Project listings are
+read-only; `projects show` also displays the group.
 Empty groups are allowed; unknown groups are errors. Deleting a group atomically
 clears its assignments and keeps projects and all their associated data intact.
+
+When Mantle is active in the current shell, `projects list`, `list`, and
+`tasks list` default to the group with the exact same name. Each list shows the
+active profile and selection above the table:
+
+```text
+Profile: work (Mantle) | Group: work
+```
+
+```sh
+mantle work
+monty projects list
+monty list
+monty tasks list --group private  # Override the default group
+monty list --all-groups           # Include every group and ungrouped projects
+monty list --all                  # Open and done tasks within the selected group
+```
+
+An explicit `--project` also overrides the default Mantle group. `--group` and
+`--all-groups` cannot be combined. A missing group is an error; create it or use
+`--all-groups`. Tasks spanning projects appear when any workspace belongs to the
+selected group, retaining all their workspace information.
+With Mantle inactive, lists show every group by default. Selection is inherited
+from the launching shell; switching another shell does not change running agents.
+Reading the profile launches no external commands and writes no settings.
 
 Show a cross-project overview:
 

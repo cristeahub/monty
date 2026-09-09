@@ -58,6 +58,19 @@ let worktree_default getenv =
   | Ok mode -> mode
   | Error _ -> Launcher.Always
 
+let mantle_profile getenv =
+  let env name = Option.value ~default:"" (getenv name) in
+  let name = env "MANTLE_CONTEXT" in
+  (* Match Mantle's shell-local active_context contract without invoking a CLI. *)
+  if String.length name > 0 && String.length name <= 32
+     && name.[0] >= 'a' && name.[0] <= 'z'
+     && String.for_all (function 'a' .. 'z' | '0' .. '9' | '-' | '_' -> true | _ -> false) name
+     && not (List.mem name [ "init"; "list"; "create"; "off"; "status"; "prompt" ])
+     && List.mem (env "_MANTLE_PREV_STATE") [ "unset"; "local"; "export" ]
+     && env "_MANTLE_SELECTED_HOME" <> ""
+     && env "CODEX_HOME" = env "_MANTLE_SELECTED_HOME"
+  then Some name else None
+
 let make_cmd ?(getenv = Sys.getenv_opt) () =
 let home_arg =
   let doc = "Monty control-room directory. Defaults to MONTY_HOME or the nearest parent dune-project named monty." in
@@ -789,9 +802,46 @@ let register_container_image home =
 let register_container_image_term =
   Cmdliner.Term.(const register_container_image $ home_arg)
  in
-let list_jobs archived all run no_sync home =
+let group_arg =
+  let doc = "Filter by this project group instead of the active Mantle profile." in
+  Cmdliner.Arg.(value & opt (some string) None & info [ "group" ] ~docv:"GROUP" ~doc)
+ in
+let all_groups_arg =
+  let doc = "Show all project groups, ignoring the active Mantle profile." in
+  Cmdliner.Arg.(value & flag & info [ "all-groups" ] ~doc)
+ in
+let project_filter_arg =
+  let doc = "Only list tasks for this project; overrides the default Mantle group." in
+  Cmdliner.Arg.(value & opt (some string) None & info [ "project" ] ~docv:"PROJECT" ~doc)
+ in
+let list_selection ?project group all_groups =
+  if all_groups && group <> None then Error "--group and --all-groups cannot be combined"
+  else
+    let profile = mantle_profile getenv in
+    let selected =
+      if group <> None then group
+      else if all_groups || project <> None then None else profile
+    in
+    let scope =
+      if all_groups then "Groups: all (--all-groups)"
+      else match group, project, profile with
+      | Some group, _, _ -> "Group: " ^ group ^ " (--group)"
+      | None, Some project, Some _ -> "Project: " ^ project ^ " (--project)"
+      | None, None, Some profile -> "Group: " ^ profile
+      | _ -> ""
+    in
+    let profile = Option.fold ~none:"" ~some:(fun name -> "Profile: " ^ name ^ " (Mantle)") profile in
+    let banner = [ profile; scope ] |> List.filter (fun text -> text <> "") |> String.concat " | " in
+    Ok (selected, if banner = "" then "" else banner ^ "\n")
+ in
+let list_jobs archived all run project group all_groups no_sync home =
   let scope = if all then Job_store.All else if archived then Job_store.Archived else Job_store.Active in
-  List_jobs.run ~home ~scope ?run ~sync:(not no_sync) () |> exit_code
+  let result =
+    let ( let* ) = Result.bind in
+    let* group, banner = list_selection ?project group all_groups in
+    List_jobs.run ~home ~scope ?run ?project ?group ~banner ~sync:(not no_sync) ()
+  in
+  exit_code result
  in
 let list_jobs_term =
   let archived =
@@ -810,7 +860,8 @@ let list_jobs_term =
     let doc = "Read inventory without reconciliation writes or external task fetches." in
     Cmdliner.Arg.(value & flag & info [ "no-sync" ] ~doc)
   in
-  Cmdliner.Term.(const list_jobs $ archived $ all $ run $ no_sync $ home_arg)
+  Cmdliner.Term.(const list_jobs $ archived $ all $ run $ project_filter_arg
+    $ group_arg $ all_groups_arg $ no_sync $ home_arg)
  in
 let ensure_worktree repo branch wt_command =
   let repo = Shell.normalize (Shell.abs_path repo) in
@@ -840,19 +891,18 @@ let overview home =
  in
 let overview_term = Cmdliner.Term.(const overview $ home_arg)
  in
-let projects_list group home =
-  match Project_overview.list_projects ~home ?group () with
-  | Error msg -> exit_code (Error msg)
-  | Ok projects ->
-      Fmt.pr "%s" (Project_overview.render_projects projects);
-      0
+let projects_list group all_groups home =
+  let result =
+    let ( let* ) = Result.bind in
+    let* group, banner = list_selection group all_groups in
+    let* projects = Project_overview.list_projects ~home ?group () in
+    Fmt.pr "%s%s" banner (Project_overview.render_projects projects);
+    Ok ()
+  in
+  exit_code result
  in
 let projects_list_term =
-  let group =
-    let doc = "Only list projects assigned to this existing project group." in
-    Cmdliner.Arg.(value & opt (some string) None & info [ "group" ] ~docv:"GROUP" ~doc)
-  in
-  Cmdliner.Term.(const projects_list $ group $ home_arg)
+  Cmdliner.Term.(const projects_list $ group_arg $ all_groups_arg $ home_arg)
  in
 let projects_show project home =
   match Project_overview.load_projects ~home with
@@ -913,15 +963,10 @@ let projects_set_group_term =
 let print_sync_warnings warnings =
   List.iter (fun warning -> Fmt.epr "monty: warning: %s\n" warning) warnings
  in
-let tasks_list project all no_sync home =
-  let scope = if all then Job_store.All else Job_store.Active in
-  List_jobs.run ~home ~scope ?project ~sync:(not no_sync) () |> exit_code
+let tasks_list project all group all_groups no_sync home =
+  list_jobs false all None project group all_groups no_sync home
  in
 let tasks_list_term =
-  let project =
-    let doc = "Only list tasks for this project." in
-    Cmdliner.Arg.(value & opt (some string) None & info [ "project" ] ~docv:"PROJECT" ~doc)
-  in
   let all =
     let doc = "Include completed local tasks." in
     Cmdliner.Arg.(value & flag & info [ "all" ] ~doc)
@@ -930,7 +975,7 @@ let tasks_list_term =
     let doc = "Read inventory without reconciliation writes or external task fetches." in
     Cmdliner.Arg.(value & flag & info [ "no-sync" ] ~doc)
   in
-  Cmdliner.Term.(const tasks_list $ project $ all $ no_sync $ home_arg)
+  Cmdliner.Term.(const tasks_list $ project_filter_arg $ all $ group_arg $ all_groups_arg $ no_sync $ home_arg)
  in
 let tasks_sync home =
   match Project_overview.sync_jobs_to_local_tasks ~home with

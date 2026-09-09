@@ -17,6 +17,9 @@ Keep worker jobs linked to local tasks with `task_key` and run `monty tasks sync
 `monty list` and `monty tasks list` are equivalent task-listing views and must show the same task inventory.
 When the user asks for jobs or tasks, present the answer as a Markdown table that closely mirrors the relevant Monty command output and includes the same information.
 For task and job lists, use exactly these columns: #, ID, Project, Status, Title, and Branch.
+Preserve any profile and group selection banner printed by Monty above the table.
+Lists default to the active Mantle profile's project group; use `--group` to
+override it or `--all-groups` to include every group. `--all` still includes done tasks.
 Use `monty list` or `monty tasks list` for the task inventory, not an ad-hoc merge of local tasks and worker jobs.
 Number the visible rows from 1 after filtering and sorting, preserving the command's order and values, including multi-workspace branches.
 A numeric conversational reference such as `complete 1` refers to the most recent task list actually shown to the user in this conversation.
