@@ -180,6 +180,7 @@ let write_instructions ?destination_dir ~worker_dir ~id ~job ~profile ~branch
         "";
         "### Review safety envelope";
         "";
+        "The following read-only rules apply only to reviewer agents, not implementers, simplifiers, or fixers.";
         String.concat "\n" Reviewer_prompt.review_preamble;
         Reviewer_prompt.read_only_worktree_rule;
         "Use shell commands only for read-only inspection and non-mutating validation.";

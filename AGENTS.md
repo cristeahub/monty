@@ -45,7 +45,7 @@ When the user chooses tasks to execute, create one Markdown context file per wor
 Each context file should be specific enough that a fresh worker agent can start without reading the whole planning conversation.
 Include the task summary, repo path, issue or PR links, relevant constraints, acceptance criteria, and any important planning notes.
 Do not duplicate interactive review wording or hard-code a headless phase count in task context; the selected agent profile supplies those role instructions.
-Use the default `reviewed` profile unless the user selects another profile for the invocation or manifest job.
+Use the default `simplified` profile unless the user selects another profile for the invocation or manifest job.
 Workers must not post review comments, push, or open PRs unless explicitly approved.
 
 Create `.monty/runs/<run-id>/jobs.json` with this shape:
@@ -182,8 +182,8 @@ synchronously poll, or babysit the run unless the user explicitly asks for
 monitoring. Let the process finish independently and recover its result from the
 durable handoff inbox at the next safe message boundary.
 
-Each chain gets fresh minimal context and follows its pinned agent profile: one implementer, zero or more mutually isolated reviewers in parallel, then an optional fixer.
-The built-in `reviewed` profile retains the one-implementer, two-reviewer, one-fixer default; `solo` runs only the implementer with self-validation.
+Each chain gets fresh minimal context and follows its pinned agent profile: one implementer, zero or more mutually isolated reviewers in parallel, then an optional final writer (simplifier or fixer).
+The default `simplified` profile runs one implementer followed by one separate editing simplifier, sequentially in the same workspaces. The explicit `reviewed` profile runs one implementer, two reviewers, and one fixer; `solo` runs only the implementer with self-validation. Legacy workers without profile metadata retain `reviewed` behavior.
 Reviewers may write only their separate reports outside the worktree.
 No child may create worktrees, stage, commit, push, open a PR, post remotely, or run `monty done`.
 A successful chain leaves the task open and its worktree intact.

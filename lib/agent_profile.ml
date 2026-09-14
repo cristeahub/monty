@@ -2,8 +2,13 @@ open Yojson.Safe
 
 let schema = "monty:agent-profile:v1"
 let snapshot_schema = "monty:agent-profile-snapshot:v1"
-let default_id = "reviewed"
+let default_id = "simplified"
+let legacy_id = "reviewed"
 let snapshot_name = "agent-profile.json"
+
+type fix_role = Fixer | Simplifier
+
+let fix_role_name = function Fixer -> "fixer" | Simplifier -> "simplifier"
 
 type review = {
   id : string;
@@ -18,6 +23,7 @@ type t = {
   implementation : string;
   reviews : review list;
   fix : string option;
+  fix_role : fix_role;
 }
 
 let ( let* ) = Result.bind
@@ -102,9 +108,14 @@ let parse ?(path = "agent profile") ~expected_schema ~instructions json =
         | None -> Ok None
         | Some name -> instructions name |> Result.map Option.some
       in
-      if reviews = [] && fix <> None then
-        Error "agent profile cannot define a fix stage without reviewers"
-      else Ok { id; description; interactive; implementation; reviews; fix })
+      let* fix_role =
+        match Util.member "fix_role" headless with
+        | `Null | `String "fixer" -> Ok Fixer
+        | `String "simplifier" when fix <> None -> Ok Simplifier
+        | `String "simplifier" -> Error "agent profile simplifier requires a fix stage"
+        | _ -> Error "agent profile fix_role must be fixer or simplifier"
+      in
+      Ok { id; description; interactive; implementation; reviews; fix; fix_role })
 
 let load_directory path =
   let* state = State_store.lstat path in
@@ -211,6 +222,7 @@ let to_snapshot_json profile =
         `Assoc
           [ ("implementation", `String profile.implementation);
             ("reviews", `List (List.map review_json profile.reviews));
+            ("fix_role", `String (fix_role_name profile.fix_role));
             ("fix", Option.fold ~none:`Null ~some:(fun value -> `String value) profile.fix) ] ) ]
 
 let write_snapshot ~worker_dir profile =
@@ -250,24 +262,23 @@ let load_pinned ~home ~worker_dir selected_id =
                id profile.id))
   | Ok None -> (
       match selected_id with
-      | None -> find ~home default_id
+      | None -> find ~home legacy_id
       | Some id ->
           Error
             (Printf.sprintf
                "worker selects agent profile %S but its pinned snapshot is missing: %s"
                id (snapshot_path worker_dir)))
 
+let fix_stage profile =
+  match profile.fix_role with Fixer -> "fix" | Simplifier -> "simplification"
+
 let stage_summary profile =
-  let implementation = "implementation" in
-  match (profile.reviews, profile.fix) with
-  | [], None -> implementation
-  | reviews, fix ->
-      let reviews =
-        Printf.sprintf "%d parallel review%s" (List.length reviews)
-          (if List.length reviews = 1 then "" else "s")
-      in
-      String.concat " -> "
-        ([ implementation; reviews ]
-        @ (if fix = None then [] else [ "fix" ]))
+  String.concat " -> "
+    ([ "implementation" ]
+    @ (if profile.reviews = [] then []
+       else
+         [ Printf.sprintf "%d parallel review%s" (List.length profile.reviews)
+             (if List.length profile.reviews = 1 then "" else "s") ])
+    @ (if profile.fix = None then [] else [ fix_stage profile ]))
 
 let render profile = Yojson.Safe.pretty_to_string (to_snapshot_json profile) ^ "\n"
