@@ -26,9 +26,7 @@ same_home_argument=$repo
 mkdir -p "$repo/.monty" "$fake_bin" "$home"
 cp "$installer" "$repo/install.sh"
 cp "$source_version" "$repo/.monty/version"
-mkdir -p "$repo/agent-profiles/reviewed" "$repo/agent-profiles/solo"
-printf '%s\n' '{"id":"reviewed"}' > "$repo/agent-profiles/reviewed/profile.json"
-printf '%s\n' '{"id":"solo"}' > "$repo/agent-profiles/solo/profile.json"
+cp -R "$(dirname "$installer")/agent-profiles" "$repo/agent-profiles"
 chmod 600 "$repo/.monty/version"
 
 cat > "$fake_bin/dune" <<'EOF'
@@ -169,10 +167,15 @@ printf 'binary one\n' > "$repo/binary-release.txt"
 run_install
 assert_contents 'new state version' "$state_dir/version" '2'
 assert_contents 'new control room' "$installed_home/control-room.txt" 'release one'
-assert_contents 'installed reviewed profile' \
-  "$installed_home/agent-profiles/reviewed/profile.json" '{"id":"reviewed"}'
-assert_contents 'installed solo profile' \
-  "$installed_home/agent-profiles/solo/profile.json" '{"id":"solo"}'
+for profile in simplified reviewed solo; do
+  diff -r "$repo/agent-profiles/$profile" "$installed_home/agent-profiles/$profile" ||
+    fail "installed $profile instructions differ"
+done
+MONTY_HOME="$installed_home" "$checkout_binary" agent-profiles show > "$root/default-profile.json"
+grep -F '"id": "simplified"' "$root/default-profile.json" >/dev/null ||
+  fail 'fresh installation did not default to simplified'
+grep -F '"fix_role": "simplifier"' "$root/default-profile.json" >/dev/null ||
+  fail 'installed simplifier lost its role'
 assert_release 'binary one'
 
 printf '{"tasks":[{"id":"keep-me"}]}\n' > "$state_dir/tasks.local.json"

@@ -1,0 +1,12 @@
+{
+  "schema": "monty:agent-profile:v1",
+  "id": "simplified",
+  "description": "Implementation followed by a separate editing simplifier",
+  "interactive": "interactive.md",
+  "headless": {
+    "implementation": "implementation.md",
+    "reviews": [],
+    "fix": "simplification.md",
+    "fix_role": "simplifier"
+  }
+}

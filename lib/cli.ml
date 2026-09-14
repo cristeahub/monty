@@ -113,7 +113,7 @@ let branch_prefix_arg =
   Cmdliner.Arg.(value & opt (some string) None & info [ "branch-prefix" ] ~docv:"PREFIX" ~doc)
  in
 let agent_profile_arg =
-  let doc = "Agent profile for newly launched workers. Overrides the persisted setting and reviewed default." in
+  let doc = "Agent profile for newly launched workers. Overrides the persisted setting and simplified default." in
   Cmdliner.Arg.(value & opt (some string) None & info [ "agent-profile" ] ~docv:"NAME" ~doc)
  in
 let fork_arg =

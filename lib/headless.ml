@@ -230,15 +230,19 @@ let fixer_task (dispatch : dispatch) (paths : review_path list) =
   in
   String.concat "\n\n"
     ([ Printf.sprintf "Finalize Monty worker %s: %s." dispatch.id dispatch.title;
-      "Read the supplied task context, inspect every supplied worktree, and review every independent report below.";
+      "Read the supplied Monty instructions and task context, inspect every supplied worktree, and verify the implementation handoff against the actual code.";
       "Use the absolute MONTY_JOB_FILE path in the Monty instructions to resolve every persisted workspace path.";
       "You are the only writer in this phase.";
       Option.value ~default:"" dispatch.profile.fix;
-      Printf.sprintf "Append the verified findings, fixes, validation, and final handoff to %s."
+      Printf.sprintf "Append changes, validation, and the final handoff to %s."
         (Filename.concat dispatch.worker_dir "memory.md");
-      mutation_prohibitions ]
+      mutation_prohibitions;
+      "Implementation handoff:";
+      "{outputs.implementation}" ]
     @ reports
-    @ [ "Finish with changed files, accepted and rejected findings, validation commands and results, residual risks, and git status confirming nothing is staged." ])
+    @ [ "Finish with changed files, "
+        ^ (if paths = [] then "" else "accepted and rejected findings, ")
+        ^ "validation commands and results, residual risks, and git status confirming nothing is staged." ])
 
 let reads_json paths = `List (List.map (fun path -> `String path) paths)
 
@@ -295,8 +299,11 @@ let harness_arguments_json (dispatch : dispatch) attempt_id =
   let fixer =
     Option.map
       (fun _ ->
-        child_json ~phase:(Some "Fix") ~agent:"worker"
-          ~label:(dispatch.title ^ " verified fixes") ~as_name:"final"
+        child_json
+          ~phase:(Some (String.capitalize_ascii (Agent_profile.fix_stage dispatch.profile)))
+          ~agent:"worker"
+          ~label:(dispatch.title ^ " " ^ Agent_profile.fix_stage dispatch.profile)
+          ~as_name:"final"
           ~task:(fixer_task dispatch paths.reviews) ~cwd:dispatch.worktree
           ~reads:[ dispatch.instructions; dispatch.context ] ~output:paths.final)
       dispatch.profile.fix
@@ -795,23 +802,25 @@ let reviewer_prompt dispatch inputs review implementation_handoff =
         inputs.instructions_contents;
       source_section "Task context" dispatch.context inputs.context_contents ]
 
-let fixer_prompt dispatch inputs paths reports =
+let fixer_prompt dispatch inputs paths reports implementation_handoff =
   let memory_instruction =
     Printf.sprintf
-      "Append the verified findings, fixes, validation, and final handoff to %s."
+      "Append changes, validation, and the final handoff to %s."
       (Worker_memory.memory_file dispatch.worker_dir)
   in
   let task =
     fixer_task dispatch paths
     |> replace_literal ~pattern:memory_instruction
          ~replacement:
-           "Include the verified findings, fixes, validation, and final handoff in the final response so Monty can persist them."
+           "Include changes, validation, and the final handoff in the final response so Monty can persist them."
     |> fun task ->
     List.fold_left2
       (fun task path report ->
         replace_literal ~pattern:("{outputs." ^ path.alias ^ "}")
           ~replacement:report task)
       task paths reports
+    |> replace_literal ~pattern:"{outputs.implementation}"
+         ~replacement:implementation_handoff
   in
   String.concat "\n\n"
     [ direct_memory_notice;
@@ -999,13 +1008,17 @@ let review_summary profile =
            (List.length reviews)
            (if List.length reviews = 1 then "" else "s")
            (if profile.fix = None then ""
-            else " and the fixer verified their reports"))
+            else match profile.fix_role with
+              | Agent_profile.Fixer -> " and the fixer verified their reports"
+              | Agent_profile.Simplifier -> " and the simplifier processed their reports"))
 
 let validation_summary profile =
   if profile.Agent_profile.fix = None then
     "Exact validation commands and results are recorded in the final implementation handoff."
   else
-    "Exact validation commands and results are recorded in the final fixer handoff."
+    Printf.sprintf
+      "Exact validation commands and results are recorded in the final %s handoff."
+      (Agent_profile.fix_role_name profile.fix_role)
 
 let preflight_codex_worker ~explicit_resume options worker =
   let* () = require_codex_harness options in
@@ -1097,13 +1110,14 @@ let run_codex_worker_unlocked ~explicit_resume options worker =
     match dispatch.profile.fix with
     | None -> Ok implementation_handoff
     | Some _ ->
-        phase := "fixer";
+        let name = Agent_profile.fix_role_name dispatch.profile.fix_role in
+        phase := name;
         let* fixer_prompt_path =
-          write_phase_prompt paths "fixer"
-            (fixer_prompt dispatch inputs paths.reviews reports)
+          write_phase_prompt paths name
+            (fixer_prompt dispatch inputs paths.reviews reports implementation_handoff)
         in
         let* () =
-          run_codex_phase plan.options dispatch paths ~name:"fixer" ~writable:true
+          run_codex_phase plan.options dispatch paths ~name ~writable:true
             ~prompt:fixer_prompt_path ~output:paths.final
         in
         let* final_handoff =
@@ -1177,7 +1191,7 @@ let read_attempt_descriptor ~record ~profile paths ~expected_source =
         let* source = string "source" in
         let* agent_profile =
           match Yojson.Safe.Util.member "agent_profile" json with
-          | `Null -> Ok Agent_profile.default_id
+          | `Null -> Ok Agent_profile.legacy_id
           | `String value -> Ok value
           | _ -> Error "headless attempt descriptor has invalid agent_profile"
         in

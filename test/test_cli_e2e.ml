@@ -82,7 +82,8 @@ let reviewed_profile =
           { id = "quality";
             title = "Quality and tests review";
             instructions = "Review quality and tests." } ];
-      fix = Some "Verify findings and fix valid issues." }
+      fix = Some "Verify findings and fix valid issues.";
+      fix_role = Fixer }
 
 let solo_profile =
   Agent_profile.
@@ -91,7 +92,7 @@ let solo_profile =
       interactive = "Self-validate the task.";
       implementation = "Implement, self-validate, and report the task.";
       reviews = [];
-      fix = None }
+      fix = None; fix_role = Fixer }
 
 let install_profile home (profile : Agent_profile.t) =
   let directory = Filename.concat (Filename.concat home "agent-profiles") profile.id in
@@ -118,6 +119,7 @@ let install_profile home (profile : Agent_profile.t) =
             [ ("implementation",
                instruction "implementation.md" profile.implementation);
               ("reviews", `List reviews);
+              ("fix_role", `String (Agent_profile.fix_role_name profile.fix_role));
               ( "fix",
                 match profile.fix with
                 | None -> `Null
@@ -199,13 +201,18 @@ let require_code expected result =
     failf "command exited %d instead of %d: %s\nstdout:\n%s\nstderr:\n%s"
       result.code expected (command result) result.stdout result.stderr
 
-let setup_environment root =
+let setup_environment ?(agent_profile = Some "reviewed") root =
   let home = Filename.concat root "home" in
   let fake_bin = Filename.concat root "fake-bin" in
   let log = Filename.concat root "fake-tools.log" in
   Shell.ensure_dir fake_bin;
   install_profile home reviewed_profile;
   install_profile home solo_profile;
+  (* Existing scenarios exercise the explicit historical profile. *)
+  Option.iter (fun _ ->
+      Shell.ensure_dir (Filename.concat home ".monty");
+      Yojson.Safe.to_file (Settings.path ~home)
+        (Settings.to_json { Settings.empty with agent_profile })) agent_profile;
   List.iter
     (fun name ->
       let path = Filename.concat fake_bin name in
@@ -565,7 +572,7 @@ let test_cli_rejects_unsafe_persisted_worker_before_external_commands () =
 
 let test_cli_rejects_state_parent_and_lock_symlinks () =
   with_temp_root "state-symlinks" (fun root ->
-      let home, log, env = setup_environment root in
+      let home, log, env = setup_environment ~agent_profile:None root in
       let repo = Filename.concat root "repo" in
       let outside_parent = Filename.concat root "outside-state" in
       Shell.ensure_dir home;
@@ -4695,6 +4702,24 @@ let test_agent_profiles_selection_snapshot_and_solo () =
       in
       if List.length legacy_chain <> 3 then
         failwith "legacy worker without profile metadata did not use reviewed";
+      let legacy_dispatch = Yojson.Safe.from_string legacy_begin.stdout in
+      let legacy_attempt = Yojson.Safe.Util.(legacy_dispatch |> member "completion"
+        |> member "attempt_id" |> to_string) in
+      let legacy_final = Yojson.Safe.Util.(List.nth legacy_chain 2 |> member "output" |> to_string) in
+      let descriptor = Filename.concat (Filename.dirname legacy_final) "attempt.json" in
+      let legacy_descriptor = match Yojson.Safe.from_file descriptor with
+        | `Assoc fields -> `Assoc (List.remove_assoc "agent_profile" fields)
+        | _ -> failwith "legacy attempt was not an object" in
+      Yojson.Safe.to_file descriptor legacy_descriptor;
+      Shell.write_file legacy_final "Historical reviewed attempt completed.\n";
+      let legacy_finished = run ~root ~env 19766
+        [ "headless"; "finish"; "profile-legacy"; "--attempt"; legacy_attempt;
+          "--outcome"; "success"; "--home"; home ] in
+      require_code 0 legacy_finished;
+      let legacy_handoff = Yojson.Safe.Util.(Yojson.Safe.from_string legacy_finished.stdout
+        |> member "handoff" |> to_string) |> read_file in
+      require_contains "legacy attempt retains review semantics" legacy_handoff
+        "2 independent reviewers completed and the fixer verified their reports";
       let set_reviewed =
         run ~root ~env 1977
           [ "settings"; "set"; "agent-profile"; "reviewed"; "--home"; home ]
@@ -4760,6 +4785,176 @@ let test_agent_profiles_selection_snapshot_and_solo () =
       in
       if Yojson.Safe.Util.(handoff |> member "review" |> member "summary") <> `Null
       then failwith "solo Codex handoff claimed reviews occurred")
+
+let test_simplified_default_and_headless_writers () =
+  with_temp_root "simplified" (fun root ->
+      let home, log, env = setup_environment ~agent_profile:None root in
+      let bundled_home =
+        Option.value ~default:(Sys.getcwd ()) (Sys.getenv_opt "DUNE_SOURCEROOT") in
+      let simplified = match Agent_profile.find ~home:bundled_home "simplified" with
+        | Ok profile -> profile | Error message -> failwith message in
+      install_profile home simplified;
+      let repo = Filename.concat root "repo" in
+      let context = Filename.concat root "context.md" in
+      let manifest = Filename.concat home ".monty/runs/simplified/jobs.json" in
+      let worker_dir id = Filename.concat home (".monty/runs/simplified/workers/" ^ id) in
+      let job_file id = Filename.concat (worker_dir id) "job.json" in
+      let cli ?(env = env) args = run ~root ~env 19830 (args @ [ "--home"; home ]) in
+      let ok args = let result = cli args in require_code 0 result; result.stdout in
+      init_git_repo repo;
+      add_project ~root ~home ~env repo;
+      install_repo_scoped_wt ~root ~log;
+      Shell.write_file context "# Simplified feature requirements\nPreserve required behavior.\n";
+      if String.trim (ok [ "settings"; "get"; "agent-profile" ]) <> "simplified" then
+        failwith "fresh setting did not use simplified";
+      require_contains "default profile discovery" (ok [ "agent-profiles"; "list" ])
+        "implementation -> simplification";
+      require_contains "default profile show" (ok [ "agent-profiles"; "show" ])
+        "can you radically simplify this?";
+      write_manifest manifest
+        (List.map (fun id -> manifest_job ~id ~branch:("cto/" ^ id)
+           ~title:id ~repo ~context ()) [ "simple-pi"; "simple-codex"; "simple-fail" ]);
+      require_contains "interactive launch default"
+        (ok [ "launch-many"; "--manifest"; manifest; "--terminal"; "dry-run" ])
+        "agent profile: simplified";
+      let dry = ok [ "headless"; "prepare-many"; "--manifest"; manifest; "--dry-run" ] in
+      require_contains "default launch preview" dry "\"agent_profile\": \"simplified\"";
+      if Sys.file_exists (worker_dir "simple-pi") then failwith "dry-run created a worker";
+      ignore (ok [ "headless"; "prepare-many"; "--manifest"; manifest ]);
+      List.iter (fun id ->
+          let instructions = read_file (Filename.concat (worker_dir id) "MONTY.md") in
+          require_contains "interactive separate agent" instructions "one separate simplifier";
+          require_contains "interactive editing access" instructions "with write access";
+          require_contains "interactive supports both harnesses" instructions "interactive Pi or Codex";
+          require_contains "read-only envelope scoped to reviewers" instructions
+            "not implementers, simplifiers, or fixers")
+        [ "simple-pi"; "simple-codex" ];
+      (* Changing the default and role files must not change any prepared worker. *)
+      ignore (ok [ "settings"; "set"; "agent-profile"; "solo" ]);
+      install_profile home { simplified with interactive = "CHANGED PROFILE";
+        fix_role = Agent_profile.Fixer; fix = Some "CHANGED FINAL WRITER" };
+      ignore (ok [ "headless"; "prepare-many"; "--manifest"; manifest ]);
+      let dispatch = ok [ "headless"; "begin"; "simple-pi" ] |> Yojson.Safe.from_string in
+      let chain = Yojson.Safe.Util.(dispatch |> member "harness_call"
+        |> member "arguments" |> member "chain" |> to_list) in
+      if List.length chain <> 2 then failwith "Pi default did not have two sequential writers";
+      let first = List.hd chain and final = List.nth chain 1 in
+      List.iter (fun child ->
+          if Yojson.Safe.Util.(child |> member "agent" |> to_string) <> "worker" ||
+             Yojson.Safe.Util.(child |> member "parallel") <> `Null then
+            failwith "Pi simplified chain included a reviewer";
+          if Yojson.Safe.Util.member "cwd" child <> Yojson.Safe.Util.member "cwd" first then
+            failwith "Pi writers did not share their worktree") chain;
+      require_contains "Pi final role" (Yojson.Safe.to_string final) "Simplification";
+      require_contains "Pi implementation handoff" (Yojson.Safe.to_string final)
+        "{outputs.implementation}";
+      let attempt = Yojson.Safe.Util.(dispatch |> member "completion" |> member "attempt_id" |> to_string) in
+      let final_output = Yojson.Safe.Util.(final |> member "output" |> to_string) in
+      Shell.write_file final_output "Simplification complete; affected checks passed.\n";
+      let finished = ok [ "headless"; "finish"; "simple-pi"; "--attempt"; attempt;
+        "--outcome"; "success" ] |> Yojson.Safe.from_string in
+      let assert_handoff result =
+        let path = Yojson.Safe.Util.(result |> member "handoff" |> to_string) in
+        let handoff = Yojson.Safe.from_file path in
+        if Yojson.Safe.Util.(handoff |> member "review" |> member "summary") <> `Null then
+          failwith "simplified handoff claimed independent reviews";
+        require_contains "simplifier validation reporting" (read_file path) "final simplifier handoff"
+      in
+      assert_handoff finished;
+      let codex = Filename.concat root "fake-bin/codex" in
+      Shell.write_file codex ({|#!/bin/sh
+set -eu
+output= worktree= sandbox=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --output-last-message) output=$2; shift 2 ;;
+    -C) worktree=$2; shift 2 ;;
+    --sandbox) sandbox=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+test "$sandbox" = workspace-write
+prompt=$(cat)
+case "$output" in
+  */implementation.md)
+    phase=implementation
+    printf 'implemented\n' > "$worktree/feature.txt"
+    printf 'IMPLEMENTATION HANDOFF TOKEN\n' > "$output"
+    ;;
+  */final.md)
+    phase=simplifier
+    test "$(cat "$worktree/feature.txt")" = implemented
+    case "$prompt" in *'IMPLEMENTATION HANDOFF TOKEN'*) ;; *) exit 81 ;; esac
+    case "$prompt" in *'can you radically simplify this?'*) ;; *) exit 82 ;; esac
+    case "$prompt" in *'Simplified feature requirements'*) ;; *) exit 83 ;; esac
+    case "$prompt" in *'CHANGED FINAL WRITER'*) exit 84 ;; esac
+    if [ "${MONTY_TEST_SIMPLIFIER_FAIL:-}" = 1 ]; then exit 73; fi
+    printf 'simplified\n' > "$worktree/feature.txt"
+    printf 'SIMPLIFIER FINAL HANDOFF: removed duplication; affected checks passed.\n' > "$output"
+    ;;
+  *) exit 85 ;;
+esac
+printf '%s %s\n' "$phase" "$worktree" >> |} ^ Shell.quote log ^ "\n");
+      Shell.chmod_executable codex;
+      ignore (ok [ "settings"; "set"; "harness"; "codex" ]);
+      let result = ok [ "headless"; "run"; "simple-codex" ] |> Yojson.Safe.from_string in
+      assert_handoff result;
+      let artifacts = Yojson.Safe.Util.(result |> member "artifact_dir" |> to_string) in
+      let worktree = Yojson.Safe.Util.(Yojson.Safe.from_file (job_file "simple-codex")
+        |> member "workspaces" |> index 0 |> member "worktree" |> to_string) in
+      require_contains "sequential writers in same worktree" (read_file log)
+        ("implementation " ^ worktree ^ "\nsimplifier " ^ worktree ^ "\n");
+      if count_lines_containing log "implementation " <> 1 ||
+         count_lines_containing log "simplifier " <> 1 then
+        failwith "simplified Codex did not run exactly two phases";
+      if read_file (Filename.concat worktree "feature.txt") <> "simplified\n" then
+        failwith "simplifier did not edit implementation";
+      if Sys.file_exists (Filename.concat artifacts "reviews") then
+        failwith "simplified run created reviewer artifacts";
+      List.iter (fun path ->
+          if not (Sys.file_exists (Filename.concat artifacts path)) then
+            failwith ("missing simplifier artifact " ^ path))
+        [ "prompts/simplifier.md"; "events/simplifier.jsonl"; "logs/simplifier.log" ];
+      require_contains "final handoff captured in durable memory"
+        (read_file (Filename.concat (worker_dir "simple-codex") "memory.md"))
+        "SIMPLIFIER FINAL HANDOFF";
+      let failed_env = replace_env env [ "MONTY_TEST_SIMPLIFIER_FAIL", "1" ] in
+      let failed = cli ~env:failed_env [ "headless"; "run"; "simple-fail" ] in
+      require_code 1 failed;
+      require_contains "failure role" failed.stderr "simplifier phase failed";
+      if job_status (job_file "simple-fail") <> "launch-requested" then
+        failwith "simplifier failure did not retain claimed worker";
+      let failure_dir = Filename.concat home ".monty/handoffs/simplified/simple-fail" in
+      let failure_file = Sys.readdir failure_dir |> Array.to_list
+        |> List.find (fun name -> Filename.check_suffix name ".json") in
+      let failure = Yojson.Safe.from_file (Filename.concat failure_dir failure_file) in
+      if Yojson.Safe.Util.(failure |> member "last_phase" |> to_string) <> "simplifier" then
+        failwith "durable failure did not name the simplifier";
+      let replay = cli [ "headless"; "run"; "simple-fail" ] in
+      require_code 1 replay;
+      require_contains "failure requires explicit resume" replay.stderr "headless resume";
+      let resumed = ok [ "headless"; "resume"; "simple-fail" ] |> Yojson.Safe.from_string in
+      assert_handoff resumed;
+      List.iter (fun id ->
+          if job_status (job_file id) <> "launch-requested" then
+            failwith "successful simplification closed a worker")
+        [ "simple-pi"; "simple-codex"; "simple-fail" ];
+      List.iter (fun task ->
+          if Yojson.Safe.Util.(task |> member "status" |> to_string) <> "open" then
+            failwith "successful simplification closed a task") (local_tasks_json home);
+      if not (Sys.file_exists worktree) then failwith "simplification removed worktree";
+      (* Exercise archive/reopen only in this isolated fixture. *)
+      ignore (ok [ "done"; "simple-pi" ]);
+      let archive = Filename.concat home ".monty/runs/simplified/archive/simple-pi" in
+      let assert_pinned directory = match Agent_profile.load_snapshot directory with
+        | Ok profile when profile = simplified -> ()
+        | _ -> failwith "archive/reopen changed the pinned simplifier" in
+      assert_pinned archive;
+      let osascript = Filename.concat root "fake-bin/osascript" in
+      Shell.write_file osascript "#!/bin/sh\nexit 0\n";
+      Shell.chmod_executable osascript;
+      ignore (ok [ "resume"; "--archived"; "simple-pi"; "--harness"; "pi" ]);
+      assert_pinned (worker_dir "simple-pi"))
 
 let test_codex_headless_uses_effective_settings_without_ghostty () =
   with_temp_root "headless-codex" (fun root ->
@@ -6518,7 +6713,7 @@ let test_live_codex_excludes_resume_and_completion () =
 
 let test_project_groups_crud_and_legacy_projects () =
   with_temp_root "project-groups" (fun root ->
-      let home, log, env = setup_environment root in
+      let home, log, env = setup_environment ~agent_profile:None root in
       let cli args = run ~root ~env 4000 ("projects" :: args) in
       let ok args = let result = cli args in require_code 0 result; result.stdout in
       ignore (ok [ "list" ]);
@@ -6942,6 +7137,8 @@ let () =
       test_legacy_multi_workspace_branches );
     ( "cli_headless_prepare_begin_and_resume",
       test_headless_prepare_begin_and_resume );
+    ( "cli_simplified_default_and_headless_writers",
+      test_simplified_default_and_headless_writers );
     ( "cli_agent_profiles_selection_snapshot_and_solo",
       test_agent_profiles_selection_snapshot_and_solo );
     ( "cli_codex_headless_uses_effective_settings_without_ghostty",

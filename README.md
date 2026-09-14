@@ -180,7 +180,7 @@ Example manifest:
       "context": ".monty/runs/run-1/issue-123.md",
       "worker_dir": ".monty/runs/run-1/workers/issue-123",
       "task_key": "local:local-001",
-      "agent_profile": "reviewed"
+      "agent_profile": "simplified"
     }
   ]
 }
@@ -250,23 +250,26 @@ Use the printed `monty resume <worker-id>` command when you intentionally want a
 
 ## Agent profiles
 
-Agent profiles keep interactive and headless role instructions together with a deliberately limited execution shape: one implementer, zero or more parallel reviewers, and an optional fixer. Monty ships two profiles under `agent-profiles/`:
+Agent profiles keep interactive and headless role instructions together with a deliberately limited execution shape: one implementer, zero or more parallel reviewers, and an optional final writer (simplifier or fixer). Monty ships three profiles under `agent-profiles/`:
 
-- `reviewed` is the default and preserves the existing implementer, correctness reviewer, quality reviewer, and fixer behavior.
+- `simplified` is the default for new workers: one implementer followed by a separate editing simplifier in the same workspaces. The simplifier answers "can you radically simplify this?", applies useful simplifications, preserves required behavior and safeguards, reruns affected checks, and produces the final handoff. Interactive Pi/Codex instructions arrange the same separate editing agent.
+- `reviewed` preserves the existing implementer, correctness reviewer, quality reviewer, and fixer behavior.
 - `solo` runs one implementer with self-validation and no reviewer or fixer phases.
 
 Personal profiles live under `.monty/agent-profiles/`. Duplicate IDs across bundled and personal profiles are rejected.
 
 ```sh
 monty agent-profiles list
-monty agent-profiles show reviewed
+monty agent-profiles show simplified
 monty settings get agent-profile
 monty settings set agent-profile solo
 ```
 
-Use `--agent-profile NAME` for one launch or headless preparation. A manifest job's optional `agent_profile` wins over that CLI option, followed by the persisted setting and the built-in `reviewed` default. Dry-run output shows the resolved profile and stage summary for every job.
+Use `--agent-profile NAME` for one launch or headless preparation. A manifest job's optional `agent_profile` wins over that CLI option, followed by the persisted setting and the built-in `simplified` default. Dry-run output shows the resolved profile and stage summary for every job.
 
-Monty fully validates and snapshots the expanded profile into durable worker memory before state is installed. Resume always uses that pinned snapshot, so later setting or profile-file changes affect only new workers. Legacy workers without profile metadata retain `reviewed` behavior.
+Monty fully validates and snapshots the expanded profile into durable worker memory before state is installed. Resume always uses that pinned snapshot, so later setting or profile-file changes affect only new workers. Legacy workers and attempts without profile metadata retain `reviewed` behavior. Creating a tracking record alone does not select or execute a profile; selection happens at launch/preparation.
+
+The existing `headless.fix` instruction slot is the optional final editing pass; it can run without reviewers. Optional `headless.fix_role` is `fixer` (the historical fallback) or `simplifier`, and is snapshotted along with all role instructions. A simplifier requires a final editing pass.
 
 ## Headless worker chains
 
@@ -301,8 +304,8 @@ monty headless run-many \
 ```
 
 `run-many` completes a full read-only batch preflight before starting any worker, then runs the independent worker chains concurrently.
-The number of non-interactive `codex exec` processes comes from the pinned profile. The default `reviewed` profile uses four: one implementer, two parallel reviewers, and one fixer; `solo` uses one.
-With Codex YOLO disabled, implementer and optional fixer processes use `workspace-write`, while reviewers use `read-only`.
+The number of non-interactive `codex exec` processes comes from the pinned profile. The default `simplified` profile uses two sequential processes: one implementer and one simplifier. Explicit `reviewed` uses four: one implementer, two parallel reviewers, and one fixer; `solo` uses one.
+With Codex YOLO disabled, implementer and optional final writer processes use `workspace-write`, while reviewers use `read-only`.
 `monty settings set codex-yolo true` applies the configured unrestricted Codex mode to every phase and must be treated as a high-risk choice.
 
 Codex progress, JSONL events, prompts, and final phase messages are kept under the worker's durable `artifacts/headless/<attempt-id>/` directory.
@@ -328,7 +331,7 @@ The envelope also includes a versioned completion contract.
 After the asynchronous callback, run the exact `success_command`, or fill the concrete phase and message into the `failure_command`.
 `monty headless finish` normalizes Pi's callback into the same durable handoff and inbox used by Codex and interactive workers.
 
-Each Pi or Codex chain starts in its first supplied Monty worktree and can inspect every declared workspace. The default `reviewed` profile runs:
+Each Pi or Codex chain starts in its first supplied Monty worktree and can inspect every declared workspace. The default `simplified` profile runs one implementer followed by one simplifier. Both have write access, only one writes at a time, and the simplifier receives the task requirements and implementation handoff. The explicit `reviewed` profile runs:
 
 1. One fresh implementer changes the worktree and runs focused validation.
 2. Two mutually isolated fresh reviewers inspect the same worktree concurrently and write only their separate reports outside it.
@@ -823,7 +826,7 @@ Agent-profile selection uses this precedence:
 1. The manifest job's `agent_profile`
 2. `--agent-profile NAME`
 3. The persisted `agent-profile` setting
-4. The `reviewed` default
+4. The `simplified` default
 
 Settings mutations use Monty's state lock and atomic JSON replacement.
 

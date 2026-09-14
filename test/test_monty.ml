@@ -40,7 +40,8 @@ let reviewed_profile =
           { id = "quality";
             title = "Quality and tests review";
             instructions = "Review quality and tests." } ];
-      fix = Some "Verify findings and fix valid issues." }
+      fix = Some "Verify findings and fix valid issues.";
+      fix_role = Fixer }
 
 let install_profile home (profile : Agent_profile.t) =
   let directory = Filename.concat (Filename.concat home "agent-profiles") profile.id in
@@ -67,6 +68,7 @@ let install_profile home (profile : Agent_profile.t) =
             [ ("implementation",
                instruction "implementation.md" profile.implementation);
               ("reviews", `List reviews);
+              ("fix_role", `String (Agent_profile.fix_role_name profile.fix_role));
               ( "fix",
                 match profile.fix with
                 | None -> `Null
@@ -257,6 +259,20 @@ let test_agent_profile_validation () =
   assert_bool "bundled solo profile"
     (List.exists
        (fun (profile : Agent_profile.t) -> profile.id = "solo") bundled);
+  let simplified = must (Agent_profile.find ~home:bundled_home "simplified") in
+  assert_equal "new worker default" "simplified" Agent_profile.default_id;
+  assert_equal "simplified stages" "implementation -> simplification"
+    (Agent_profile.stage_summary simplified);
+  assert_bool "simplifier role" (simplified.fix_role = Agent_profile.Simplifier);
+  assert_contains "separate interactive writer" simplified.interactive
+    "one separate simplifier";
+  assert_contains "simplifier mandate" (Option.get simplified.fix)
+    "can you radically simplify this?";
+  let snapshot =
+    must (Agent_profile.parse ~expected_schema:Agent_profile.snapshot_schema
+      ~instructions:(fun value -> Ok value) (Agent_profile.to_snapshot_json simplified))
+  in
+  assert_bool "snapshot keeps simplifier role and instructions" (snapshot = simplified);
   let valid = temp_root "profiles-valid" in
   install_profile valid reviewed_profile;
   let profiles = must (Agent_profile.discover ~home:valid) in
@@ -299,11 +315,25 @@ let test_agent_profile_validation () =
   install_profile duplicate_reviewer duplicate_reviews;
   expect_error "duplicate reviewer" "duplicate reviewer ids"
     (Agent_profile.discover ~home:duplicate_reviewer);
-  let invalid_stages = temp_root "profiles-stages" in
-  install_profile invalid_stages
+  let final_writer = temp_root "profiles-stages" in
+  install_profile final_writer
     { reviewed_profile with reviews = []; fix = Some "Fix without reviews." };
-  expect_error "invalid profile stages" "fix stage without reviewers"
-    (Agent_profile.discover ~home:invalid_stages)
+  assert_equal "final writer without reviews" "implementation -> fix"
+    (must (Agent_profile.find ~home:final_writer "reviewed") |> Agent_profile.stage_summary);
+  let invalid_role = temp_root "profiles-role" in
+  install_profile invalid_role { simplified with fix = None };
+  expect_error "simplifier requires final stage" "simplifier requires a fix stage"
+    (Agent_profile.discover ~home:invalid_role);
+  let legacy_json = Agent_profile.to_snapshot_json reviewed_profile in
+  let legacy_json = match legacy_json with
+    | `Assoc fields -> `Assoc (List.map (function
+        | "headless", `Assoc fields -> "headless", `Assoc (List.remove_assoc "fix_role" fields)
+        | field -> field) fields)
+    | _ -> assert false
+  in
+  let legacy = must (Agent_profile.parse ~expected_schema:Agent_profile.snapshot_schema
+      ~instructions:(fun value -> Ok value) legacy_json) in
+  assert_bool "legacy snapshot retains fixer" (legacy = reviewed_profile)
 
 let setup_worker ?(last_known_worktree = None) root =
   let home = Filename.concat root "home" in
@@ -1380,6 +1410,30 @@ let test_headless_json_contract () =
   assert_child "headless quality review" "reviews/quality.md"
     (List.nth reviewers 1);
   assert_child "headless final" "final.md" fixer;
+  let bundled_home =
+    Option.value ~default:(Sys.getcwd ()) (Sys.getenv_opt "DUNE_SOURCEROOT") in
+  let simplified = must (Agent_profile.find ~home:bundled_home "simplified") in
+  let simplified_chain =
+    Headless.harness_arguments_json { dispatch with profile = simplified } "attempt-test"
+    |> Yojson.Safe.Util.member "chain" |> Yojson.Safe.Util.to_list in
+  assert_bool "simplified has exactly two phases" (List.length simplified_chain = 2);
+  List.iter (fun child ->
+      assert_equal "simplified writable worker" "worker"
+        Yojson.Safe.Util.(child |> member "agent" |> to_string);
+      assert_equal "simplified shared workspace" dispatch.worktree
+        Yojson.Safe.Util.(child |> member "cwd" |> to_string);
+      assert_bool "simplified has no review group"
+        Yojson.Safe.Util.(child |> member "parallel" = `Null)) simplified_chain;
+  let simplifier = List.nth simplified_chain 1 in
+  assert_equal "simplifier phase" "Simplification"
+    Yojson.Safe.Util.(simplifier |> member "phase" |> to_string);
+  assert_contains "simplifier receives implementation handoff"
+    Yojson.Safe.Util.(simplifier |> member "task" |> to_string) "{outputs.implementation}";
+  assert_child "simplifier final" "final.md" simplifier;
+  assert_bool "simplification claims no independent reviews"
+    (Headless.review_summary simplified = None);
+  assert_contains "simplifier validation summary"
+    (Headless.validation_summary simplified) "final simplifier handoff";
   let review_only_profile =
     Agent_profile.
       { id = "review-only";
@@ -1389,7 +1443,7 @@ let test_headless_json_contract () =
         reviews =
           [ { id = "edge"; title = "Edge review";
               instructions = "Inspect edge cases." } ];
-        fix = None }
+        fix = None; fix_role = Fixer }
   in
   let review_only =
     Headless.dispatch_json ~attempt_id:"attempt-review-only"
