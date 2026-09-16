@@ -11,6 +11,10 @@
    --docdir=%{doc}/ocaml
    -C
    CC=cc
+   ; SDK 27 exposes weak symbols unavailable on earlier macOS runtimes.
+   ; Keep the portable Unix fallbacks when building OCaml 5.2 on macOS.
+   (when (= %{os} macos) ac_cv_func_pipe2=no)
+   (when (= %{os} macos) ac_cv_func_dup3=no)
    "ASPP=cc -c")
   (run %{make} -j%{jobs})))
 

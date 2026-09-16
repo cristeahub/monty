@@ -41,6 +41,7 @@ case "${1:-}" in
     release=$(cat binary-release.txt)
     cat > _build/default/bin/main.exe <<INNER
 #!/bin/sh
+if [ '$release' = 'broken runtime' ] && [ "\${1:-}" = doctor ]; then exit 139; fi
 printf '%s\n' '$release'
 INNER
     chmod +x _build/default/bin/main.exe
@@ -201,6 +202,20 @@ if [ "$matching_inode" != "$state_inode" ]; then
 fi
 assert_contents 'updated control room' "$installed_home/control-room.txt" 'release two'
 assert_release 'binary two'
+
+# A binary may start successfully but crash when its Unix runtime is used.
+printf 'broken runtime\n' > "$repo/binary-release.txt"
+printf 'must not install\n' > "$repo/control-room.txt"
+if run_install; then fail 'installer accepted a broken compiler runtime'; fi
+assert_log_contains 'built binary failed its runtime check'
+assert_release 'binary two'
+assert_contents 'runtime failure preserves source' "$installed_home/control-room.txt" 'release two'
+assert_contents 'runtime failure preserves tasks' "$state_dir/tasks.local.json" \
+  '{"tasks":[{"id":"keep-me"}]}'
+assert_contents 'runtime failure preserves memory' "$state_dir/memory.md" 'durable memory'
+assert_absent 'runtime failure leaves no install lock' "$prefix/.monty-install-lock"
+printf 'binary two\n' > "$repo/binary-release.txt"
+printf 'release two\n' > "$repo/control-room.txt"
 
 # Hold source activation open while a real Monty process writes registry state.
 # Compatible upgrades must never move either the home or its .monty directory.

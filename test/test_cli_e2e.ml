@@ -155,7 +155,7 @@ type result = {
   argv : string array;
 }
 
-let spawn ?(program = executable) ?(stdin_path = "/dev/null") ~root ~env index args =
+let spawn ?(program = executable) ?(stdin_path = "/dev/null") ?(new_session = false) ~root ~env index args =
   let stdout_path = Filename.concat root (Printf.sprintf "stdout-%d" index) in
   let stderr_path = Filename.concat root (Printf.sprintf "stderr-%d" index) in
   let stdout_fd =
@@ -166,7 +166,18 @@ let spawn ?(program = executable) ?(stdin_path = "/dev/null") ~root ~env index a
   in
   let stdin_fd = Unix.openfile stdin_path [ Unix.O_RDONLY ] 0 in
   let argv = Array.of_list (program :: args) in
-  let pid = Unix.create_process_env program argv env stdin_fd stdout_fd stderr_fd in
+  let pid =
+    if not new_session then Unix.create_process_env program argv env stdin_fd stdout_fd stderr_fd
+    else match Unix.fork () with
+      | 0 ->
+          ignore (Unix.setsid ());
+          Unix.dup2 stdin_fd Unix.stdin;
+          Unix.dup2 stdout_fd Unix.stdout;
+          Unix.dup2 stderr_fd Unix.stderr;
+          Unix.close stdin_fd; Unix.close stdout_fd; Unix.close stderr_fd;
+          Unix.execve program argv env
+      | pid -> pid
+  in
   Unix.close stdin_fd;
   Unix.close stdout_fd;
   Unix.close stderr_fd;
@@ -2982,10 +2993,10 @@ let test_codex_launch_preserves_mantle_environment () =
       require_code 0
         (cli work ([ "headless"; "prepare-many"; "--manifest"; manifest ] @ headless_options));
       require_code 0
-        (cli private_profile ([ "headless"; "run"; "headless-profile" ] @ headless_options));
+        (cli private_profile ([ "headless"; "run"; "--wait"; "headless-profile" ] @ headless_options));
       check_received private_profile (Some "private");
       require_code 0
-        (cli [] ([ "headless"; "resume"; "headless-profile" ] @ headless_options));
+        (cli [] ([ "headless"; "resume"; "--wait"; "headless-profile" ] @ headless_options));
       check_received [] None)
 
 let test_retry_uses_recorded_script_and_absolute_commands () =
@@ -3782,7 +3793,7 @@ let test_legacy_multi_workspace_branches () =
       assert_identity job_file;
       require_code 0 (cli [ "headless"; "begin"; "legacy"; "--harness"; "pi" ]);
       assert_identity job_file;
-      require_code 0 (cli [ "headless"; "resume"; "legacy"; "--harness"; "pi" ]);
+      require_code 0 (cli [ "headless"; "begin"; "--resume"; "legacy"; "--harness"; "pi" ]);
       require_code 0 (cli [ "resume"; "legacy"; "--terminal"; "ghostty" ]);
       require_code 0 (cli [ "tasks"; "sync" ]);
       assert_identity job_file;
@@ -4275,7 +4286,7 @@ let test_headless_prepare_begin_and_resume () =
       then failwith "headless prepare invoked Pi or Ghostty";
       let premature_resume =
         run ~root ~env 1952
-          [ "headless"; "resume"; "headless-two"; "--home"; home ]
+          [ "headless"; "begin"; "--resume"; "headless-two"; "--home"; home ]
       in
       if premature_resume.code = 0 then
         failwith "headless resume accepted a worker without a predecessor chain";
@@ -4373,7 +4384,7 @@ let test_headless_prepare_begin_and_resume () =
         "headless resume";
       let resumed =
         run ~root ~env 1956
-          [ "headless"; "resume"; "headless-one"; "--home"; home ]
+          [ "headless"; "begin"; "--resume"; "headless-one"; "--home"; home ]
       in
       require_code 0 resumed;
       let first_attempt =
@@ -4456,7 +4467,7 @@ let test_headless_prepare_begin_and_resume () =
       then failwith "Pi finished-run notices were not durably recoverable";
       let missed_callback =
         run ~root ~env 19564
-          [ "headless"; "resume"; "headless-one"; "--home"; home ]
+          [ "headless"; "begin"; "--resume"; "headless-one"; "--home"; home ]
       in
       require_code 0 missed_callback;
       let missed_attempt =
@@ -4528,7 +4539,7 @@ let test_headless_prepare_begin_and_resume () =
           |> member "pending" |> to_list |> List.length) <> 2 then
         failwith "late callback reopened an acknowledged notice";
       let failed_attempt = run ~root ~env 19569
-          [ "headless"; "resume"; "headless-one"; "--home"; home ] in
+          [ "headless"; "begin"; "--resume"; "headless-one"; "--home"; home ] in
       require_code 0 failed_attempt;
       let attempt_id = Yojson.Safe.Util.(Yojson.Safe.from_string failed_attempt.stdout
           |> member "completion" |> member "attempt_id" |> to_string) in
@@ -4764,7 +4775,7 @@ let test_agent_profiles_selection_snapshot_and_solo () =
       let before = count_lines_containing log "/codex exec" in
       let ran =
         run ~root ~env 1982
-          [ "headless"; "run"; "solo-codex"; "--home"; home ]
+          [ "headless"; "run"; "--wait"; "solo-codex"; "--home"; home ]
       in
       require_code 0 ran;
       if count_lines_containing log "/codex exec" - before <> 1 then
@@ -4897,7 +4908,7 @@ esac
 printf '%s %s\n' "$phase" "$worktree" >> |} ^ Shell.quote log ^ "\n");
       Shell.chmod_executable codex;
       ignore (ok [ "settings"; "set"; "harness"; "codex" ]);
-      let result = ok [ "headless"; "run"; "simple-codex" ] |> Yojson.Safe.from_string in
+      let result = ok [ "headless"; "run"; "--wait"; "simple-codex" ] |> Yojson.Safe.from_string in
       assert_handoff result;
       let artifacts = Yojson.Safe.Util.(result |> member "artifact_dir" |> to_string) in
       let worktree = Yojson.Safe.Util.(Yojson.Safe.from_file (job_file "simple-codex")
@@ -4919,7 +4930,7 @@ printf '%s %s\n' "$phase" "$worktree" >> |} ^ Shell.quote log ^ "\n");
         (read_file (Filename.concat (worker_dir "simple-codex") "memory.md"))
         "SIMPLIFIER FINAL HANDOFF";
       let failed_env = replace_env env [ "MONTY_TEST_SIMPLIFIER_FAIL", "1" ] in
-      let failed = cli ~env:failed_env [ "headless"; "run"; "simple-fail" ] in
+      let failed = cli ~env:failed_env [ "headless"; "run"; "--wait"; "simple-fail" ] in
       require_code 1 failed;
       require_contains "failure role" failed.stderr "simplifier phase failed";
       if job_status (job_file "simple-fail") <> "launch-requested" then
@@ -4930,10 +4941,10 @@ printf '%s %s\n' "$phase" "$worktree" >> |} ^ Shell.quote log ^ "\n");
       let failure = Yojson.Safe.from_file (Filename.concat failure_dir failure_file) in
       if Yojson.Safe.Util.(failure |> member "last_phase" |> to_string) <> "simplifier" then
         failwith "durable failure did not name the simplifier";
-      let replay = cli [ "headless"; "run"; "simple-fail" ] in
+      let replay = cli [ "headless"; "run"; "--wait"; "simple-fail" ] in
       require_code 1 replay;
       require_contains "failure requires explicit resume" replay.stderr "headless resume";
-      let resumed = ok [ "headless"; "resume"; "simple-fail" ] |> Yojson.Safe.from_string in
+      let resumed = ok [ "headless"; "resume"; "--wait"; "simple-fail" ] |> Yojson.Safe.from_string in
       assert_handoff resumed;
       List.iter (fun id ->
           if job_status (job_file id) <> "launch-requested" then
@@ -4955,6 +4966,210 @@ printf '%s %s\n' "$phase" "$worktree" >> |} ^ Shell.quote log ^ "\n");
       Shell.chmod_executable osascript;
       ignore (ok [ "resume"; "--archived"; "simple-pi"; "--harness"; "pi" ]);
       assert_pinned (worker_dir "simple-pi"))
+
+let test_standalone_background_harnesses () =
+  with_temp_root "background-harnesses" (fun root ->
+      let home, log, env = setup_environment root in
+      let bundled = Option.value ~default:(Sys.getcwd ()) (Sys.getenv_opt "DUNE_SOURCEROOT") in
+      let simplified = match Agent_profile.find ~home:bundled "simplified" with
+        | Ok profile -> profile | Error message -> failwith message in
+      install_profile home simplified;
+      let env = replace_env env
+          [ "MONTY_JOB_ID", "parent-must-not-leak";
+            "MONTY_WORKSPACE_3", "parent-workspace-must-not-leak" ] in
+      let repos = List.map (Filename.concat root) [ "backend"; "frontend" ] in
+      List.iter (fun repo -> init_git_repo repo; add_project ~root ~home ~env repo) repos;
+      install_repo_scoped_wt ~root ~log;
+      let context = Filename.concat root "context.md" in
+      Shell.write_file context "# Background feature requirements\n";
+      let manifest = Filename.concat home ".monty/runs/background/jobs.json" in
+      let worker_dir id = Filename.concat home (".monty/runs/background/workers/" ^ id) in
+      let job_file id = Filename.concat (worker_dir id) "job.json" in
+      let jobs = [ "pi-simple", "simplified"; "pi-review", "reviewed";
+                   "pi-solo", "solo"; "codex-solo", "solo";
+                   "pi-error", "solo"; "missing", "solo" ] in
+      let job (id, profile) = `Assoc
+          [ "id", `String id; "title", `String id; "context", `String context;
+            "agent_profile", `String profile;
+            "workspaces", `List (List.map (fun repo -> `Assoc
+                [ "repo", `String repo; "branch", `String ("cto/" ^ id) ]) repos) ] in
+      write_manifest manifest (List.map job jobs);
+      let release = Filename.concat root "release" in
+      let fake =
+        "#!/bin/sh\nset -eu\nroot=" ^ Shell.quote root ^ "\n" ^ {|output=
+tools=
+args=$*
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --output-last-message) output=$2; shift 2 ;;
+    --tools) tools=$2; shift 2 ;;
+    --test-argument) test "$2" = 'two words'; shift 2 ;;
+    -C) cd "$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+prompt=$(cat)
+case "$prompt" in *'Background feature requirements'*) ;; *) exit 81 ;; esac
+test "$MONTY_JOB_ID" != parent-must-not-leak
+test "$MONTY_JOB_WORKTREE" = "$(pwd -P)"
+test -f "$MONTY_JOB_FILE"
+test -d "$MONTY_WORKSPACE_2"
+test -z "${MONTY_WORKSPACE_3:-}"
+case "$prompt" in
+  *'Independently review Monty worker'*)
+    case "$prompt" in *'Review correctness.'*) phase=correctness ;; *) phase=quality ;; esac
+    test "$tools" = read,grep,find,ls
+    case "$prompt" in *'HANDOFF-correctness'*|*'HANDOFF-quality'*) exit 82 ;; esac
+    touch "$root/$MONTY_JOB_ID-$phase"
+    count=0
+    while [ ! -f "$root/$MONTY_JOB_ID-correctness" ] || [ ! -f "$root/$MONTY_JOB_ID-quality" ]; do
+      count=$((count + 1)); [ "$count" -lt 500 ] || exit 83
+      sleep 0.01
+    done
+    ;;
+  *'Finalize Monty worker'*)
+    phase=final
+    case "$prompt" in *'HANDOFF-implementation'*) ;; *) exit 84 ;; esac
+    if [ "$MONTY_JOB_ID" = pi-review ]; then
+      case "$prompt" in *'HANDOFF-correctness'*'HANDOFF-quality'*) ;; *) exit 85 ;; esac
+    fi
+    test -f "$MONTY_WORKSPACE_2/feature.txt"
+    printf 'simplified\n' > "$MONTY_WORKSPACE_2/feature.txt"
+    ;;
+  *)
+    phase=implementation
+    touch "$root/$MONTY_JOB_ID-started"
+    if [ "${BLOCK_RUN:-}" = yes ]; then
+      count=0
+      while [ ! -f "$root/release" ]; do
+        count=$((count + 1)); [ "$count" -lt 1000 ] || exit 86
+        sleep 0.01
+      done
+    fi
+    printf 'implemented\n' > "$MONTY_WORKSPACE_2/feature.txt"
+    ;;
+esac
+printf '%s %s %s\n' "$MONTY_JOB_ID" "$phase" "$args" >> "$root/phases.log"
+if [ -n "$output" ]; then
+  printf 'HANDOFF-%s\n' "$phase" > "$output"
+  printf '%s\n' '{"type":"turn.completed"}'
+else
+  case "$args" in *'--print --mode json --no-session --tools '*) ;; *) exit 87 ;; esac
+  if [ "$phase" != correctness ] && [ "$phase" != quality ]; then
+    test "$tools" = read,bash,edit,write,grep,find,ls
+  fi
+  reason=stop
+  if [ "${FAIL_PI:-}" = yes ]; then reason=error; fi
+  printf '{"type":"message_end","message":{"role":"assistant","stopReason":"%s","content":[{"type":"text","text":"HANDOFF-%s"}]}}\n' "$reason" "$phase"
+  printf '%s\n' '{"type":"agent_end","messages":[]}'
+fi
+|}
+      in
+      List.iter (fun harness ->
+          let path = Filename.concat root ("fake-bin/" ^ harness) in
+          Shell.write_file path fake; Shell.chmod_executable path) [ "pi"; "codex" ];
+      let cli ?(env = env) args = run ~root ~env 19840 (args @ [ "--home"; home ]) in
+      let ok ?env args = let result = cli ?env args in require_code 0 result;
+        Yojson.Safe.from_string result.stdout in
+      ignore (ok [ "headless"; "prepare-many"; "--manifest"; manifest; "--harness"; "pi" ]);
+      let missing_before = read_file (job_file "missing") in
+      require_code 1 (cli [ "headless"; "run"; "missing"; "--harness"; "pi";
+                           "--pi-command"; "missing-pi-executable" ]);
+      require_code 1 (cli [ "headless"; "run"; "missing"; "--harness"; "pi";
+                           "--fork"; "parent-session" ]);
+      if read_file (job_file "missing") <> missing_before
+         || Sys.file_exists (Filename.concat (worker_dir "missing") "artifacts/headless") then
+        failwith "missing Pi executable mutated the prepared worker";
+      let wait_until label predicate =
+        let rec loop remaining =
+          if predicate () then ()
+          else if remaining = 0 then failwith ("timed out: " ^ label)
+          else (Unix.sleepf 0.02; loop (remaining - 1)) in
+        loop 750
+      in
+      let started = ref [] in
+      let track json =
+        if json_string "schema" json <> Headless.started_schema
+           || json_string "run_status" json <> "started" then
+          failwith "background launch did not return a startup receipt";
+        started := json :: !started;
+        json
+      in
+      let finished json =
+        let log = Filename.concat (json_string "artifact_dir" json) "logs/supervisor.log" in
+        string_contains (read_file log) "\"run_status\": \"finished\""
+        || string_contains (read_file log) "Run handoff:"
+      in
+      Fun.protect ~finally:(fun () ->
+          Shell.write_file release "release\n";
+          List.iter (fun json -> wait_until "background cleanup" (fun () -> finished json)) !started)
+        (fun () ->
+          List.iteri (fun index (harness, id) ->
+              let blocked = replace_env env [ "BLOCK_RUN", "yes" ] in
+              let program = Filename.concat root "launch" in
+              Shell.write_file program ("#!/bin/sh\ncd " ^ Shell.quote root
+                ^ "\nexec " ^ Shell.quote executable ^ " \"$@\"\n");
+              Shell.chmod_executable program;
+              let caller = spawn ~program ~new_session:true ~root ~env:blocked (19841 + index)
+                  [ "headless"; "run"; id; "--harness"; harness; "--home"; "home";
+                    "--" ^ harness ^ "-command";
+                    "'./fake-bin/" ^ harness ^ "' --test-argument 'two words'";
+                    "--wt-command"; "./fake-bin/wt" ] in
+              let result = await caller in
+              require_code 0 result;
+              let receipt = track (Yojson.Safe.from_string result.stdout) in
+              wait_for_path (Filename.concat root (id ^ "-started"));
+              if Sys.file_exists (json_string "handoff" receipt) then
+                failwith "background command waited for the run result";
+              (* Simulate closing the caller's terminal/session. *)
+              (try Unix.kill (-caller.pid) Sys.sighup with
+               | Unix.Unix_error (Unix.ESRCH, _, _) -> ());
+              let busy = cli [ "headless"; "resume"; id; "--harness"; harness ] in
+              require_code 1 busy;
+              require_contains "detached worker lock" busy.stderr "busy";
+              let busy_done = cli [ "done"; id; "--force" ] in
+              require_code 1 busy_done;
+              require_contains "detached completion guard" busy_done.stderr "busy")
+            [ "pi", "pi-simple"; "codex", "codex-solo" ];
+          (* A mixed batch fails full preflight before claiming any member. *)
+          write_manifest manifest (List.map job [ "pi-solo", "solo"; "pi-simple", "simplified" ]);
+          require_code 1 (cli [ "headless"; "run-many"; "--manifest"; manifest; "--harness"; "pi" ]);
+          if job_status (job_file "pi-solo") <> "prepared" then failwith "batch preflight partially claimed workers";
+          write_manifest manifest (List.map job [ "pi-solo", "solo"; "pi-review", "reviewed" ]);
+          let batch = ok [ "headless"; "run-many"; "--manifest"; manifest; "--harness"; "pi" ] in
+          Yojson.Safe.Util.(batch |> member "results" |> to_list)
+          |> List.iter (fun result -> ignore (track (Yojson.Safe.Util.member "result" result)));
+          let error_env = replace_env env [ "FAIL_PI", "yes" ] in
+          let error = track (ok ~env:error_env [ "headless"; "run"; "pi-error"; "--harness"; "pi" ]) in
+          Shell.write_file release "release\n";
+          List.iter (fun json -> wait_until "durable run result" (fun () -> finished json)) !started;
+          List.iter (fun receipt ->
+              let handoff = Yojson.Safe.from_file (json_string "handoff" receipt) in
+              let id = json_string "worker_id" receipt in
+              let expected = if id = "pi-error" then "failed" else "ready-for-review" in
+              if json_string "outcome" handoff <> expected then failwith "wrong background outcome";
+              if job_status (job_file id) <> "launch-requested" then failwith "background run closed worker";
+              let state = Yojson.Safe.from_file (job_file id) in
+              List.iter (fun key -> if Yojson.Safe.Util.member key state <> `Null then
+                    failwith ("runtime state persisted in job.json: " ^ key))
+                [ "pid"; "backend"; "runtime_status"; "codex_session_id"; "pi_run_id" ];
+              if Sys.file_exists (Filename.concat (worker_dir id) "codex-session-id") then
+                failwith "headless run claimed an interactive session") !started;
+          require_contains "JSON exit-zero errors become failures"
+            (read_file (json_string "handoff" error)) "stopReason";
+          ignore (ok [ "headless"; "resume"; "pi-error"; "--harness"; "pi"; "--wait" ]);
+          require_code 1 (cli [ "headless"; "run"; "pi-error"; "--harness"; "pi" ]);
+          let phase_log = Filename.concat root "phases.log" in
+          List.iter (fun (id, count) ->
+              if count_lines_containing phase_log (id ^ " ") <> count then
+                failwith ("wrong profile phase count for " ^ id))
+            [ "pi-simple", 2; "pi-review", 4; "pi-solo", 1; "codex-solo", 1 ];
+          let pending = ok [ "handoff"; "pending"; "--format"; "json" ] in
+          if Yojson.Safe.Util.(pending |> member "pending" |> to_list |> List.length) <> 6 then
+            failwith "standalone handoffs were not durably discoverable";
+          List.iter (fun task -> if json_string "status" task <> "open" then
+              failwith "headless run completed a local task") (local_tasks_json home);
+          if string_contains (read_file log) "osascript" then failwith "background run opened Ghostty"))
 
 let test_codex_headless_uses_effective_settings_without_ghostty () =
   with_temp_root "headless-codex" (fun root ->
@@ -5019,7 +5234,7 @@ let test_codex_headless_uses_effective_settings_without_ghostty () =
         failwith "rejected Pi begin claimed the Codex worker";
       let first_run =
         run ~root ~env 1964
-          [ "headless"; "run"; "codex-one"; "--home"; home ]
+          [ "headless"; "run"; "--wait"; "codex-one"; "--home"; home ]
       in
       require_code 0 first_run;
       let first_json = Yojson.Safe.from_string first_run.stdout in
@@ -5120,7 +5335,7 @@ let test_codex_headless_uses_effective_settings_without_ghostty () =
         failwith "interactive resume did not write its recorded Pi launch script";
       let duplicate_run =
         run ~root ~env 1965
-          [ "headless"; "run"; "codex-one"; "--home"; home ]
+          [ "headless"; "run"; "--wait"; "codex-one"; "--home"; home ]
       in
       if duplicate_run.code = 0 then
         failwith "Codex headless run replayed a launch-requested worker";
@@ -5144,7 +5359,7 @@ let test_codex_headless_uses_effective_settings_without_ghostty () =
       require_code 0 prepared_many;
       let many =
         run ~root ~env 1968
-          [ "headless"; "run-many"; "--manifest"; manifest_many;
+          [ "headless"; "run-many"; "--wait"; "--manifest"; manifest_many;
             "--home"; home ]
       in
       require_code 0 many;
@@ -5166,7 +5381,7 @@ let test_codex_headless_uses_effective_settings_without_ghostty () =
         [ "codex-two"; "codex-three" ];
       let successor =
         run ~root ~env 1969
-          [ "headless"; "resume"; "codex-one"; "--home"; home ]
+          [ "headless"; "resume"; "--wait"; "codex-one"; "--home"; home ]
       in
       require_code 0 successor;
       if
@@ -5195,7 +5410,7 @@ let test_codex_headless_uses_effective_settings_without_ghostty () =
       in
       let failed =
         run ~root ~env:failure_env 1971
-          [ "headless"; "run"; "codex-failure"; "--home"; home ]
+          [ "headless"; "run"; "--wait"; "codex-failure"; "--home"; home ]
       in
       if failed.code = 0 then failwith "failing Codex phase reported success";
       require_contains "Codex phase failure" failed.stderr
@@ -5227,7 +5442,7 @@ let test_codex_headless_uses_effective_settings_without_ghostty () =
       then failwith "failed Codex handoff omitted outcome, phase, or error";
       let recovered =
         run ~root ~env 1972
-          [ "headless"; "resume"; "codex-failure"; "--home"; home ]
+          [ "headless"; "resume"; "--wait"; "codex-failure"; "--home"; home ]
       in
       require_code 0 recovered;
       if count_lines_containing log "/codex exec" <> 21 then
@@ -6105,7 +6320,7 @@ let test_containerized_codex_worker_lifecycle () =
         run ~root
           ~env:(replace_env env [ ("MONTY_TEST_LEAK_AUTH", "true") ])
           60081
-          [ "headless"; "run"; "container-worker"; "--home"; home;
+          [ "headless"; "run"; "--wait"; "container-worker"; "--home"; home;
             "--codex-yolo" ]
       in
       if leaked.code = 0 then
@@ -6132,7 +6347,7 @@ let test_containerized_codex_worker_lifecycle () =
       let failed_collect =
         run ~root
           ~env:(replace_env env [ ("MONTY_FAKE_CONTAINER_FAIL_ONCE", "collect") ])
-          6009 [ "headless"; "resume"; "container-worker"; "--home"; home ]
+          6009 [ "headless"; "resume"; "--wait"; "container-worker"; "--home"; home ]
       in
       if failed_collect.code = 0 then
         failwith "interrupted report collection reported success";
@@ -6205,7 +6420,7 @@ let test_containerized_codex_worker_lifecycle () =
         run ~root
           ~env:(replace_env env [ ("MONTY_FAKE_CONTAINER_FAIL_ONCE", "auth") ])
           60122
-          [ "headless"; "resume"; "container-worker"; "--home"; home ]
+          [ "headless"; "resume"; "--wait"; "container-worker"; "--home"; home ]
       in
       if failed_auth.code = 0 then failwith "failed wake authentication reported success";
       if Sys.file_exists (Filename.concat container_dir "running") then
@@ -6214,7 +6429,7 @@ let test_containerized_codex_worker_lifecycle () =
       Shell.write_file credential_path "private\n";
       let guarded_changes =
         run ~root ~env 601221
-          [ "headless"; "resume"; "container-worker"; "--home"; home ]
+          [ "headless"; "resume"; "--wait"; "container-worker"; "--home"; home ]
       in
       require_code 0 guarded_changes;
       let guarded_handoff =
@@ -6246,7 +6461,7 @@ let test_containerized_codex_worker_lifecycle () =
       let resumed_child =
         spawn ~root
           ~env:(replace_env env [ ("MONTY_TEST_CODEX_BLOCK", block) ])
-          6013 [ "headless"; "resume"; "container-worker"; "--home"; home ]
+          6013 [ "headless"; "resume"; "--wait"; "container-worker"; "--home"; home ]
       in
       wait_for_path (block ^ ".started");
       let busy_done =
@@ -6604,7 +6819,7 @@ let test_live_codex_excludes_resume_and_completion () =
       require_code 0 (run ~root ~env 3000
           [ "headless"; "prepare-many"; "--manifest"; manifest; "--home"; home ]);
       let missing = run ~root ~env 30001
-          [ "headless"; "run"; "blocked"; "--home"; home;
+          [ "headless"; "run"; "--wait"; "blocked"; "--home"; home;
             "--codex-command"; "definitely-missing-codex" ] in
       require_code 1 missing;
       require_contains "Codex dependency preflight" missing.stderr "definitely-missing-codex";
@@ -6633,7 +6848,7 @@ let test_live_codex_excludes_resume_and_completion () =
       Shell.write_file codex ("#!/bin/sh\n" ^ block ^ original);
       let blocked_env = replace_env env [ ("BLOCK_CODEX", "yes") ] in
       let supervisor = spawn ~root ~env:blocked_env 3001
-          [ "headless"; "run"; "blocked"; "--home"; home ] in
+          [ "headless"; "run"; "--wait"; "blocked"; "--home"; home ] in
       let awaited = ref false in
       let wait_file path =
         let rec loop remaining =
@@ -6660,25 +6875,25 @@ let test_live_codex_excludes_resume_and_completion () =
               failwith "busy operation created an attempt";
             if not (Sys.file_exists worktree) then failwith "busy worker was deleted"
           in
-          rejected 3002 [ "headless"; "resume"; "blocked" ];
-          rejected 30021 [ "headless"; "resume"; "blocked"; "--harness"; "pi" ];
+          rejected 3002 [ "headless"; "resume"; "--wait"; "blocked" ];
+          rejected 30021 [ "headless"; "resume"; "--wait"; "blocked"; "--harness"; "pi" ];
           rejected 3003 [ "resume"; "blocked"; "--terminal"; "ghostty" ];
           rejected 3004 [ "done"; "blocked" ];
           rejected 3005 [ "done"; "blocked"; "--force" ];
           require_code 0 (run ~root ~env 3006
               [ "settings"; "set"; "branch-prefix"; "other"; "--home"; home ]);
           require_code 0 (run ~root ~env 3007
-              [ "headless"; "run"; "independent"; "--home"; home ]);
+              [ "headless"; "run"; "--wait"; "independent"; "--home"; home ]);
           Unix.kill supervisor.pid Sys.sigkill;
           ignore (await supervisor);
           awaited := true;
-          rejected 3008 [ "headless"; "resume"; "blocked" ];
+          rejected 3008 [ "headless"; "resume"; "--wait"; "blocked" ];
           rejected 3009 [ "done"; "blocked"; "--force" ];
           Shell.write_file release "release\n";
           wait_file finished;
           let rec resume remaining =
             let result = run ~root ~env 3010
-                [ "headless"; "resume"; "blocked"; "--home"; home ] in
+                [ "headless"; "resume"; "--wait"; "blocked"; "--home"; home ] in
             if result.code <> 0 && string_contains result.stderr "busy" && remaining > 0 then
               (Unix.sleepf 0.01; resume (remaining - 1))
             else require_code 0 result
@@ -7143,6 +7358,7 @@ let () =
       test_agent_profiles_selection_snapshot_and_solo );
     ( "cli_codex_headless_uses_effective_settings_without_ghostty",
       test_codex_headless_uses_effective_settings_without_ghostty );
+    ( "cli_standalone_background_harnesses", test_standalone_background_harnesses );
     ( "cli_run_handoff_publish_delivery_follow_up_and_lifecycle_race",
       test_run_handoff_publish_delivery_follow_up_and_lifecycle_race );
     ( "cli_settings_commands_and_effective_harness",

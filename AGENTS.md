@@ -149,11 +149,9 @@ Ghostty remains the default execution surface.
 Use the headless harness flow only when the user explicitly requests headless or Pi-subagent execution.
 Headless commands must resolve the effective harness through the normal CLI, environment, and persisted-settings precedence.
 When `codex` is persisted as the selected harness, do not add a redundant `--harness codex` flag.
-Monty does not provide a custom Pi extension; for Pi it emits complete JSON arguments for the harness's existing `subagent` tool.
-
-Before any mutating Pi headless command, call the harness `subagent` tool with `action: "list"` and confirm that the tool and required agents are available.
-If they are unavailable, stop without mutating Monty state.
-For Codex headless execution, Monty's preflight must confirm that the configured Codex command is available before state mutation.
+Monty runs standalone Pi or Codex processes and owns their background supervisor lifecycle.
+For both harnesses, preflight must confirm the configured executable is available before state mutation.
+No parent subagent tool is needed for standalone execution.
 Run headless dry-run first when checking a new batch or when the user asks for a preview:
 
 ```sh
@@ -167,16 +165,14 @@ monty headless prepare-many --manifest .monty/runs/<run-id>/jobs.json
 ```
 
 Headless preparation reserves every job and materializes its Monty-managed `wt` worktree while leaving the job `prepared`.
-With Pi selected, run `monty headless begin <worker-id>` immediately before the harness call.
-Read the returned `harness_call.tool` and pass `harness_call.arguments` unchanged to that exposed harness tool; do not manually reconstruct, simplify, or enrich the generated chain JSON.
-The same dispatch includes a versioned `completion` contract.
-After a successful Pi callback, run its exact `success_command`; after a failed callback, run the `failure_command` with the concrete last phase and error substituted.
-Completion finalization writes the shared durable handoff and pending notice but does not mark the task done.
-With Codex selected, run `monty headless run <worker-id>` or `monty headless run-many --manifest <manifest>`.
-Codex headless execution uses non-interactive `codex exec` processes and must not open Ghostty.
-A small native Codex supervisor may run the blocking Monty command and return its result to the main conversation; the returned result and durable inbox must both reference the same canonical handoff.
-Independent Pi or Codex chains can run concurrently without waiting for earlier jobs to finish.
-Run long-lived headless commands under a background terminal or native supervisor.
+Run `monty headless run <worker-id>` or `monty headless run-many --manifest <manifest>` for either harness.
+Both start independent background supervisors and return after the worker is claimed and its first phase prompt is ready.
+The startup receipt references the future canonical handoff; it does not assert that model execution succeeded.
+Pi uses non-interactive print/JSON mode; Codex uses non-interactive `codex exec`.
+Neither opens Ghostty. Monty owns phase sequencing, logs, results, and final handoff publication.
+Do not wrap these default background commands in another agent or background shell.
+Use `--wait` only when explicitly waiting for the final result is useful, such as scripts or requested monitoring.
+Independent chains can run concurrently without waiting for earlier tasks to finish.
 Once launch is confirmed, return control to the user immediately; do not wait for,
 synchronously poll, or babysit the run unless the user explicitly asks for
 monitoring. Let the process finish independently and recover its result from the
@@ -184,14 +180,16 @@ durable handoff inbox at the next safe message boundary.
 
 Each chain gets fresh minimal context and follows its pinned agent profile: one implementer, zero or more mutually isolated reviewers in parallel, then an optional final writer (simplifier or fixer).
 The default `simplified` profile runs one implementer followed by one separate editing simplifier, sequentially in the same workspaces. The explicit `reviewed` profile runs one implementer, two reviewers, and one fixer; `solo` runs only the implementer with self-validation. Legacy workers without profile metadata retain `reviewed` behavior.
-Reviewers may write only their separate reports outside the worktree.
+Monty captures reviewer reports outside the worktree. Pi reviewers use read-only file tools without bash; Codex reviewers retain the configured sandbox policy.
 No child may create worktrees, stage, commit, push, open a PR, post remotely, or run `monty done`.
 A successful chain leaves the task open and its worktree intact.
 Never infer completion from Pi runtime status.
 
-If a Pi harness call fails after `begin`, or a Codex process fails after the worker is claimed, leave the worker `launch-requested`.
-Run `monty headless resume <worker-id>` only when the user intentionally requests a fresh successor chain.
-With Pi selected, pass the resumed `harness_call.arguments` unchanged to the harness tool; with Codex selected, `resume` directly runs the successor chain.
+If a process fails after its worker is claimed, leave the worker `launch-requested`.
+Run `monty headless resume <worker-id>` only when the user intentionally requests a fresh successor run.
+Resume directly starts the selected Pi or Codex profile in the background; `--wait` waits for its result.
+Legacy integrations may still use `headless begin` / `headless finish`, with `headless begin --resume` for a successor extension dispatch.
+Before any mutating legacy Pi extension command, call its actual `subagent` tool with `action: "list"` and confirm required agents exist. Pass generated arguments and callback commands unchanged.
 Never persist a backend, Pi run ID, Codex session ID, async status, or runtime state in `job.json`.
 Interactive Codex workers record their exact conversation only in the durable
 `codex-session-id` sidecar; headless Codex chains must not claim or update it.
@@ -276,7 +274,7 @@ Do not add opam files.
 Use Ghostty as the default terminal backend. Use `monty settings set harness pi|codex` to persist the default agent harness; `--harness` remains the per-command override. Use `monty settings set branch-prefix <prefix>` to persist the default generated-branch prefix; `--branch-prefix` remains the per-command override.
 Use `monty settings set codex-yolo true|false` to control whether Monty-launched Codex sessions bypass approvals and sandboxing. Treat the enabled value as an explicit high-risk user choice.
 Keep headless state and payload generation in Monty.
-Pi execution uses the harness's existing subagent tool, while Codex headless execution uses the configured non-interactive Codex command.
+Pi and Codex headless execution use their configured non-interactive commands under Monty's shared background runner.
 Do not add a Monty-specific Pi extension or a new persisted backend.
 Use Monty's repo-scoped `ensure-worktree` flow for every workspace's worktree creation and reuse.
 It must use the existing `wt` CLI, validate each selected repo, and automatically answer `wt` repo-selection prompts when branch names collide across repos.

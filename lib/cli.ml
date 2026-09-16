@@ -180,9 +180,12 @@ let options_term =
  in
 let headless_options harness_override codex_yolo_override pi_command codex_command
     wt_command branch_prefix_override agent_profile_override fork home script_dir =
-  options Terminal.Dry_run Terminal.Tab harness_override codex_yolo_override
-    pi_command codex_command wt_command Launcher.Always branch_prefix_override
-    agent_profile_override fork home script_dir
+  if Option.is_some fork then
+    Error "headless profiles use fresh phases; --fork is supported only for interactive Pi workers"
+  else
+    options Terminal.Dry_run Terminal.Tab harness_override codex_yolo_override
+      pi_command codex_command wt_command Launcher.Always branch_prefix_override
+      agent_profile_override fork home script_dir
  in
 let headless_options_term =
   Cmdliner.Term.(
@@ -329,42 +332,47 @@ let print_headless_result = function
       0
  in
 
-let headless_begin worker options =
+let headless_begin worker explicit_resume options =
   match options with
   | Error message -> exit_code (Error message)
   | Ok options ->
-      Headless.begin_worker ~explicit_resume:false options worker
+      Headless.begin_worker ~explicit_resume options worker
       |> print_headless_result
  in
 
-let headless_run worker options =
+let headless_run worker wait options =
   match options with
   | Error message -> exit_code (Error message)
   | Ok options ->
-      Headless.run_codex_worker ~explicit_resume:false options worker
+      Headless.run_worker ~wait ~explicit_resume:false options worker
       |> print_headless_result
  in
 
-let headless_resume worker options =
+let headless_resume worker wait options =
   match options with
   | Error message -> exit_code (Error message)
-  | Ok options -> (
-      match options.Launcher.harness with
-      | Harness.Pi ->
-          Headless.begin_worker ~explicit_resume:true options worker
-          |> print_headless_result
-      | Harness.Codex ->
-          Headless.run_codex_worker ~explicit_resume:true options worker
-          |> print_headless_result)
+  | Ok options ->
+      Headless.run_worker ~wait ~explicit_resume:true options worker
+      |> print_headless_result
  in
-let headless_worker_term command =
+let headless_wait_arg =
+  let doc = "Wait for the final run result. By default, return once the independent background supervisor has claimed the worker and prepared its first phase." in
+  Cmdliner.Arg.(value & flag & info [ "wait" ] ~doc)
+ in
+let headless_worker_term ?(legacy = false) command =
   let worker =
     let doc = "Worker id, branch leaf, branch, or title slug." in
     Cmdliner.Arg.(required & pos 0 (some string) None & info [] ~docv:"WORKER" ~doc)
   in
-  Cmdliner.Term.(const command $ worker $ headless_options_term)
+  let mode =
+    if legacy then
+      Cmdliner.Arg.(value & flag & info [ "resume" ]
+        ~doc:"Intentionally emit a successor legacy Pi subagent dispatch.")
+    else headless_wait_arg
+  in
+  Cmdliner.Term.(const command $ worker $ mode $ headless_options_term)
  in
-let headless_run_many manifest options =
+let headless_run_many manifest wait options =
   match options with
   | Error message -> exit_code (Error message)
   | Ok options ->
@@ -372,7 +380,7 @@ let headless_run_many manifest options =
       (match Manifest.load ~home:options.Launcher.home manifest with
       | Error msg -> exit_code (Error msg)
       | Ok jobs -> (
-          match Headless.run_codex_many options jobs with
+          match Headless.run_many ~wait options jobs with
           | Error msg -> exit_code (Error msg)
           | Ok (json, success) ->
               Headless.print_json json;
@@ -380,10 +388,10 @@ let headless_run_many manifest options =
  in
 let headless_run_many_term =
   let manifest =
-    let doc = "JSON manifest containing prepared Monty jobs to run with Codex." in
+    let doc = "JSON manifest containing prepared Monty jobs to run with the selected harness." in
     Cmdliner.Arg.(required & opt (some string) None & info [ "manifest" ] ~docv:"FILE" ~doc)
   in
-  Cmdliner.Term.(const headless_run_many $ manifest $ headless_options_term)
+  Cmdliner.Term.(const headless_run_many $ manifest $ headless_wait_arg $ headless_options_term)
  in
 let resolve_handoff_worker worker home =
   let home = Shell.normalize (Shell.abs_path home) in
@@ -1459,21 +1467,21 @@ let headless_cmd =
     Cmdliner.Cmd.v (Cmdliner.Cmd.info "prepare-many" ~doc) headless_prepare_many_term
   in
   let begin_cmd =
-    let doc = "Claim one prepared worker and emit its harness subagent call." in
+    let doc = "Emit a legacy Pi subagent dispatch. Prefer headless run for standalone execution." in
     Cmdliner.Cmd.v (Cmdliner.Cmd.info "begin" ~doc)
-      (headless_worker_term headless_begin)
+      (headless_worker_term ~legacy:true headless_begin)
   in
   let run_cmd =
-    let doc = "Run one prepared worker through the non-interactive Codex review chain." in
+    let doc = "Start an independent background Pi or Codex worker using its pinned agent profile." in
     Cmdliner.Cmd.v (Cmdliner.Cmd.info "run" ~doc)
       (headless_worker_term headless_run)
   in
   let run_many_cmd =
-    let doc = "Run prepared manifest workers concurrently through Codex review chains." in
+    let doc = "Start prepared manifest workers concurrently using independent background runners." in
     Cmdliner.Cmd.v (Cmdliner.Cmd.info "run-many" ~doc) headless_run_many_term
   in
   let resume_cmd =
-    let doc = "Intentionally start or emit a successor headless chain for an open worker." in
+    let doc = "Intentionally start a fresh background Pi or Codex run for an open worker." in
     Cmdliner.Cmd.v (Cmdliner.Cmd.info "resume" ~doc)
       (headless_worker_term headless_resume)
   in

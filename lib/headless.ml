@@ -5,6 +5,8 @@ let dispatch_schema = "monty:headless-dispatch:v3"
 let codex_run_schema = "monty:headless-codex-run:v1"
 let codex_run_many_schema = "monty:headless-codex-run-many:v1"
 let attempt_schema = "monty:headless-attempt:v1"
+let process_attempt_schema = "monty:headless-attempt:v2"
+let started_schema = "monty:headless-start:v1"
 let completion_schema = "monty:headless-completion:v1"
 
 type prepared_job = {
@@ -58,7 +60,7 @@ type begin_plan = {
   record : Job_store.record;
 }
 
-type codex_inputs = {
+type phase_inputs = {
   instructions_contents : string;
   context_contents : string;
 }
@@ -143,16 +145,16 @@ let ensure_attempt_directories (dispatch : dispatch) (paths : attempt_paths) =
         ~mode:0o700 directory)
     (Ok ()) directories
 
-let attempt_descriptor_json (dispatch : dispatch) (paths : attempt_paths) source =
+let attempt_descriptor_json ?(schema = attempt_schema) (dispatch : dispatch) (paths : attempt_paths) source =
   `Assoc
-    ([ ("schema", `String attempt_schema);
+    ([ ("schema", `String schema);
        ("attempt_id", `String paths.id);
        ("worker_id", `String dispatch.id);
        ("source", `String source);
        ("created_at", `String (Worker_memory.now_utc ())) ]
     @ [ ("agent_profile", `String dispatch.profile.id) ])
 
-let prepare_attempt (plan : begin_plan) (dispatch : dispatch)
+let prepare_attempt ?schema (plan : begin_plan) (dispatch : dispatch)
     (paths : attempt_paths) source =
   State_store.with_lock ~home:dispatch.home (fun () ->
       let* current =
@@ -178,7 +180,7 @@ let prepare_attempt (plan : begin_plan) (dispatch : dispatch)
       in
       let* () = ensure_attempt_directories dispatch paths in
       State_store.write_json_atomic ~path:paths.descriptor
-        (attempt_descriptor_json dispatch paths source))
+        (attempt_descriptor_json ?schema dispatch paths source))
 
 let mutation_prohibitions =
   String.concat "\n"
@@ -460,11 +462,8 @@ let prepare_many ~dry_run options indexed_jobs =
   in
   let* () =
     if needs_host then
-      match options.harness with
-      | Harness.Pi -> Launcher.check_worktree_dependency options
-      | Harness.Codex ->
-          Launcher.check_dependencies
-            { options with Launcher.container_workers = false }
+      Launcher.check_dependencies
+        { options with Launcher.container_workers = false }
     else
       Launcher.check_dependencies
         { options with Launcher.container_workers = true }
@@ -508,7 +507,7 @@ let validate_begin_status ~explicit_resume (record : Job_store.record) =
       if explicit_resume then
         "headless resume requires an existing launch-requested chain"
       else
-        "first headless begin requires prepared, while an intentional successor run must use headless resume"
+        "an initial headless run requires prepared, while an intentional successor run must use headless resume"
     in
     Error
       (Printf.sprintf "worker %s has status %S; %s" record.id record.status
@@ -533,12 +532,9 @@ let prepare_existing options (record : Job_store.record) =
   in
   let* () =
     match record.container_worker with
-    | None -> (
-        match options.harness with
-        | Harness.Pi -> Launcher.check_worktree_dependency options
-        | Harness.Codex ->
-            Launcher.check_dependencies
-              { options with Launcher.container_workers = false })
+    | None ->
+        Launcher.check_dependencies
+          { options with Launcher.container_workers = false }
     | Some _ when options.harness <> Harness.Codex ->
         Error "container workers support only the Codex headless harness"
     | Some value ->
@@ -635,92 +631,6 @@ let claim_begin (plan : begin_plan) =
           container_worker = plan.record.container_worker;
         }
 
-let begin_worker_unlocked ~explicit_resume options worker =
-  let* plan = prepare_begin ~explicit_resume options worker in
-  let preview =
-    {
-      id = plan.prepared.id;
-      title = plan.prepared.job.Job.title;
-      repo = plan.prepared.repo;
-      branch = plan.prepared.branch;
-      worktree =
-        Option.value ~default:plan.prepared.repo
-          plan.record.last_known_worktree;
-      workspaces = plan.record.workspaces;
-      worker_dir = plan.prepared.worker_dir;
-      instructions = plan.prepared.instructions;
-      context = plan.prepared.context;
-      home = plan.options.home;
-      profile = plan.prepared.profile;
-      container_worker = plan.record.container_worker;
-    }
-  in
-  let attempt_id = fresh_attempt_id () in
-  let paths = attempt_paths preview attempt_id in
-  let* () = prepare_attempt plan preview paths "headless-pi" in
-  let* dispatch = claim_begin plan in
-  Ok (dispatch_json ~attempt_id dispatch)
-
-let begin_worker ~explicit_resume options worker =
-  if options.Launcher.harness <> Harness.Pi then
-    Error "headless begin emits a Pi subagent call, but the effective harness is codex; use monty headless run"
-  else
-    let* record = Job_store.find ~home:options.Launcher.home ~scope:Job_store.Active worker in
-    Worker_lock.with_lock ~home:options.home ~record (fun () ->
-        begin_worker_unlocked ~explicit_resume options worker)
-
-let read_required_file ~label path =
-  try Ok (Shell.read_file path)
-  with Sys_error message ->
-    Error (Printf.sprintf "failed to read %s %s: %s" label path message)
-
-let load_codex_inputs (plan : begin_plan) =
-  let* instructions_contents =
-    match plan.record.container_worker with
-    | None ->
-        read_required_file ~label:"Monty instructions" plan.prepared.instructions
-    | Some _ ->
-        Ok
-          (Container_worker.guest_instructions ~id:plan.record.id
-             ~title:plan.record.job.Job.title)
-  in
-  let* context_contents =
-    read_required_file ~label:"task context" plan.prepared.context
-  in
-  Ok { instructions_contents; context_contents }
-
-let append_codex_memory (dispatch : dispatch) (paths : attempt_paths) ~phase
-    contents =
-  let path = Worker_memory.memory_file dispatch.worker_dir in
-  State_store.with_lock ~home:dispatch.home (fun () ->
-      let* existing = State_store.lstat path in
-      let* () =
-        match existing with
-        | Some { Unix.st_kind = Unix.S_REG; _ } -> Ok ()
-        | Some { Unix.st_kind = Unix.S_LNK; _ } ->
-            Error (Printf.sprintf "unsafe worker memory file is a symlink: %s" path)
-        | Some _ ->
-            Error (Printf.sprintf "worker memory path is not a regular file: %s" path)
-        | None -> Error (Printf.sprintf "worker memory file is missing: %s" path)
-      in
-      let* current = read_required_file ~label:"worker memory" path in
-      let addition =
-        String.concat "\n"
-          [ "";
-            Printf.sprintf "## Headless Codex %s (%s)" phase paths.id;
-            "";
-            contents;
-            "" ]
-      in
-      State_store.write_file_atomic ~path ~perm:0o600 (current ^ addition))
-
-let require_codex_harness (options : Launcher.options) =
-  match options.harness with
-  | Harness.Codex -> Ok ()
-  | Harness.Pi ->
-      Error
-        "the effective harness is pi; use monty headless begin and invoke its generated subagent call"
-
 let provisional_dispatch (plan : begin_plan) =
   let containerized = Option.is_some plan.record.container_worker in
   {
@@ -741,6 +651,68 @@ let provisional_dispatch (plan : begin_plan) =
     profile = plan.prepared.profile;
     container_worker = plan.record.container_worker;
   }
+
+let begin_worker_unlocked ~explicit_resume options worker =
+  let* plan = prepare_begin ~explicit_resume options worker in
+  let preview = provisional_dispatch plan in
+  let attempt_id = fresh_attempt_id () in
+  let paths = attempt_paths preview attempt_id in
+  let* () = prepare_attempt plan preview paths "headless-pi" in
+  let* dispatch = claim_begin plan in
+  Ok (dispatch_json ~attempt_id dispatch)
+
+let begin_worker ~explicit_resume options worker =
+  if options.Launcher.harness <> Harness.Pi then
+    Error "headless begin emits a Pi subagent call, but the effective harness is codex; use monty headless run"
+  else
+    let* record = Job_store.find ~home:options.Launcher.home ~scope:Job_store.Active worker in
+    Worker_lock.with_lock ~home:options.home ~record (fun () ->
+        begin_worker_unlocked ~explicit_resume options worker)
+
+let read_required_file ~label path =
+  try Ok (Shell.read_file path)
+  with Sys_error message ->
+    Error (Printf.sprintf "failed to read %s %s: %s" label path message)
+
+let load_phase_inputs (plan : begin_plan) =
+  let* instructions_contents =
+    match plan.record.container_worker with
+    | None ->
+        read_required_file ~label:"Monty instructions" plan.prepared.instructions
+    | Some _ ->
+        Ok
+          (Container_worker.guest_instructions ~id:plan.record.id
+             ~title:plan.record.job.Job.title)
+  in
+  let* context_contents =
+    read_required_file ~label:"task context" plan.prepared.context
+  in
+  Ok { instructions_contents; context_contents }
+
+let append_phase_memory (dispatch : dispatch) (paths : attempt_paths) ~harness ~phase
+    contents =
+  let path = Worker_memory.memory_file dispatch.worker_dir in
+  State_store.with_lock ~home:dispatch.home (fun () ->
+      let* existing = State_store.lstat path in
+      let* () =
+        match existing with
+        | Some { Unix.st_kind = Unix.S_REG; _ } -> Ok ()
+        | Some { Unix.st_kind = Unix.S_LNK; _ } ->
+            Error (Printf.sprintf "unsafe worker memory file is a symlink: %s" path)
+        | Some _ ->
+            Error (Printf.sprintf "worker memory path is not a regular file: %s" path)
+        | None -> Error (Printf.sprintf "worker memory file is missing: %s" path)
+      in
+      let* current = read_required_file ~label:"worker memory" path in
+      let addition =
+        String.concat "\n"
+          [ "";
+            Printf.sprintf "## Headless %s %s (%s)" (Harness.to_string harness) phase paths.id;
+            "";
+            contents;
+            "" ]
+      in
+      State_store.write_file_atomic ~path ~perm:0o600 (current ^ addition))
 
 let source_section label path contents =
   String.concat "\n"
@@ -769,7 +741,7 @@ let replace_literal ~pattern ~replacement text =
     Buffer.contents buffer
 
 let direct_memory_notice =
-  "This direct headless Codex phase may modify only the supplied code worktree. Do not write worker memory or other Monty state directly; Monty will append the captured handoff to durable memory after the phase succeeds."
+  "This is one direct headless phase, not an interactive worker session. You may modify only the supplied code workspaces. Do not write worker memory, publish a run handoff, or change other Monty state; Monty will append the captured handoff to durable memory after the phase succeeds and publish the run result."
 
 let implementation_prompt dispatch inputs =
   let memory_instruction =
@@ -898,7 +870,89 @@ let run_codex_phase (options : Launcher.options) (dispatch : dispatch)
   | Ok { status; _ } ->
       Error
         (Printf.sprintf "Codex %s phase failed with %s (events: %s; progress: %s)"
-           name (Process.status_to_string status) events progress))
+             name (Process.status_to_string status) events progress))
+
+let pi_final_message events =
+  let* () = Run_handoff.require_regular_file events in
+  try
+    In_channel.with_open_text events (fun channel ->
+        let assistant = ref None in
+        let ended = ref false in
+        let rec read () =
+          match In_channel.input_line channel with
+          | None -> ()
+          | Some line when String.trim line = "" -> read ()
+          | Some line ->
+              let json = Yojson.Safe.from_string line in
+              let member = Yojson.Safe.Util.member in
+              (match member "type" json with
+              | `String "agent_start" -> ended := false; assistant := None
+              | `String "agent_end" -> ended := true
+              | `String "message_end" ->
+                  ended := false;
+                  let message = member "message" json in
+                  if member "role" message = `String "assistant" then
+                    assistant := Some message
+              | _ -> ());
+              read ()
+        in
+        read ();
+        match !ended, !assistant with
+        | true, Some message ->
+            let member = Yojson.Safe.Util.member in
+            (match member "stopReason" message with
+            | `String "stop" ->
+                let text =
+                  member "content" message |> Yojson.Safe.Util.to_list
+                  |> List.filter_map (fun content ->
+                         if member "type" content = `String "text" then
+                           Some (member "text" content |> Yojson.Safe.Util.to_string)
+                         else None)
+                  |> String.concat "\n" |> String.trim
+                in
+                if text = "" then Error "Pi completed without a final handoff"
+                else Ok (text ^ "\n")
+            | reason ->
+                Error
+                  (Printf.sprintf "Pi did not complete successfully (stopReason=%s, error=%s)"
+                     (Yojson.Safe.to_string reason)
+                     (Yojson.Safe.to_string (member "errorMessage" message))))
+        | _ -> Error "Pi event stream ended without a completed agent and final assistant message")
+  with
+  | Sys_error message | Yojson.Json_error message -> Error message
+  | Yojson.Safe.Util.Type_error (message, _) -> Error ("invalid Pi event: " ^ message)
+
+let run_pi_phase (options : Launcher.options) (dispatch : dispatch)
+    (paths : attempt_paths) ~name ~writable ~prompt ~output =
+  let events = phase_path paths.events name ".jsonl" in
+  let progress = phase_path paths.logs name ".log" in
+  (* A shell cannot be made read-only with a prompt. Pi reviewers inspect with
+     file tools; writers retain bash for installation and validation. *)
+  let tool_names =
+    if writable then "read,bash,edit,write,grep,find,ls" else "read,grep,find,ls"
+  in
+  let command =
+    "umask 077 && " ^ options.harness_command
+    ^ " --print --mode json --no-session --tools " ^ tool_names
+    ^ " < " ^ Shell.quote prompt ^ " > " ^ Shell.quote events
+    ^ " 2> " ^ Shell.quote progress
+  in
+  let* result = Process.run_capture ~cwd:dispatch.worktree command in
+  let result =
+    match result.status with
+    | `Exited 0 ->
+        let* final = pi_final_message events in
+        State_store.write_file_atomic ~path:output ~perm:0o600 final
+    | status -> Error (Process.status_to_string status)
+  in
+  Result.map_error (fun message ->
+      Printf.sprintf "Pi %s phase failed: %s (events: %s; progress: %s)"
+        name message events progress) result
+
+let run_phase options =
+  match options.Launcher.harness with
+  | Harness.Pi -> run_pi_phase options
+  | Harness.Codex -> run_codex_phase options
 
 type 'a spawned_result = {
   pid : int;
@@ -969,9 +1023,9 @@ let run_parallel operations =
   | [] -> Ok ()
   | errors ->
       Error
-        ("Codex review phases failed:\n- " ^ String.concat "\n- " errors)
+        ("Headless review phases failed:\n- " ^ String.concat "\n- " errors)
 
-let codex_run_result_json (options : Launcher.options) (dispatch : dispatch)
+let run_result_json (options : Launcher.options) (dispatch : dispatch)
     (paths : attempt_paths) (published : Run_handoff.published) =
   let implementation =
     if dispatch.profile.fix = None then paths.final else paths.implementation
@@ -982,9 +1036,10 @@ let codex_run_result_json (options : Launcher.options) (dispatch : dispatch)
            (path.review.id ^ "_review", `String path.output))
   in
   `Assoc
-    [ ("schema", `String codex_run_schema);
-      ("harness", `String "codex");
-      ("codex_yolo", `Bool options.codex_yolo);
+    [ ("schema", `String (if options.harness = Harness.Codex then codex_run_schema
+                          else "monty:headless-pi-run:v1"));
+      ("harness", `String (Harness.to_string options.harness));
+      ("codex_yolo", `Bool (options.harness = Harness.Codex && options.codex_yolo));
       ("worker_id", `String dispatch.id);
       ("status", `String "launch-requested");
       ("run_status", `String "finished");
@@ -1020,10 +1075,21 @@ let validation_summary profile =
       "Exact validation commands and results are recorded in the final %s handoff."
       (Agent_profile.fix_role_name profile.fix_role)
 
-let preflight_codex_worker ~explicit_resume options worker =
-  let* () = require_codex_harness options in
+let preflight_worker ~explicit_resume options worker =
+  let* home = State_path.canonicalize options.Launcher.home in
+  let* script_dir = State_path.canonicalize options.script_dir in
+  let options = { options with home; script_dir } in
   let* plan = prepare_begin ~explicit_resume options worker in
-  let* inputs = load_codex_inputs plan in
+  let* harness_command, wt_command =
+    match plan.record.container_worker with
+    | Some _ -> Ok (plan.options.harness_command, plan.options.wt_command)
+    | None ->
+        let* harness_command = Process.absolute_command plan.options.harness_command in
+        let* wt_command = Process.absolute_command plan.options.wt_command in
+        Ok (harness_command, wt_command)
+  in
+  let plan = { plan with options = { plan.options with harness_command; wt_command } } in
+  let* inputs = load_phase_inputs plan in
   Ok (plan, inputs)
 
 let container_handoff_changes (dispatch : dispatch) =
@@ -1045,14 +1111,56 @@ let container_handoff_changes (dispatch : dispatch) =
               change None summary.files summary.insertions summary.deletions
           | Error message -> change (Some message) [] 0 0 ]
 
-let run_codex_worker_unlocked ~explicit_resume options worker =
-  let* plan, inputs = preflight_codex_worker ~explicit_resume options worker in
+let started_json (plan : begin_plan) (dispatch : dispatch) paths =
+  let* reference = Run_handoff.reference_of_record plan.record paths.id in
+  Ok (`Assoc
+    [ ("schema", `String started_schema);
+      ("harness", `String (Harness.to_string plan.options.harness));
+      ("worker_id", `String dispatch.id);
+      ("status", `String "launch-requested");
+      ("run_status", `String "started");
+      ("attempt_id", `String paths.id);
+      ("agent_profile", `String dispatch.profile.id);
+      ("artifact_dir", `String paths.root);
+      ("handoff", `String (Run_handoff.handoff_path dispatch.home reference)) ])
+
+let set_worker_environment (plan : begin_plan) (dispatch : dispatch) =
+  (* A nested launch must not retain paths from its caller's workspace map. *)
+  Unix.environment () |> Array.iter (fun entry ->
+      let name = String.sub entry 0 (String.index entry '=') in
+      if String.starts_with ~prefix:"MONTY_WORKSPACE_" name then
+        Unix.putenv name "");
+  List.iter (fun (name, value) -> Unix.putenv name value)
+    [ "MONTY_HOME", dispatch.home;
+      "MONTY_HARNESS", Harness.to_string plan.options.harness;
+      "MONTY_RUN_DIR", plan.record.run_dir;
+      "MONTY_WORKER_DIR", dispatch.worker_dir;
+      "MONTY_JOB_ID", dispatch.id;
+      "MONTY_JOB_TITLE", dispatch.title;
+      "MONTY_JOB_REPO", dispatch.repo;
+      "MONTY_JOB_BRANCH", dispatch.branch;
+      "MONTY_JOB_CONTEXT", dispatch.context;
+      "MONTY_JOB_FILE", plan.record.path;
+      "MONTY_TASK_KEY", Option.value ~default:"" plan.record.job.task_key;
+      "MONTY_JOB_WORKTREE", dispatch.worktree;
+      "MONTY_WORKTREE_MODE", plan.record.worktree_mode ];
+  List.iteri (fun index (workspace : Job_store.workspace_state) ->
+      Unix.putenv (Printf.sprintf "MONTY_WORKSPACE_%d" (index + 1))
+        (Option.value ~default:"" workspace.worktree)) dispatch.workspaces
+
+let run_worker_unlocked ~on_started ~explicit_resume options worker =
+  let* plan, inputs = preflight_worker ~explicit_resume options worker in
   let preview = provisional_dispatch plan in
   let paths = attempt_paths preview (fresh_attempt_id ()) in
-  let* () = prepare_attempt plan preview paths "headless-codex" in
+  let source = match options.Launcher.harness with
+    | Harness.Pi -> Run_handoff.Headless_pi | Harness.Codex -> Run_handoff.Headless_codex in
+  let* () = prepare_attempt ~schema:process_attempt_schema plan preview paths
+      (Run_handoff.source_to_string source) in
   let* dispatch = claim_begin plan in
   let phase = ref "implementation" in
   let execution =
+    try
+    set_worker_environment plan dispatch;
     let implementation_output =
       if dispatch.profile.fix = None then paths.final else paths.implementation
     in
@@ -1060,17 +1168,19 @@ let run_codex_worker_unlocked ~explicit_resume options worker =
       write_phase_prompt paths "implementation"
         (implementation_prompt dispatch inputs)
     in
+    let* started = started_json plan dispatch paths in
+    on_started paths started;
     let* () =
-      run_codex_phase plan.options dispatch paths ~name:"implementation"
+      run_phase plan.options dispatch paths ~name:"implementation"
         ~writable:true ~prompt:implementation_prompt_path
         ~output:implementation_output
     in
     let* implementation_handoff =
-      read_required_file ~label:"Codex implementation handoff"
+      read_required_file ~label:"implementation handoff"
         implementation_output
     in
     let* () =
-      append_codex_memory dispatch paths ~phase:"implementation"
+      append_phase_memory dispatch paths ~harness:options.harness ~phase:"implementation"
         implementation_handoff
     in
     if paths.reviews <> [] then phase := "review";
@@ -1091,7 +1201,7 @@ let run_codex_worker_unlocked ~explicit_resume options worker =
     let* () =
       review_prompts
       |> List.map (fun (path, name, prompt) () ->
-             run_codex_phase plan.options dispatch paths ~name ~writable:false
+             run_phase plan.options dispatch paths ~name ~writable:false
                ~prompt ~output:path.output)
       |> run_parallel
     in
@@ -1101,7 +1211,7 @@ let run_codex_worker_unlocked ~explicit_resume options worker =
           let* reports = result in
           let* report =
             read_required_file
-              ~label:("Codex " ^ path.review.title) path.output
+              ~label:path.review.title path.output
           in
           Ok (report :: reports))
         (Ok []) paths.reviews
@@ -1117,26 +1227,28 @@ let run_codex_worker_unlocked ~explicit_resume options worker =
             (fixer_prompt dispatch inputs paths.reviews reports implementation_handoff)
         in
         let* () =
-          run_codex_phase plan.options dispatch paths ~name ~writable:true
+          run_phase plan.options dispatch paths ~name ~writable:true
             ~prompt:fixer_prompt_path ~output:paths.final
         in
         let* final_handoff =
-          read_required_file ~label:"Codex final handoff" paths.final
+          read_required_file ~label:"final handoff" paths.final
         in
         phase := "durable-memory";
         let* () =
-          append_codex_memory dispatch paths ~phase:"final" final_handoff
+          append_phase_memory dispatch paths ~harness:options.harness ~phase:"final" final_handoff
         in
         Ok final_handoff
+    with exn -> Error (Printexc.to_string exn)
   in
   let changes = container_handoff_changes dispatch in
   (match execution with
   | Error message ->
       let handoff =
         Run_handoff.publish ~home:plan.options.home ~record:plan.record
-          ~handoff_id:paths.id ~source:Run_handoff.Headless_codex
+          ~handoff_id:paths.id ~source
           ~outcome:Run_handoff.Failed
-          ~summary:(Printf.sprintf "Headless Codex run failed during %s." !phase)
+          ~summary:(Printf.sprintf "Headless %s run failed during %s."
+                      (Harness.to_string options.harness) !phase)
           ~risks:[ message ] ~last_phase:!phase ~error:message
           ?changes ~artifacts:[ paths.root ] ()
       in
@@ -1155,23 +1267,75 @@ let run_codex_worker_unlocked ~explicit_resume options worker =
       let* published =
         let review_summary = review_summary dispatch.profile in
         Run_handoff.publish ~home:plan.options.home ~record:plan.record
-          ~handoff_id:paths.id ~source:Run_handoff.Headless_codex
+          ~handoff_id:paths.id ~source
           ~outcome:Run_handoff.Ready_for_review
           ~summary:(Run_handoff.compact_summary final_handoff)
           ~validation:[ validation_summary dispatch.profile ]
           ?review_summary ?changes
           ~artifacts:[ paths.root ] ()
       in
-      Ok (codex_run_result_json plan.options dispatch paths published))
+      Ok (run_result_json plan.options dispatch paths published))
 
-let run_codex_worker ~explicit_resume options worker =
-  let* plan, _inputs = preflight_codex_worker ~explicit_resume options worker in
+let background operation =
+  let read_fd, write_fd = Unix.pipe ~cloexec:true () in
+  flush_all ();
+  match Unix.fork () with
+  | exception exn ->
+      Unix.close read_fd; Unix.close write_fd;
+      Error (Printexc.to_string exn)
+  | 0 ->
+      Unix.close read_fd;
+      let channel = Unix.out_channel_of_descr write_fd in
+      let sent = ref false in
+      let send result =
+        sent := true;
+        (* Losing the caller must not kill the worker or prevent its handoff. *)
+        (try Marshal.to_channel channel result []; flush channel with Sys_error _ -> ());
+        close_out_noerr channel
+      in
+      let result =
+        try
+          ignore (Sys.signal Sys.sigpipe Sys.Signal_ignore);
+          ignore (Unix.setsid ());
+          let null = Unix.openfile "/dev/null" [ Unix.O_RDWR ] 0 in
+          List.iter (Unix.dup2 null) [ Unix.stdin; Unix.stdout; Unix.stderr ];
+          Unix.close null;
+          Unix.chdir "/";
+          operation (fun paths json ->
+              let log = Filename.concat paths.logs "supervisor.log" in
+              let fd = Unix.openfile log
+                  [ Unix.O_WRONLY; Unix.O_CREAT; Unix.O_EXCL; Unix.O_CLOEXEC ] 0o600 in
+              Unix.dup2 fd Unix.stdout; Unix.dup2 fd Unix.stderr;
+              Unix.close fd;
+              send (Ok json))
+        with exn -> Error (Printexc.to_string exn)
+      in
+      if not !sent then send result;
+      (match result with Ok json -> print_json json | Error message -> prerr_endline message);
+      flush_all ();
+      Unix._exit (if Result.is_ok result then 0 else 1)
+  | pid ->
+      Unix.close write_fd;
+      let channel = Unix.in_channel_of_descr read_fd in
+      let result =
+        try Marshal.from_channel channel with exn ->
+          Error ("headless supervisor failed before confirming startup: " ^ Printexc.to_string exn)
+      in
+      close_in_noerr channel;
+      (match result with Error _ -> ignore (Unix.waitpid [] pid) | Ok _ -> ());
+      result
+
+let run_worker ~wait ~explicit_resume options worker =
+  let* plan, _inputs = preflight_worker ~explicit_resume options worker in
+  let options = plan.options in
   let record = plan.record in
-  let run () = run_codex_worker_unlocked ~explicit_resume options worker in
-  match record.container_worker with
-  | None -> Worker_lock.with_lock ~home:options.Launcher.home ~record run
-  | Some _ ->
-      Container_worker.with_worker_lock ~worker_dir:record.worker_dir run
+  let operation on_started =
+    let run () = run_worker_unlocked ~on_started ~explicit_resume options worker in
+    match record.container_worker with
+    | None -> Worker_lock.with_lock ~home:options.Launcher.home ~record run
+    | Some _ -> Container_worker.with_worker_lock ~worker_dir:record.worker_dir run
+  in
+  if wait then operation (fun _ _ -> ()) else background operation
 
 let read_attempt_descriptor ~record ~profile paths ~expected_source =
   State_store.decode_json ~path:paths.descriptor (fun () ->
@@ -1444,7 +1608,13 @@ let recover_finished_pi ~home =
                                    "headless attempt descriptor disappeared: %s"
                                    paths.descriptor)
                         in
-                        if source <> "headless-pi" then Ok recovered
+                        (* Process runs finalize themselves. In particular, do not
+                           race their final.md with legacy callback recovery. *)
+                        if source <> "headless-pi"
+                           || Option.bind json (fun json ->
+                                Some (Yojson.Safe.Util.member "schema" json))
+                              = Some (`String process_attempt_schema)
+                        then Ok recovered
                         else
                           let* final_state = inspect paths.final in
                           (match final_state with
@@ -1481,8 +1651,7 @@ let recover_finished_pi ~home =
               (Ok recovered))
        (Ok 0)
 
-let preflight_codex_batch options indexed_jobs =
-  let* () = require_codex_harness options in
+let preflight_batch options indexed_jobs =
   let* prepared = Launcher.preflight_batch options indexed_jobs in
   let* () =
     match
@@ -1497,7 +1666,7 @@ let preflight_codex_batch options indexed_jobs =
     | Some worker ->
         Error
           (Printf.sprintf
-             "worker %s is not prepared for an initial Codex run; use monty headless prepare-many or monty headless resume as appropriate"
+             "worker %s is not prepared for an initial headless run; use monty headless prepare-many or monty headless resume as appropriate"
              worker.id)
   in
   let workers =
@@ -1507,20 +1676,22 @@ let preflight_codex_batch options indexed_jobs =
     List.fold_left
       (fun result worker ->
         let* () = result in
-        let* _ = preflight_codex_worker ~explicit_resume:false options worker in
+        let* _ = preflight_worker ~explicit_resume:false options worker in
         Ok ())
       (Ok ()) workers
   in
   Ok workers
 
-let run_codex_many options indexed_jobs =
-  let* workers = preflight_codex_batch options indexed_jobs in
+let run_many ~wait options indexed_jobs =
+  let* workers = preflight_batch options indexed_jobs in
   let children =
     List.map
       (fun worker ->
         ( worker,
-          try_spawn_result (fun () ->
-              run_codex_worker ~explicit_resume:false options worker) ))
+          if wait then
+            `Waiting (try_spawn_result (fun () ->
+                run_worker ~wait:true ~explicit_resume:false options worker))
+          else `Started (run_worker ~wait:false ~explicit_resume:false options worker) ))
       workers
   in
   let results =
@@ -1528,8 +1699,9 @@ let run_codex_many options indexed_jobs =
       (fun (worker, child) ->
         let result =
           match child with
-          | Ok child -> await_result child
-          | Error message -> Error message
+          | `Waiting (Ok child) -> await_result child
+          | `Waiting (Error message) -> Error message
+          | `Started result -> result
         in
         match result with
         | Ok result ->
@@ -1544,9 +1716,11 @@ let run_codex_many options indexed_jobs =
   let success = List.for_all fst results in
   let json =
     `Assoc
-      [ ("schema", `String codex_run_many_schema);
-        ("harness", `String "codex");
-        ("codex_yolo", `Bool options.Launcher.codex_yolo);
+      [ ("schema", `String (if not wait then "monty:headless-start-many:v1"
+                            else if options.Launcher.harness = Harness.Codex then codex_run_many_schema
+                            else "monty:headless-pi-run-many:v1"));
+        ("harness", `String (Harness.to_string options.Launcher.harness));
+        ("codex_yolo", `Bool (options.harness = Harness.Codex && options.codex_yolo));
         ("success", `Bool success);
         ("results", `List (List.map snd results)) ]
   in

@@ -921,6 +921,7 @@ fi
 run_in_repo dune build bin/main.exe
 
 if [ "$dry_run" -eq 1 ]; then
+  printf '+ validate built binary with an isolated monty doctor check\n'
   if [ "$state_kind" = legacy ]; then
     printf '+ adopt existing unversioned .monty state as version %s\n' "$monty_state_version"
   elif [ "$state_kind" = migratable ]; then
@@ -949,6 +950,21 @@ fi
 
 prepare_transaction
 prepare_install_files
+
+# A successful link does not prove the compiler runtime works on this host.
+# Probe before touching installed files, using no user state or agent process.
+printf 'Checking built binary runtime before installation...\n'
+runtime_check_home=$transaction_dir/runtime-check
+mkdir "$runtime_check_home"
+if ! "$binary_tmp" doctor --home "$runtime_check_home" --harness pi \
+    --pi-command /bin/sh --terminal dry-run --worktree never \
+    > "$runtime_check_home/doctor.log" 2>&1; then
+  cat "$runtime_check_home/doctor.log" >&2
+  echo 'install.sh: built binary failed its runtime check; existing installation was not changed' >&2
+  echo 'Rebuild with a compiler compatible with this host before retrying.' >&2
+  exit 1
+fi
+
 acquire_locks
 inspect_state
 authorize_state

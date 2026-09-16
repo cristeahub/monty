@@ -89,7 +89,7 @@ let command_exists command =
   | Ok { status = `Exited 0; stdout } -> Some (String.trim stdout)
   | _ -> None
 
-let first_command_word command =
+let command_word command =
   let length = String.length command in
   let buffer = Buffer.create length in
   let rec skip index =
@@ -129,10 +129,12 @@ let first_command_word command =
           double_quoted (index + 1)
   in
   let start = skip 0 in
-  ignore (unquoted start);
+  let finish = unquoted start in
   let executable = Buffer.contents buffer in
   if executable = "" then Error "configured command is empty"
-  else Ok executable
+  else Ok (executable, finish)
+
+let first_command_word command = Result.map fst (command_word command)
 
 let executable_file path =
   let path = Shell.abs_path path |> Shell.normalize in
@@ -159,3 +161,10 @@ let command_exists_with_arguments command =
               (Printf.sprintf
                  "required executable %S from configured command %S was not found on PATH"
                  executable command))
+
+let absolute_command command =
+  let ( let* ) = Result.bind in
+  let* _, finish = command_word command in
+  let* executable = command_exists_with_arguments command in
+  Ok (Shell.quote (Shell.abs_path executable)
+      ^ String.sub command finish (String.length command - finish))

@@ -55,7 +55,7 @@ handoff hierarchy.
 `monty handoff pending` is at-least-once for headless delivery. It repairs a
 canonical publication interrupted before rendering or its correctly classified
 delivery receipt. Recovered interactive receipts remain acknowledged and are
-not displayed by the head butler. When a Pi attempt has a durable
+not displayed by the head butler. When a legacy v1 Pi extension attempt has a durable
 `final.md` but its live callback was missed, it publishes a `needs-attention`
 receipt without inferring success from the artifact alone. It never launches or
 resumes work and never changes task status. The head butler displays
@@ -75,3 +75,7 @@ code or lifecycle mutation.
 Changing code requires an explicit `monty resume` or `monty headless resume`.
 Committing, pushing, opening a draft PR, and `monty done` remain separate,
 explicitly approved actions.
+
+## Standalone background runs
+
+Pi and Codex process runners publish this same handoff directly. Their startup receipt references its future canonical path; a startup receipt is not a completed run. Process attempts use `monty:headless-attempt:v2` and are excluded from legacy Pi callback-loss recovery, including the interval between writing final.md and publishing the handoff. Per-phase events and `logs/supervisor.log` remain in the attempt directory. `job.json` retains the existing open lifecycle state.

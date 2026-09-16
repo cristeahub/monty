@@ -1507,6 +1507,35 @@ let test_headless_json_contract () =
     Yojson.Safe.Util.(
       prepared_json |> member "jobs" |> index 0 |> member "status" |> to_string)
 
+let test_pi_final_message () =
+  let events = Filename.temp_file "monty-pi-events-" ".jsonl" in
+  Fun.protect ~finally:(fun () -> Sys.remove events) (fun () ->
+      let message reason text = `Assoc
+          [ "type", `String "message_end";
+            "message", `Assoc [ "role", `String "assistant";
+              "stopReason", `String reason;
+              "content", `List [ `Assoc [ "type", `String "text"; "text", `String text ] ] ] ]
+      in
+      let ended = `Assoc [ "type", `String "agent_end" ] in
+      let parse values =
+        Shell.write_file events (String.concat "\n" (List.map Yojson.Safe.to_string values));
+        Headless.pi_final_message events
+      in
+      assert_equal "Pi final text" "final handoff\n"
+        (must (parse [ message "toolUse" "working"; message "stop" "final handoff"; ended ]));
+      List.iter (fun values ->
+          assert_bool "Pi incomplete/error stream must fail" (Result.is_error (parse values)))
+        [ []; [ ended ]; [ message "stop" "truncated stream" ];
+          [ message "error" "partial"; ended ];
+          [ message "aborted" "partial"; ended ];
+          [ message "length" "truncated response"; ended ];
+          [ message "toolUse" "unfinished tools"; ended ];
+          [ message "stop" " "; ended ];
+          [ message "stop" "old handoff"; ended; `Assoc [ "type", `String "agent_start" ]; ended ];
+          [ message "stop" "old handoff"; ended; `Assoc [ "type", `String "agent_start" ] ] ];
+      Shell.write_file events "not JSON\n";
+      assert_bool "Pi malformed stream must fail" (Result.is_error (Headless.pi_final_message events)))
+
 let run_named name test =
   try
     test ();
@@ -1553,5 +1582,6 @@ let () =
     ( "settings_harness_roundtrip_and_precedence",
       test_settings_harness_roundtrip_and_precedence );
     ("container_worker_contract", test_container_worker_contract);
-    ("headless_json_contract", test_headless_json_contract) ]
+    ("headless_json_contract", test_headless_json_contract);
+    ("pi_final_message", test_pi_final_message) ]
   |> List.iter (fun (name, test) -> run_named name test)
