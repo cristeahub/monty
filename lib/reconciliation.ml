@@ -671,9 +671,9 @@ let load_tasks_with_warnings ~home ?project ?group ?(all = false) () =
                              record.path))
            in
            let warnings =
-             match project_for_repo_opt projects record.job.Job.repo with
-             | None -> missing_workspace_warnings @ warnings
-             | Some worker_project -> (
+             match projects_for_job projects record.job with
+             | Error _ | Ok [] -> missing_workspace_warnings @ warnings
+             | Ok (worker_project :: _ as worker_projects) -> (
                  match record.job.Job.task_key with
                  | None -> missing_workspace_warnings @ warnings
                  | Some key -> (
@@ -681,7 +681,11 @@ let load_tasks_with_warnings ~home ?project ?group ?(all = false) () =
                      | Ok (Some id) -> (
                          match find_local_task_by_id local_tasks id with
                          | Some task
-                           when not (String.equal task.project worker_project.id) ->
+                           when not
+                                  (List.exists
+                                     (fun (project : project) ->
+                                       String.equal task.project project.id)
+                                     worker_projects) ->
                              (Printf.sprintf
                                 "worker %s in project %s links task %s from project %s"
                                 record.id worker_project.id key task.project)

@@ -2172,6 +2172,21 @@ let test_invalid_links_duplicate_ids_and_ambiguous_workers () =
         (write_worker ~home ~run_id:"run-cross" ~id:"cross-worker"
            ~title:"Cross-project worker" ~repo:repo_a ~context
            ~task_key:"local:local-001" ());
+      let multi_worker =
+        write_worker ~home ~run_id:"run-multi" ~id:"multi-worker"
+          ~title:"Multi-project worker" ~repo:repo_a ~context
+          ~task_key:"local:local-001" ()
+      in
+      Yojson.Safe.from_file multi_worker
+      |> replace_assoc_field "workspaces"
+           (`List
+             [ `Assoc
+                 [ ("repo", `String repo_a);
+                   ("branch", `String "cto/multi-worker") ];
+               `Assoc
+                 [ ("repo", `String repo_b);
+                   ("branch", `String "cto/multi-worker-b") ] ])
+      |> Yojson.Safe.to_file multi_worker;
       let archive_dir = Filename.concat home ".monty/runs/run-unknown/archive/unknown-worker" in
       let run_dir = Filename.concat home ".monty/runs/run-unknown" in
       Shell.ensure_dir archive_dir;
@@ -2191,6 +2206,8 @@ let test_invalid_links_duplicate_ids_and_ambiguous_workers () =
         "Cross-project worker";
       require_contains "cross-project warning" filtered.stderr
         "links task local:local-001 from project project-b";
+      if string_contains filtered.stderr "worker multi-worker" then
+        failwith "valid multi-project task link emitted a cross-project warning";
       if string_contains filtered.stderr "using cross-worker for display" then
         failwith "invalid task claimant was described as the display winner";
       let archived =
