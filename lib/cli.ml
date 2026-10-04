@@ -1533,7 +1533,7 @@ let main_cmd =
   in
   Cmdliner.Cmd.group ~default:start_term
     (Cmdliner.Cmd.info "monty" ~version:"dev" ~doc ~man)
-    [
+    ([
       start_cmd;
       continue_cmd;
       launch_cmd;
@@ -1556,7 +1556,7 @@ let main_cmd =
       handoff_cmd;
       ensure_worktree_cmd;
       doctor_cmd;
-    ]
+    ] @ Context_cli.commands ~home_arg ~harness_arg ~pi_command_arg ~codex_command_arg ~getenv)
  in
 main_cmd
 

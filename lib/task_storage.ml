@@ -195,7 +195,7 @@ let task_of_local (task : local_task) =
     url = task.external_url;
   }
 
-let add_local_task ~home ~project ~title () =
+let add_local_task ~home ~project ~title ?notes () =
   State_store.with_lock ~home (fun () ->
       let ( let* ) = Result.bind in
       let* projects = load_projects ~home in
@@ -210,7 +210,7 @@ let add_local_task ~home ~project ~title () =
           status = "open";
           branch = None;
           workspaces = [];
-          notes = None;
+          notes;
           worker_id = None;
           worker_key = None;
           external_key = None;

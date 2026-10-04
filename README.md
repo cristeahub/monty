@@ -394,6 +394,28 @@ monty handoff follow-up issue-123 \
 This emits `monty:run-handoff-follow-up:v1` with the current workspace map and verified paths to the canonical handoff, task context, worker memory, and attempt artifacts.
 It never modifies code; continuing work still requires an explicit `monty resume` or `monty headless resume`.
 
+## External context sources
+
+Optional Slack and Zulip collection runs through a per-user Mac LaunchAgent and
+ships disabled. Configure explicit accounts, channels/DMs and credential file
+references using the [onboarding and coverage guide](docs/external-context.md).
+
+```sh
+monty context configure slack-context.json
+monty context check work-slack
+monty context on
+monty context status
+monty findings --new --source slack --json
+monty findings acknowledge FINDING_ID@REVISION
+monty context off
+```
+
+Findings are read only when requested, never surfaced at startup. Acknowledge
+the exact revision only after presentation; resolving an obligation is a separate
+action. Background polls create no coding tasks, outgoing messages, or remote
+read receipts. Collection and model failures preserve progress/backlog and appear
+in source health. Stopping the service preserves its data.
+
 ## Worker memory and resume
 
 Each launched worker gets a durable memory directory.

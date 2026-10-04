@@ -1,0 +1,2 @@
+# Only the Zulip adapter requires this. Slack uses Python's standard library.
+zulip==0.9.1
