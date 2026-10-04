@@ -96,13 +96,14 @@ Archived memory lives under this shape:
 Workers must write important discoveries, blockers, handoff notes, and final state into durable memory.
 A task must not depend on the worktree as the only place where important knowledge exists.
 
-## `job.json` is the source of truth after launch
+## Worker lifecycle lives in `job.json`
 
 `jobs.json` is launch input only.
-After launch, the durable worker `job.json` is the source of truth.
+The durable worker `job.json` owns launch state and worker lifecycle identity.
+The local task registry owns the task inventory and its open or done status.
 
-Open jobs are discovered only from canonical `.monty/runs/<run-id>/workers/<job-id>/job.json` files.
-Archived jobs are discovered only from canonical `.monty/runs/<run-id>/archive/<job-id>/job.json` files.
+Active workers are discovered only from canonical `.monty/runs/<run-id>/workers/<job-id>/job.json` files.
+Archived workers are discovered only from canonical `.monty/runs/<run-id>/archive/<job-id>/job.json` files.
 Physical location is authoritative when persisted status or path metadata disagrees.
 Lifecycle commands should read and write these files rather than maintaining competing state.
 
@@ -126,8 +127,8 @@ Interactive Codex workers may keep their exact conversation id in a plain-text
 sidecar beside `job.json`; that durable resume aid is not headless runtime state
 and must never become a `job.json` field.
 
-This avoids split-brain state and duplicate recovery requests.
-It also lets `monty list`, `monty resume`, `monty done`, and future lifecycle commands operate from one durable record.
+This avoids duplicate recovery requests.
+`monty resume`, `monty done`, and other lifecycle commands operate from the worker's durable record.
 
 ## Monty knows where task truth lives
 
@@ -135,6 +136,8 @@ Monty should know what projects exist and where task truth lives for each projec
 If GitHub issues provide external identity and metadata, Monty may refresh their title and URL into the local task registry.
 Remote issue state must never override the local task's user-facing open or done status.
 The local task registry owns task status for external and purely local work.
+`monty list` and `monty tasks list` present the same inventory from that registry, reconciling worker links before rendering unless `--no-sync` is requested.
+Worker jobs and tasks represent the same unit of work; launch states do not form a competing task inventory.
 Worker links use exact local task keys and stable workspace-set-plus-worker identities rather than ordinary title matching.
 
 Project memory belongs in Markdown under `.monty/projects/`.
@@ -281,7 +284,7 @@ Simple state makes self-extension safer.
 Every new Monty feature should answer these questions.
 
 1. What durable state does this read or write?
-2. Is `job.json` still the source of truth?
+2. Does it preserve local task status authority and `job.json` worker lifecycle authority?
 3. Can the head butler invoke it?
 4. Can a worker invoke it from generated instructions?
 5. Does it work after the worktree is deleted?

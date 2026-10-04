@@ -173,61 +173,82 @@ let directory_entries path =
   try Ok (Sys.readdir path |> Array.to_list |> List.sort String.compare) with
   | Sys_error msg -> Error (Printf.sprintf "failed to read Monty state directory %s: %s" path msg)
 
-let unsafe_symlink path =
-  Error
-    (Printf.sprintf
-       "unsafe symlink in Monty job state: %s; job discovery will not traverse it, so replace or remove the symlink before retrying"
-       path)
-
-let collect_job_files root =
+let discover_job_paths ~tolerant root =
+  let warnings = ref [] in
+  let recover default = function
+    | Ok value -> Ok value
+    | Error warning when tolerant ->
+        warnings := warning :: !warnings;
+        Ok default
+    | Error _ as error -> error
+  in
+  let inspect path = recover None (inspect_kind path) in
+  let entries path = recover [] (directory_entries path) in
+  let symlink acc path =
+    recover acc
+      (Error
+         (Printf.sprintf
+            "unsafe symlink in Monty job state: %s; job discovery %s it, so replace or remove the symlink before retrying"
+            path (if tolerant then "skipped" else "will not traverse")))
+  in
   let collect_workers acc container =
-    let* kind = inspect_kind container in
+    let* kind = inspect container in
     match kind with
     | None -> Ok acc
-    | Some Unix.S_LNK -> unsafe_symlink container
+    | Some Unix.S_LNK -> symlink acc container
     | Some Unix.S_DIR ->
-        let* names = directory_entries container in
+        let* names = entries container in
         List.fold_left
           (fun result name ->
             let* acc = result in
             let worker_dir = Filename.concat container name in
-            let* kind = inspect_kind worker_dir in
+            let* kind = inspect worker_dir in
             match kind with
-            | Some Unix.S_LNK -> unsafe_symlink worker_dir
+            | Some Unix.S_LNK -> symlink acc worker_dir
             | Some Unix.S_DIR ->
                 let job_file = Filename.concat worker_dir "job.json" in
-                let* job_kind = inspect_kind job_file in
+                let* job_kind = inspect job_file in
                 (match job_kind with
-                | Some Unix.S_LNK -> unsafe_symlink job_file
+                | Some Unix.S_LNK -> symlink acc job_file
                 | Some Unix.S_REG -> Ok (job_file :: acc)
                 | _ -> Ok acc)
             | _ -> Ok acc)
           (Ok acc) names
     | Some _ ->
-        Error (Printf.sprintf "Monty worker-state container is not a directory: %s" container)
+        recover acc
+          (Error
+             (Printf.sprintf "Monty worker-state container is not a directory: %s"
+                container))
   in
   let collect_run acc run_dir =
     let* acc = collect_workers acc (Filename.concat run_dir "workers") in
     collect_workers acc (Filename.concat run_dir "archive")
   in
-  let* kind = inspect_kind root in
-  match kind with
-  | None -> Ok []
-  | Some Unix.S_LNK -> unsafe_symlink root
-  | Some Unix.S_DIR ->
-      let* runs = directory_entries root in
-      List.fold_left
-        (fun result name ->
-          let* acc = result in
-          let run_dir = Filename.concat root name in
-          let* kind = inspect_kind run_dir in
-          match kind with
-          | Some Unix.S_LNK -> unsafe_symlink run_dir
-          | Some Unix.S_DIR -> collect_run acc run_dir
-          | _ -> Ok acc)
-        (Ok []) runs
-      |> Result.map List.rev
-  | Some _ -> Error (Printf.sprintf "Monty runs path is not a directory: %s" root)
+  let* kind = inspect root in
+  let* paths =
+    match kind with
+    | None -> Ok []
+    | Some Unix.S_LNK -> symlink [] root
+    | Some Unix.S_DIR ->
+        let* runs = entries root in
+        List.fold_left
+          (fun result name ->
+            let* acc = result in
+            let run_dir = Filename.concat root name in
+            let* kind = inspect run_dir in
+            match kind with
+            | Some Unix.S_LNK -> symlink acc run_dir
+            | Some Unix.S_DIR -> collect_run acc run_dir
+            | _ -> Ok acc)
+          (Ok []) runs
+    | Some _ ->
+        recover []
+          (Error (Printf.sprintf "Monty runs path is not a directory: %s" root))
+  in
+  Ok (List.rev paths, !warnings)
+
+let collect_job_files root =
+  discover_job_paths ~tolerant:false root |> Result.map fst
 
 let parse_job_file ?home path =
   try
@@ -521,77 +542,10 @@ type scan_result = {
   warnings : string list;
 }
 
-let symlink_warning path =
-  Printf.sprintf
-    "unsafe symlink in Monty job state: %s; job discovery skipped it, so replace or remove the symlink before retrying"
-    path
-
-let tolerant_job_paths root =
-  let inspect path =
-    match inspect_kind path with Ok kind -> (kind, []) | Error warning -> (None, [ warning ])
-  in
-  let entries path =
-    match directory_entries path with Ok names -> (names, []) | Error warning -> ([], [ warning ])
-  in
-  let collect_container container =
-    let kind, warnings = inspect container in
-    match kind with
-    | None -> ([], warnings)
-    | Some Unix.S_LNK -> ([], symlink_warning container :: warnings)
-    | Some Unix.S_DIR ->
-        let names, entry_warnings = entries container in
-        List.fold_left
-          (fun (paths, warnings) name ->
-            let worker_dir = Filename.concat container name in
-            let kind, kind_warnings = inspect worker_dir in
-            match kind with
-            | Some Unix.S_LNK ->
-                (paths, symlink_warning worker_dir :: kind_warnings @ warnings)
-            | Some Unix.S_DIR ->
-                let job_file = Filename.concat worker_dir "job.json" in
-                let job_kind, job_warnings = inspect job_file in
-                (match job_kind with
-                | Some Unix.S_LNK ->
-                    (paths, symlink_warning job_file :: job_warnings @ kind_warnings @ warnings)
-                | Some Unix.S_REG ->
-                    (job_file :: paths, job_warnings @ kind_warnings @ warnings)
-                | _ -> (paths, job_warnings @ kind_warnings @ warnings))
-            | _ -> (paths, kind_warnings @ warnings))
-          ([], entry_warnings @ warnings) names
-    | Some _ ->
-        ([], Printf.sprintf "Monty worker-state container is not a directory: %s" container :: warnings)
-  in
-  let root_kind, root_warnings = inspect root in
-  match root_kind with
-  | None -> ([], root_warnings)
-  | Some Unix.S_LNK -> ([], symlink_warning root :: root_warnings)
-  | Some Unix.S_DIR ->
-      let runs, run_warnings = entries root in
-      List.fold_left
-        (fun (paths, warnings) name ->
-          let run_dir = Filename.concat root name in
-          let kind, kind_warnings = inspect run_dir in
-          match kind with
-          | Some Unix.S_LNK ->
-              (paths, symlink_warning run_dir :: kind_warnings @ warnings)
-          | Some Unix.S_DIR ->
-              let active, active_warnings =
-                collect_container (Filename.concat run_dir "workers")
-              in
-              let archived, archive_warnings =
-                collect_container (Filename.concat run_dir "archive")
-              in
-              (active @ archived @ paths,
-               active_warnings @ archive_warnings @ kind_warnings @ warnings)
-          | _ -> (paths, kind_warnings @ warnings))
-        ([], run_warnings @ root_warnings) runs
-  | Some _ ->
-      ([], Printf.sprintf "Monty runs path is not a directory: %s" root :: root_warnings)
-
 let scan ~home =
   let* canonical_home = State_path.canonicalize home in
   let root = Filename.concat canonical_home ".monty/runs" in
-  let paths, structural_warnings = tolerant_job_paths root in
+  let* paths, structural_warnings = discover_job_paths ~tolerant:true root in
   let records, parse_warnings =
     paths |> List.sort String.compare
     |> List.fold_left
@@ -695,30 +649,26 @@ let pair_for_record ~home record =
       let* archived = State_path.archived ~home ~run_id:state.run_id ~id:state.id in
       Ok (active, archived)
 
-let same_operation expected transition = transition.operation = expected
-
 let load_identity_unlocked ~home ~run_id ~id ~operation =
   let* active = State_path.active ~home ~run_id ~id in
   let* archived = State_path.archived ~home ~run_id ~id in
   let active_exists = State_path.path_exists active.job_file in
   let archived_exists = State_path.path_exists archived.job_file in
-  match (active_exists, archived_exists) with
-  | true, true ->
-      Error
-        (Printf.sprintf
-           "worker %s exists at both canonical active and archive paths; repair the collision before retrying"
-           id)
-  | false, false -> Error (Printf.sprintf "worker state is missing for %s" id)
-  | true, false ->
-      let* record = parse_job_file ~home active.job_file in
-      (match record.transition with
-      | Some transition when same_operation operation transition -> Ok record
-      | _ -> Error (Printf.sprintf "worker %s is not in the matching transition" id))
-  | false, true ->
-      let* record = parse_job_file ~home archived.job_file in
-      (match record.transition with
-      | Some transition when same_operation operation transition -> Ok record
-      | _ -> Error (Printf.sprintf "worker %s is not in the matching transition" id))
+  let* path =
+    match (active_exists, archived_exists) with
+    | true, true ->
+        Error
+          (Printf.sprintf
+             "worker %s exists at both canonical active and archive paths; repair the collision before retrying"
+             id)
+    | false, false -> Error (Printf.sprintf "worker state is missing for %s" id)
+    | true, false -> Ok active.job_file
+    | false, true -> Ok archived.job_file
+  in
+  let* record = parse_job_file ~home path in
+  match record.transition with
+  | Some transition when transition.operation = operation -> Ok (record, transition)
+  | _ -> Error (Printf.sprintf "worker %s is not in the matching transition" id)
 
 let prepare_transition record ~operation ~task_key ~force =
   match record.home with
@@ -797,13 +747,8 @@ let relocate_transition record operation =
   match (record.home, record.state_path) with
   | Some home, Some state ->
       State_store.with_lock ~home (fun () ->
-          let* current =
+          let* current, transition =
             load_identity_unlocked ~home ~run_id:state.run_id ~id:state.id ~operation
-          in
-          let* transition =
-            match current.transition with
-            | Some transition -> Ok transition
-            | None -> Error "matching transition metadata disappeared"
           in
           if String.equal current.worker_dir transition.target then Ok current
           else if not (String.equal current.worker_dir transition.source) then
@@ -831,13 +776,8 @@ let normalize_transition record operation =
   match (record.home, record.state_path) with
   | Some home, Some state ->
       State_store.with_lock ~home (fun () ->
-          let* current =
+          let* current, transition =
             load_identity_unlocked ~home ~run_id:state.run_id ~id:state.id ~operation
-          in
-          let* transition =
-            match current.transition with
-            | Some transition -> Ok transition
-            | None -> Error "matching transition metadata disappeared"
           in
           if not (String.equal current.worker_dir transition.target) then
             Error (Printf.sprintf "worker %s has not reached its transition target" current.id)
@@ -855,7 +795,7 @@ let finalize_transition record operation =
   match (record.home, record.state_path) with
   | Some home, Some state ->
       State_store.with_lock ~home (fun () ->
-          let* current =
+          let* current, _transition =
             load_identity_unlocked ~home ~run_id:state.run_id ~id:state.id ~operation
           in
           let now = Worker_memory.now_utc () in

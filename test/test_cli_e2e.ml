@@ -1711,6 +1711,120 @@ let test_reconciliation_diagnostics_no_sync_and_unknown_launch () =
       if List.length tasks_after <> 1 then
         failwith "unknown-project launch created local task state")
 
+let test_discovery_preserves_strict_and_tolerant_policies () =
+  with_temp_root "discovery-policies" (fun root ->
+      let home, log, env = setup_environment root in
+      let repo = Filename.concat root "repo" in
+      let context = Filename.concat root "context.md" in
+      add_project ~root ~home ~env repo;
+      Shell.write_file context "# Discovery\n";
+      let healthy =
+        write_worker ~home ~run_id:"mixed" ~id:"z-healthy"
+          ~title:"Healthy worker" ~repo ~context ()
+      in
+      let healthy_bytes = Shell.read_file healthy in
+      let run_dir = Filename.concat (Unix.realpath home) ".monty/runs/mixed" in
+      let malformed = Filename.concat run_dir "workers/a-malformed/job.json" in
+      Shell.write_file malformed "{broken\n";
+      let outside = Filename.concat root "outside" in
+      Shell.ensure_dir outside;
+      let worker_link = Filename.concat run_dir "workers/b-link" in
+      let archive_link = Filename.concat run_dir "archive/a-archive-link" in
+      Shell.ensure_dir (Filename.dirname archive_link);
+      Unix.symlink outside worker_link;
+      Unix.symlink outside archive_link;
+      let strict index expected_path =
+        let result =
+          run ~root ~env index
+            [ "resume"; "z-healthy"; "--terminal"; "dry-run"; "--home"; home ]
+        in
+        require_code 1 result;
+        let expected =
+          "monty: unsafe symlink in Monty job state: " ^ expected_path
+          ^ "; job discovery will not traverse it, so replace or remove the symlink before retrying\n"
+        in
+        if result.stderr <> expected then
+          failf "strict discovery changed its first diagnostic: %S" result.stderr
+      in
+      strict 830 worker_link;
+      let list = run ~root ~env 831 [ "list"; "--all"; "--no-sync"; "--home"; home ] in
+      let tasks =
+        run ~root ~env 832 [ "tasks"; "list"; "--all"; "--no-sync"; "--home"; home ]
+      in
+      require_code 0 list;
+      require_code 0 tasks;
+      if list.stdout <> tasks.stdout || list.stderr <> tasks.stderr then
+        failwith "inventory views disagree about mixed worker state";
+      require_contains "healthy record survives discovery" list.stdout "z-healthy";
+      require_contains "malformed discovery warning" list.stderr ("invalid JSON in " ^ malformed);
+      List.iter
+        (fun path -> require_contains "symlink discovery warning" list.stderr
+            (path ^ "; job discovery skipped it"))
+        [ worker_link; archive_link ];
+      let warnings =
+        String.split_on_char '\n' list.stderr
+        |> List.filter (String.starts_with ~prefix:"monty: warning: ")
+      in
+      if List.length warnings <> 3 || warnings <> List.sort_uniq String.compare warnings then
+        failwith "discovery warnings are not sorted and unique";
+      Unix.unlink worker_link;
+      strict 833 archive_link;
+      Unix.unlink archive_link;
+      let malformed_result =
+        run ~root ~env 834
+          [ "resume"; "z-healthy"; "--terminal"; "dry-run"; "--home"; home ]
+      in
+      require_code 1 malformed_result;
+      require_contains "strict parsing after traversal" malformed_result.stderr
+        ("invalid JSON in " ^ malformed);
+      if Shell.read_file healthy <> healthy_bytes
+         || Sys.file_exists (Filename.concat home ".monty/tasks.local.json")
+      then failwith "read-only discovery changed task or worker state";
+      require_empty_log log)
+
+let test_inventory_filters_preserve_diagnostics () =
+  with_temp_root "inventory-filters" (fun root ->
+      let home, log, env = setup_environment root in
+      let repo = Filename.concat root "repo" in
+      add_project ~root ~home ~env repo;
+      let task id project title status =
+        `Assoc [ ("id", `String id); ("project", `String project);
+                 ("title", `String title); ("status", `String status) ]
+      in
+      let path = Filename.concat home ".monty/tasks.local.json" in
+      Yojson.Safe.to_file path
+        (`Assoc [ ("tasks", `List
+            [ task "local-001" "repo" "Open task" "open";
+              task "local-002" "repo" "Done task" "done";
+              task "local-003" "missing" "Done orphan" "done" ]) ]);
+      let before = Shell.read_file path in
+      let inventory index args =
+        let result = run ~root ~env index (args @ [ "--no-sync"; "--home"; home ]) in
+        require_code 0 result;
+        result
+      in
+      let list = inventory 840 [ "list" ] in
+      let tasks = inventory 841 [ "tasks"; "list" ] in
+      if list.stdout <> tasks.stdout || list.stderr <> tasks.stderr then
+        failwith "open inventories diverged";
+      require_contains "open task visible" list.stdout "Open task";
+      if string_contains list.stdout "Done" then failwith "done tasks leaked into open inventory";
+      require_contains "list retains orphan diagnostic" list.stderr "local:local-003";
+      let all = inventory 842 [ "list"; "--all" ] in
+      let all_tasks = inventory 843 [ "tasks"; "list"; "--all" ] in
+      if all.stdout <> all_tasks.stdout || all.stderr <> all_tasks.stderr then
+        failwith "all inventories diverged";
+      require_contains "done orphan visible" all.stdout "Done orphan";
+      let archived = inventory 844 [ "list"; "--archived" ] in
+      require_contains "done task archived" archived.stdout "Done task";
+      if string_contains archived.stdout "Open task" then failwith "open task appeared in archived inventory";
+      let project = inventory 845 [ "tasks"; "list"; "--all"; "--project"; "repo" ] in
+      require_contains "project done task" project.stdout "Done task";
+      if string_contains project.stdout "Done orphan" || project.stderr <> "" then
+        failwith "project filter retained an unrelated orphan";
+      if Shell.read_file path <> before then failwith "inventory rewrote task state";
+      require_empty_log log)
+
 let install_fake_gh ~root ~log ~state ~title =
   let gh = Filename.concat root "fake-bin/gh" in
   let json =
@@ -7327,6 +7441,10 @@ let () =
     ("cli_task_list_numbers", test_task_list_numbers);
     ( "cli_reconciliation_diagnostics_no_sync_and_unknown_launch",
       test_reconciliation_diagnostics_no_sync_and_unknown_launch );
+    ( "cli_discovery_preserves_strict_and_tolerant_policies",
+      test_discovery_preserves_strict_and_tolerant_policies );
+    ( "cli_inventory_filters_preserve_diagnostics",
+      test_inventory_filters_preserve_diagnostics );
     ( "cli_external_import_local_ownership_and_stable_projects",
       test_external_import_local_ownership_and_stable_projects );
     ( "cli_duplicate_task_claims_warn_deterministically",

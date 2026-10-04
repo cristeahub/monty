@@ -770,11 +770,11 @@ shell_rc_kind() {
   esac
 }
 
-existing_monty_home_assignments() {
-  if [ ! -f "$1" ]; then
+monty_shell_rc_lines() {
+  if [ "$1" = report ] && [ ! -f "$2" ]; then
     return 0
   fi
-  awk '
+  awk -v mode="$1" -v remove_existing="${3:-0}" '
     function is_monty_home_assignment(line) {
       return \
         line ~ /^[[:space:]]*(export[[:space:]]+)?MONTY_HOME[[:space:]]*=/ || \
@@ -783,8 +783,14 @@ existing_monty_home_assignments() {
     }
     $0 == "# >>> monty >>>" { skip = 1; next }
     $0 == "# <<< monty <<<" { skip = 0; next }
-    skip != 1 && is_monty_home_assignment($0) { print }
-  ' "$1"
+    skip == 1 { next }
+    mode == "report" {
+      if (is_monty_home_assignment($0)) print
+      next
+    }
+    remove_existing == "1" && is_monty_home_assignment($0) { next }
+    { print }
+  ' "$2"
 }
 
 confirm_shell_rc_override() {
@@ -836,7 +842,7 @@ write_monty_shell_rc() {
   if [ -z "$rc_file" ]; then
     rc_file=$(default_shell_rc)
   fi
-  existing=$(existing_monty_home_assignments "$rc_file")
+  existing=$(monty_shell_rc_lines report "$rc_file")
   if [ "$dry_run" -eq 1 ]; then
     if [ -n "$existing" ]; then
       printf '+ would ask before overriding existing MONTY_HOME in %s\n' \
@@ -866,19 +872,7 @@ write_monty_shell_rc() {
   shell_rc_tmp=$(mktemp "$rc_dir/.monty-shell-rc.XXXXXX") || return 1
   if [ -f "$rc_target" ]; then
     cp -p "$rc_target" "$shell_rc_tmp"
-    awk -v remove_existing="$remove_existing" '
-      function is_monty_home_assignment(line) {
-        return \
-          line ~ /^[[:space:]]*(export[[:space:]]+)?MONTY_HOME[[:space:]]*=/ || \
-          line ~ /^[[:space:]]*(typeset|declare)[[:space:]][^#]*MONTY_HOME[[:space:]]*=/ || \
-          line ~ /^[[:space:]]*set[[:space:]][^#]*[[:space:]]MONTY_HOME([[:space:]]|$)/
-      }
-      $0 == "# >>> monty >>>" { skip = 1; next }
-      $0 == "# <<< monty <<<" { skip = 0; next }
-      skip == 1 { next }
-      remove_existing == "1" && is_monty_home_assignment($0) { next }
-      { print }
-    ' "$rc_target" > "$shell_rc_tmp"
+    monty_shell_rc_lines filter "$rc_target" "$remove_existing" > "$shell_rc_tmp"
   fi
   {
     printf '\n# >>> monty >>>\n'

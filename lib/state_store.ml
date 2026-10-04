@@ -181,30 +181,40 @@ let fsync_regular_file path =
   let fd = Unix.openfile path [ Unix.O_RDONLY ] 0 in
   Fun.protect ~finally:(fun () -> Unix.close fd) (fun () -> Unix.fsync fd)
 
+let replace_file_atomic ?perm ?(before_rename = fun () -> Ok ()) ~path contents =
+  let dir = Filename.dirname path in
+  Shell.ensure_dir dir;
+  let temp_path = next_temp_path path in
+  let creation_perm =
+    match perm with
+    | Some perm -> perm
+    | None ->
+        try (Unix.stat path).Unix.st_perm land 0o777 with Unix.Unix_error _ -> 0o600
+  in
+  let fd =
+    Unix.openfile temp_path
+      [ Unix.O_WRONLY; Unix.O_CREAT; Unix.O_EXCL ] creation_perm
+  in
+  let renamed = ref false in
+  Fun.protect
+    ~finally:(fun () ->
+      (try Unix.close fd with _ -> ());
+      if (not !renamed) && State_path.path_exists temp_path then
+        try Unix.unlink temp_path with _ -> ())
+    (fun () ->
+      write_all fd contents;
+      Option.iter (Unix.fchmod fd) perm;
+      Unix.fsync fd;
+      let* () = before_rename () in
+      Unix.close fd;
+      Unix.rename temp_path path;
+      renamed := true;
+      fsync_directory dir;
+      Ok ())
+
 let write_file_atomic ~path ~perm contents =
   protect_result ~action:"atomically write file" ~path (fun () ->
-      let dir = Filename.dirname path in
-      Shell.ensure_dir dir;
-      let temp_path = next_temp_path path in
-      let fd =
-        Unix.openfile temp_path
-          [ Unix.O_WRONLY; Unix.O_CREAT; Unix.O_EXCL ] perm
-      in
-      let renamed = ref false in
-      Fun.protect
-        ~finally:(fun () ->
-          (try Unix.close fd with _ -> ());
-          if (not !renamed) && State_path.path_exists temp_path then
-            try Unix.unlink temp_path with _ -> ())
-        (fun () ->
-          write_all fd contents;
-          Unix.fchmod fd perm;
-          Unix.fsync fd;
-          Unix.close fd;
-          Unix.rename temp_path path;
-          renamed := true;
-          fsync_directory dir;
-          Ok ()))
+      replace_file_atomic ~path ~perm contents)
 
 let write_json_atomic ~path json =
   let serialized =
@@ -213,31 +223,7 @@ let write_json_atomic ~path json =
   in
   let* contents = serialized in
   protect_result ~action:"atomically write JSON" ~path (fun () ->
-      let dir = Filename.dirname path in
-      Shell.ensure_dir dir;
-      let temp_path = next_temp_path path in
-      let existing_perm =
-        try (Unix.stat path).Unix.st_perm land 0o777 with Unix.Unix_error _ -> 0o600
-      in
-      let fd =
-        Unix.openfile temp_path
-          [ Unix.O_WRONLY; Unix.O_CREAT; Unix.O_EXCL ] existing_perm
-      in
-      let renamed = ref false in
-      Fun.protect
-        ~finally:(fun () ->
-          (try Unix.close fd with _ -> ());
-          if (not !renamed) && State_path.path_exists temp_path then
-            try Unix.unlink temp_path with _ -> ())
-        (fun () ->
-          write_all fd contents;
-          Unix.fsync fd;
-          let* () = check_before_rename_fault () in
-          Unix.close fd;
-          Unix.rename temp_path path;
-          renamed := true;
-          fsync_directory dir;
-          Ok ()))
+      replace_file_atomic ~path ~before_rename:check_before_rename_fault contents)
 
 let write_json ~home ~path json =
   with_lock ~home (fun () -> write_json_atomic ~path json)

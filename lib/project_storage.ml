@@ -1,40 +1,11 @@
 open Yojson.Safe
+open Json_fields
 open Overview_types
 
 let monty_dir home = Filename.concat home ".monty"
 let projects_file home = Filename.concat (monty_dir home) "projects.json"
 let projects_dir home = Filename.concat (monty_dir home) "projects"
-let memory_file ~home id = Filename.concat (projects_dir home) (id ^ ".md")
-let project_memory_file = memory_file
-
-let member_string json name =
-  match Util.member name json with
-  | `String value when String.trim value <> "" -> Ok value
-  | _ -> Error (Printf.sprintf "missing string field %S" name)
-
-let optional_string json name =
-  match Util.member name json with
-  | `Null -> Ok None
-  | `String value when String.trim value = "" -> Ok None
-  | `String value -> Ok (Some value)
-  | _ -> Error (Printf.sprintf "field %S must be a string when present" name)
-
-let list_field json name =
-  match Util.member name json with
-  | `Null -> Ok []
-  | `List values -> Ok values
-  | _ -> Error (Printf.sprintf "field %S must be an array" name)
-
-let read_json_file path =
-  try Ok (Yojson.Safe.from_file path) with
-  | Sys_error msg -> Error msg
-  | Yojson.Json_error msg -> Error ("invalid JSON in " ^ path ^ ": " ^ msg)
-
-let fold_results values ~init ~f =
-  List.fold_left
-    (fun acc value ->
-      match acc with Error _ as err -> err | Ok acc -> f acc value)
-    (Ok init) values
+let project_memory_file ~home id = Filename.concat (projects_dir home) (id ^ ".md")
 
 let parse_source json =
   let ( let* ) = Result.bind in
@@ -297,35 +268,6 @@ let ensure_project_memory ~home (project : project) =
     Shell.write_file path (project_memory_template project);
     Ok ())
 
-let project_id_changes old_projects new_projects =
-  new_projects
-  |> List.filter_map (fun (project : project) ->
-         match
-           List.find_opt
-             (fun (old : project) -> String.equal old.repo project.repo)
-             old_projects
-         with
-         | Some old when not (String.equal old.id project.id) -> Some (old.id, project.id)
-         | _ -> None)
-
-let migrate_project_memory ~home old_projects new_projects =
-  let changes = project_id_changes old_projects new_projects in
-  let migrate (old_id, new_id) =
-    let old_path = project_memory_file ~home old_id in
-    let new_path = project_memory_file ~home new_id in
-    if Sys.file_exists old_path && not (Sys.file_exists new_path) then
-      try
-        Shell.ensure_dir (Filename.dirname new_path);
-        Unix.rename old_path new_path;
-        Ok ()
-      with Unix.Unix_error (err, fn, arg) ->
-        Error
-          (Printf.sprintf "failed to migrate project memory via %s(%s): %s" fn arg
-             (Unix.error_message err))
-    else Ok ()
-  in
-  fold_results changes ~init:() ~f:(fun () change -> migrate change)
-
 let add_project ~home ~repo ?github ?query () =
   let repo = Shell.normalize (Shell.abs_path repo) in
   if not (Sys.file_exists repo && Sys.is_directory repo) then
@@ -361,7 +303,6 @@ let add_project ~home ~repo ?github ?query () =
           in
           let* () = save_registry_unlocked ~home groups persisted in
           let* projects = load_projects ~home in
-          let* () = migrate_project_memory ~home old_projects projects in
           let* project = resolve_project projects repo in
           let* () = ensure_project_memory ~home project in
           Ok project)
