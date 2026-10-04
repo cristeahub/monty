@@ -1,4 +1,4 @@
-open Yojson.Safe
+open Json_fields
 open Overview_types
 
 let local_tasks_file home =
@@ -7,29 +7,6 @@ let local_tasks_file home =
 let now_utc = Worker_memory.now_utc
 let load_projects = Project_storage.load_projects
 let resolve_project = Project_storage.resolve_project
-
-let member_string json name =
-  match Util.member name json with
-  | `String value when String.trim value <> "" -> Ok value
-  | _ -> Error (Printf.sprintf "missing string field %S" name)
-
-let optional_string json name =
-  match Util.member name json with
-  | `Null -> Ok None
-  | `String value when String.trim value = "" -> Ok None
-  | `String value -> Ok (Some value)
-  | _ -> Error (Printf.sprintf "field %S must be a string when present" name)
-
-let list_field json name =
-  match Util.member name json with
-  | `Null -> Ok []
-  | `List values -> Ok values
-  | _ -> Error (Printf.sprintf "field %S must be an array" name)
-
-let read_json_file path =
-  try Ok (Yojson.Safe.from_file path) with
-  | Sys_error msg -> Error msg
-  | Yojson.Json_error msg -> Error ("invalid JSON in " ^ path ^ ": " ^ msg)
 
 let strip_prefix text value =
   if String.starts_with ~prefix:text value then
@@ -42,11 +19,23 @@ let duplicate_value values =
   |> List.find_opt (fun value ->
          List.length (List.filter (String.equal value) values) > 1)
 
-let fold_results values ~init ~f =
-  List.fold_left
-    (fun acc value ->
-      match acc with Error _ as err -> err | Ok acc -> f acc value)
-    (Ok init) values
+let make_local_task ~id ~project ~title ~status ~now =
+  {
+    id;
+    project;
+    title;
+    status;
+    branch = None;
+    workspaces = [];
+    notes = None;
+    worker_id = None;
+    worker_key = None;
+    external_key = None;
+    external_url = None;
+    external_source = None;
+    created_at = Some now;
+    updated_at = Some now;
+  }
 
 let parse_task_workspace json =
   let ( let* ) = Result.bind in
@@ -203,22 +192,8 @@ let add_local_task ~home ~project ~title ?notes () =
       let* tasks = load_local_tasks ~home in
       let now = now_utc () in
       let task =
-        {
-          id = next_local_id tasks;
-          project = project.id;
-          title;
-          status = "open";
-          branch = None;
-          workspaces = [];
-          notes;
-          worker_id = None;
-          worker_key = None;
-          external_key = None;
-          external_url = None;
-          external_source = None;
-          created_at = Some now;
-          updated_at = Some now;
-        }
+        { (make_local_task ~id:(next_local_id tasks) ~project:project.id ~title
+             ~status:"open" ~now) with notes }
       in
       let* () = save_local_tasks_unlocked ~home (tasks @ [ task ]) in
       Ok task)

@@ -9,11 +9,7 @@ let save_local_tasks_unlocked = Task_storage.save_local_tasks_unlocked
 let next_local_id = Task_storage.next_local_id
 let task_of_local = Task_storage.task_of_local
 
-let fold_results values ~init ~f =
-  List.fold_left
-    (fun acc value ->
-      match acc with Error _ as err -> err | Ok acc -> f acc value)
-    (Ok init) values
+let fold_results = Json_fields.fold_results
 
 let local_task_key id = "local:" ^ id
 
@@ -92,8 +88,6 @@ let fetch_project_tasks (project : project) =
   fold_results project.sources ~init:[] ~f:(fun acc source ->
       fetch_github_tasks ~project source
       |> Result.map (fun tasks -> acc @ tasks))
-
-type job_patch = Job_store.record * string
 
 let compare_job_records (left : Job_store.record) (right : Job_store.record) =
   match String.compare left.id right.id with
@@ -252,32 +246,29 @@ let validate_worker_task_link_in projects tasks (record : Job_store.record) =
             Error
               (Printf.sprintf "linked local Monty task %s is owned by worker %s"
                  task.id owner)
-        | _ -> Ok (Some task.id)
+        | _ -> Ok (Some task)
 
 let validate_worker_task_link ~home record =
   let ( let* ) = Result.bind in
   let* projects = load_projects ~home in
   let* tasks = load_local_tasks ~home in
   validate_worker_task_link_in projects tasks record
+  |> Result.map (Option.map (fun (task : local_task) -> task.id))
 
 let set_worker_task_status ~home record status =
   State_store.with_lock ~home (fun () ->
       let ( let* ) = Result.bind in
       let* projects = load_projects ~home in
       let* tasks = load_local_tasks ~home in
-      let* task_id = validate_worker_task_link_in projects tasks record in
-      match task_id with
+      let* task = validate_worker_task_link_in projects tasks record in
+      match task with
       | None -> Ok ()
-      | Some id -> (
-          match find_local_task_by_id tasks id with
-          | None -> Error (Printf.sprintf "linked local Monty task is missing: %s" id)
-          | Some task when String.equal task.status status -> Ok ()
-          | Some task ->
-              let updated =
-                { task with status; updated_at = Some (now_utc ()) }
-              in
-              Task_storage.save_local_tasks_unlocked ~home
-                (replace_local_task tasks updated)))
+      | Some task when String.equal task.status status -> Ok ()
+      | Some task ->
+          let updated =
+            { task with status; updated_at = Some (now_utc ()) }
+          in
+          save_local_tasks_unlocked ~home (replace_local_task tasks updated))
 
 let valid_local_task_link projects tasks (record : Job_store.record) =
   match record.job.Job.task_key with
@@ -321,21 +312,15 @@ let update_external_tasks tasks imports =
       | None ->
           let now = now_utc () in
           let task =
+            Task_storage.make_local_task ~id:(next_local_id tasks)
+              ~project:import.project ~title:import.title ~status:"open" ~now
+          in
+          let task =
             {
-              id = next_local_id tasks;
-              project = import.project;
-              title = import.title;
-              status = "open";
-              branch = None;
-              workspaces = [];
-              notes = None;
-              worker_id = None;
-              worker_key = None;
+              task with
               external_key = Some external_key;
               external_url = import.url;
               external_source = Some import.origin;
-              created_at = Some now;
-              updated_at = Some now;
             }
           in
           (tasks @ [ task ], created + 1, updated)
@@ -476,21 +461,17 @@ let plan_jobs ~home projects initial_tasks records initial_warnings =
               | [] ->
                   let now = now_utc () in
                   let task =
+                    Task_storage.make_local_task ~id:(next_local_id tasks)
+                      ~project:project.id ~title:record.job.Job.title
+                      ~status:(status_of_job record) ~now
+                  in
+                  let task =
                     {
-                      id = next_local_id tasks;
-                      project = project.id;
-                      title = record.job.Job.title;
-                      status = status_of_job record;
+                      task with
                       branch = record.job.Job.branch;
                       workspaces = task_workspaces_of_job record.job;
-                      notes = None;
                       worker_id = Some record.id;
                       worker_key = Some stable_key;
-                      external_key = None;
-                      external_url = None;
-                      external_source = None;
-                      created_at = Some now;
-                      updated_at = Some now;
                     }
                   in
                   ( tasks @ [ task ],
@@ -593,7 +574,7 @@ let diagnostic_task projects (record : Job_store.record) =
     url = None;
   }
 
-let load_tasks_with_warnings ~home ?project ?group ?(all = false) () =
+let load_tasks_with_warnings ~home ?project ?group ?(all = false) ?scan () =
   let ( let* ) = Result.bind in
   let* groups, raw_projects = Project_storage.load_registry ~home in
   let* () = Project_storage.check_group groups group in
@@ -607,7 +588,7 @@ let load_tasks_with_warnings ~home ?project ?group ?(all = false) () =
     selected_projects |> List.filter (fun (project : project) -> group = None || project.group = group)
   in
   let* local_tasks = load_local_tasks ~home in
-  let* scan = Job_store.scan ~home in
+  let* scan = match scan with Some scan -> Ok scan | None -> Job_store.scan ~home in
   let selected_ids = List.map (fun (project : project) -> project.id) selected_projects in
   let visible_task (task : local_task) =
     all || not (String.equal (String.lowercase_ascii task.status) "done")
@@ -816,20 +797,15 @@ let plan_launch_task_links ~home (jobs : (string * Job.t) list) =
         | [] ->
             let now = now_utc () in
             let task =
-              { id = next_local_id tasks;
-                project = project.id;
-                title = job.title;
-                status = "open";
+              Task_storage.make_local_task ~id:(next_local_id tasks)
+                ~project:project.id ~title:job.title ~status:"open" ~now
+            in
+            let task =
+              { task with
                 branch = job.branch;
                 workspaces = task_workspaces_of_job job;
-                notes = None;
                 worker_id = Some worker_id;
-                worker_key = Some stable_key;
-                external_key = None;
-                external_url = None;
-                external_source = None;
-                created_at = Some now;
-                updated_at = Some now }
+                worker_key = Some stable_key }
             in
             Ok
               ( tasks @ [ task ],

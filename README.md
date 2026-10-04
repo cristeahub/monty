@@ -18,6 +18,12 @@ Monty handles the glue around Ghostty, `wt`, worktrees, manifests, agent harness
 - Ghostty on macOS for normal launching.
 - `gh` on `PATH` when using GitHub issues as a project task source.
 
+For isolated Linux ARM64 workers on Apple silicon, see the
+[Apple worker image setup](container/apple-worker/README.md). The current
+container workflow supports headless Pi and Codex with one repository per task; it
+keeps the repository, worktree, caches, and toolchain inside an Apple container.
+Host workers remain the default.
+
 ## Build
 
 ```sh
@@ -89,13 +95,7 @@ to `monty mcp serve` independently of Monty's harness support. See
 [MCP setup and portability](docs/mcp.md); `monty mcp guide` reads the same manual
 without MCP.
 
-From this repo, run:
-
-```sh
-dune exec -- monty
-```
-
-After installation, run:
+Use the installed `monty` command from any directory:
 
 ```sh
 monty
@@ -151,7 +151,7 @@ remain worker-task lifecycle commands.
 ## Launch one worker
 
 ```sh
-dune exec -- monty launch \
+monty launch \
   --repo /path/to/repo \
   --title "Fix issue 123" \
   --context .monty/runs/run-1/issue-123.md
@@ -170,7 +170,7 @@ sandbox settings.
 ## Launch many workers
 
 ```sh
-dune exec -- monty launch-many --manifest .monty/runs/run-1/jobs.json
+monty launch-many --manifest .monty/runs/run-1/jobs.json
 ```
 
 Example manifest:
@@ -326,7 +326,7 @@ Monty invokes Pi with `--print --mode json --no-session`. No subagent extension 
 
 Headless profiles always start fresh phases; `--fork` is supported only for interactive Pi workers.
 
-Codex uses `codex exec --ephemeral --json` and preserves command-local trust and configured permissions. With Codex YOLO disabled, writers use `workspace-write`, while reviewers use `read-only`. The existing `codex-yolo` setting continues to apply to Codex only. Container execution remains Codex-only.
+Codex uses `codex exec --ephemeral --json` and preserves command-local trust and configured permissions. With Codex YOLO disabled, writers use `workspace-write`, while reviewers use `read-only`. The existing `codex-yolo` setting continues to apply to Codex only. Both Pi and Codex support headless execution in [Apple Linux containers](container/apple-worker/README.md), with one repository per worker.
 
 Prompts, JSONL events, phase logs, and final messages live in the worker's durable `artifacts/headless/<attempt-id>/` directory. Background supervisor diagnostics and its final result go to `logs/supervisor.log`. Monty captures phase handoffs into worker memory and publishes the canonical `monty:run-handoff:v1` record and pending notice. Failures include the last known phase and artifact paths. A successful run leaves the task open and all worktrees intact.
 
@@ -452,7 +452,7 @@ The wt worktrees are treated as ephemeral and can be recreated from the durable 
 Resume a worker by id, branch leaf, branch, or title slug:
 
 ```sh
-dune exec -- monty resume issue-123
+monty resume issue-123
 ```
 
 `resume` reads `job.json`, recreates or reuses every repo-scoped worktree, and reopens the selected harness with the same durable worker memory.
@@ -463,7 +463,7 @@ start a new Codex conversation with the normal task prompt; the prior sidecar
 is replaced only after the new `SessionStart` hook runs. `open --fresh` is the
 same operation.
 Resume always derives worktree mode from the durable record rather than a current CLI default, so a `never` worker cannot accidentally create an unmanaged worktree.
-Open jobs are found from worker `job.json` files.
+Lifecycle commands find workers through their durable `job.json` files.
 The original `jobs.json` manifest is launch input and a safe batch-retry contract.
 Durable `job.json` remains the lifecycle source of truth.
 `done` archives the worker and closes the linked Monty-owned local task in the same command.
@@ -486,34 +486,15 @@ Persisted path fields cannot override the canonical physical location.
 Resume an archived worker and move it back to active memory with:
 
 ```sh
-dune exec -- monty resume --archived issue-123
+monty resume --archived issue-123
 ```
 
-## List and archive jobs
+## Archive completed tasks
 
-List active jobs from durable `job.json` files:
-
-```sh
-dune exec -- monty list
-```
-
-List archived or all jobs with:
+Complete a task and archive its worker with:
 
 ```sh
-dune exec -- monty list --archived
-dune exec -- monty list --all
-```
-
-Filter a run by directory name or path with:
-
-```sh
-dune exec -- monty list --run run-1
-```
-
-Mark a job done with:
-
-```sh
-dune exec -- monty done issue-123
+monty done issue-123
 ```
 
 Inside a worker session, `monty done` uses `MONTY_WORKER_DIR` and does not need an argument.
@@ -521,10 +502,10 @@ Inside a worker session, `monty done` uses `MONTY_WORKER_DIR` and does not need 
 Use `--force` to discard local worktree changes while archiving:
 
 ```sh
-dune exec -- monty done issue-123 --force
+monty done issue-123 --force
 ```
 
-Completing a job first verifies every workspace, then deletes all of its worktrees and branches, writes `status: done` to `job.json`, and moves durable memory to:
+Completing a task first verifies every workspace, then deletes all of its worktrees and branches, closes the linked local task, writes `status: done` to `job.json`, and moves durable memory to:
 
 ```text
 .monty/runs/<run-id>/archive/<worker-id>/
@@ -611,7 +592,7 @@ Show a cross-project overview:
 monty overview
 ```
 
-List tasks:
+List open tasks, or filter them by project:
 
 ```sh
 monty list
@@ -619,7 +600,8 @@ monty tasks list
 monty tasks list --project monty
 ```
 
-`list` and `tasks list` are equivalent task-listing views and show `#`, `ID`, `PROJECT`, `STATUS`, `TITLE`, and `BRANCH`.
+`list` and `tasks list` read the same local task inventory and show `#`, `ID`, `PROJECT`, `STATUS`, `TITLE`, and `BRANCH`.
+Task status comes from the local registry; worker `job.json` files record launch and lifecycle state, not a separate task inventory.
 Visible rows are numbered from 1 after filtering and sorting; every fresh list restarts at 1, including project/run filters and archived/all views where supported.
 In a head-butler conversation, `complete 1` refers to row 1 of the most recent task list actually shown to you.
 After completing it, `complete 2` still refers to the original row 2 until a fresh list is displayed; background changes and internal reads do not renumber those references.
@@ -634,6 +616,19 @@ It writes tasks before patching job links, so interruption can be retried withou
 Corrupt or unknown neighboring workers produce diagnostics while healthy records continue.
 Use `--no-sync` with either inventory command for a read-only view with no reconciliation writes or external metadata fetches.
 You can run `monty tasks sync` explicitly when repairing or inspecting sync behavior.
+
+List done tasks or both open and done tasks within the selected group with:
+
+```sh
+monty list --archived
+monty list --all
+```
+
+Filter tasks linked to workers in a run by directory name or path with:
+
+```sh
+monty list --run run-1
+```
 
 Add or complete a local task:
 
@@ -701,7 +696,7 @@ Use dry-run mode to inspect what Monty would do without creating tasks, worker r
 Dry-run performs the same complete path, identity, project, task, state-conflict, and dependency validation as real launch.
 
 ```sh
-dune exec -- monty launch-many \
+monty launch-many \
   --terminal dry-run \
   --manifest .monty/runs/run-1/jobs.json
 ```
@@ -742,7 +737,7 @@ MONTY_HOME=/path/to/monty
 ## Doctor
 
 ```sh
-dune exec -- monty doctor
+monty doctor
 ```
 
 Doctor prints a stable table with `PASS`, `WARN`, and `FAIL` levels plus exact recovery commands.

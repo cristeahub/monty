@@ -596,10 +596,10 @@ let test_launch_many_single_job_uses_single_job_defaults () =
       backend = Terminal.Dry_run;
       target = Terminal.Tab;
       harness = Harness.Pi;
-      harness_command = "/usr/bin/true --pi-test";
+      harness_command = "/bin/sh -c true --pi-test";
       codex_yolo = false;
       container_workers = false;
-      wt_command = "/usr/bin/true --wt-test";
+      wt_command = "/bin/sh -c true --wt-test";
       worktree_mode = Always;
       branch_prefix = "cto";
       agent_profile = "reviewed";
@@ -627,10 +627,10 @@ let test_launch_many_multiple_jobs_keeps_numbered_defaults () =
       backend = Terminal.Dry_run;
       target = Terminal.Tab;
       harness = Harness.Pi;
-      harness_command = "/usr/bin/true --pi-test";
+      harness_command = "/bin/sh -c true --pi-test";
       codex_yolo = false;
       container_workers = false;
-      wt_command = "/usr/bin/true --wt-test";
+      wt_command = "/bin/sh -c true --wt-test";
       worktree_mode = Always;
       branch_prefix = "cto";
       agent_profile = "reviewed";
@@ -789,9 +789,11 @@ let test_atomic_success_preserves_permissions_and_cleans_temp () =
   let path = Filename.concat home ".monty/tasks.local.json" in
   Shell.write_file path "{\"tasks\":[]}\n";
   Unix.chmod path 0o640;
-  must
-    (State_store.write_json ~home ~path
-       (`Assoc [ ("tasks", `List [ `Assoc [ ("id", `String "local-001") ] ]) ]));
+  let previous_umask = Unix.umask 0o077 in
+  Fun.protect ~finally:(fun () -> ignore (Unix.umask previous_umask)) (fun () ->
+      must
+        (State_store.write_json ~home ~path
+           (`Assoc [ ("tasks", `List [ `Assoc [ ("id", `String "local-001") ] ]) ])));
   let mode = (Unix.stat path).Unix.st_perm land 0o777 in
   assert_equal "atomic permissions" "416" (string_of_int mode);
   ignore (Yojson.Safe.from_file path);
@@ -800,6 +802,41 @@ let test_atomic_success_preserves_permissions_and_cleans_temp () =
     |> List.filter (fun name -> string_contains name "monty-tmp")
   in
   assert_bool "successful atomic write cleaned temp" (temp_files = [])
+
+let test_atomic_file_and_json_write_policies () =
+  let root = temp_root "atomic-policies" in
+  let script = Filename.concat root "launch.sh" in
+  let json = Filename.concat root "state.json" in
+  Shell.write_file json "{}\n";
+  Unix.chmod json 0o640;
+  let old_umask = Unix.umask 0o077 in
+  let hook_calls = ref 0 in
+  Fun.protect
+    ~finally:(fun () ->
+      State_store.reset_before_rename_hook ();
+      ignore (Unix.umask old_umask))
+    (fun () ->
+      State_store.set_before_rename_hook (fun () ->
+          incr hook_calls;
+          Error "JSON-only fault");
+      must (State_store.write_file_atomic ~path:script ~perm:0o750 "#!/bin/sh\n");
+      assert_bool "script permissions override umask"
+        ((Unix.stat script).Unix.st_perm land 0o777 = 0o750);
+      assert_bool "script writes skip JSON fault hook" (!hook_calls = 0);
+      (match State_store.write_json_atomic ~path:json (`Assoc []) with
+      | Ok () -> failwith "expected JSON-only fault"
+      | Error message -> assert_equal "JSON hook diagnostic" "JSON-only fault" message);
+      assert_bool "JSON writes invoke fault hook" (!hook_calls = 1);
+      assert_equal "fault preserves JSON bytes" "{}\n" (Shell.read_file json);
+      assert_bool "fault preserves JSON permissions"
+        ((Unix.stat json).Unix.st_perm land 0o777 = 0o640);
+      State_store.reset_before_rename_hook ();
+      must (State_store.write_json_atomic ~path:json (`Assoc []));
+      assert_bool "JSON replacement preserves permissions under restrictive umask"
+        ((Unix.stat json).Unix.st_perm land 0o777 = 0o640));
+  assert_bool "atomic policies clean temporary files"
+    (Sys.readdir root |> Array.to_list |> List.sort String.compare
+     = [ "launch.sh"; "state.json" ])
 
 let write_legacy_job path ~id ~repo ~context extra =
   Shell.ensure_dir (Filename.dirname path);
@@ -1184,10 +1221,10 @@ let test_codex_harness_rejects_fork () =
       { backend = Terminal.Dry_run;
         target = Terminal.Tab;
         harness = Harness.Codex;
-        harness_command = "/usr/bin/true";
+        harness_command = "/bin/sh -c true";
         codex_yolo = false;
         container_workers = false;
-        wt_command = "/usr/bin/true";
+        wt_command = "/bin/sh -c true";
         worktree_mode = Never;
         branch_prefix = "monty";
         agent_profile = "reviewed";
@@ -1302,6 +1339,7 @@ let test_container_worker_contract () =
   in
   assert_contains "pinned image base" recipe "@sha256:";
   assert_contains "pinned Codex" recipe "@openai/codex@0.153.0";
+  assert_contains "pinned Pi" recipe "@earendil-works/pi-coding-agent@1.0.2";
   assert_contains "verified Codex tarball" recipe "npm pack --pack-destination";
   assert_contains "offline Codex install" recipe
     "npm install --global --offline --omit=optional";
@@ -1315,12 +1353,25 @@ let test_container_worker_contract () =
   assert_contains "inspection rejects a symlinked worktree" helper
     "test ! -L \"$worktree\"";
   assert_not_contains "inspection has no eval" helper "eval";
+  let credentials =
+    must
+      (Container_worker.credential_values
+         {|{"auth_mode":"chatgpt","tokens":{"access_token":"credential-value"}}|})
+  in
+  must (Container_worker.reject_credentials credentials "chatgpt login selected");
   (match
-     Container_worker.reject_credentials [ "credential-value" ]
+     Container_worker.reject_credentials credentials
        "reported credential-value"
    with
   | Error _ -> ()
   | Ok () -> failwith "container output credential was not rejected");
+  let pi_credentials = must (Container_worker.credential_values ~harness:Harness.Pi
+      {|{"openai-codex":{"type":"oauth","access":"pi-access-secret","refresh":"pi-refresh-secret","expires":123},"anthropic":{"type":"api_key","key":"pi-api-secret"}}|}) in
+  must (Container_worker.reject_credentials pi_credentials "oauth api_key openai-codex");
+  List.iter (fun secret ->
+      assert_bool "Pi credentials rejected"
+        (Result.is_error (Container_worker.reject_credentials pi_credentials secret)))
+    [ "pi-access-secret"; "pi-refresh-secret"; "pi-api-secret" ];
   let changes =
     must
       (Container_worker.parse_change_summary
@@ -1570,6 +1621,7 @@ let () =
     ("state_path_safe_components", test_state_path_safe_components);
     ("atomic_failure_preserves_json", test_atomic_failure_before_rename_preserves_previous_json);
     ("atomic_success_permissions", test_atomic_success_preserves_permissions_and_cleans_temp);
+    ("atomic_file_and_json_policies", test_atomic_file_and_json_write_policies);
     ("job_physical_paths", test_job_store_uses_physical_canonical_paths);
     ("archived_physical_classification", test_archived_legacy_job_uses_physical_classification);
     ("archive_symlink_escape", test_archive_destination_rejects_symlink_escape);

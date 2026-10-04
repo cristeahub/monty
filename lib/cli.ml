@@ -968,8 +968,7 @@ let projects_set_group_term =
   in
   Cmdliner.Term.(const projects_set_group $ project_arg $ group $ home_arg)
  in
-let print_sync_warnings warnings =
-  List.iter (fun warning -> Fmt.epr "monty: warning: %s\n" warning) warnings
+let print_sync_warnings = List_jobs.print_warnings
  in
 let tasks_list project all group all_groups no_sync home =
   list_jobs false all None project group all_groups no_sync home

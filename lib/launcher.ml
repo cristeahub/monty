@@ -68,6 +68,16 @@ let worktree_mode_of_string = function
 let worktree_mode_to_string = function Always -> "always" | Never -> "never"
 let worktree_mode_string options = worktree_mode_to_string options.worktree_mode
 
+let harness_options (options : options) =
+  Harness_command.
+    { harness = options.harness;
+      command = options.harness_command;
+      codex_yolo = options.codex_yolo;
+      fork = options.fork;
+      script_dir = options.script_dir;
+      branch_prefix = options.branch_prefix;
+      monty_command = options.monty_command }
+
 let options_with_persisted_worktree_mode options persisted =
   match worktree_mode_of_string (String.lowercase_ascii persisted) with
   | Error (`Msg message) -> Error message
@@ -115,9 +125,9 @@ let check_dependencies options =
     | _ -> Ok ()
   in
   if options.container_workers then
-    if options.harness <> Harness.Codex then
-      Error "container workers support only the Codex headless harness"
-    else check_dependency "Apple container" (Container_worker.command ())
+    let* () = check_dependency "Apple container" (Container_worker.command ()) in
+    let* () = Container_worker.check_harness options.harness options.harness_command in
+    Container_worker.load_auth ~harness:options.harness |> Result.map (fun _ -> ())
   else
     let* () =
       check_dependency (Harness.to_string options.harness) options.harness_command
@@ -324,16 +334,6 @@ let same_record prepared (record : Job_store.record) =
 let script_has_owner_marker (options : options) (prepared : prepared)
     (record : Job_store.record) path =
   try
-    let harness_options =
-      Harness_command.
-        { harness = options.harness;
-          command = options.harness_command;
-          codex_yolo = options.codex_yolo;
-          fork = options.fork;
-          script_dir = options.script_dir;
-          branch_prefix = options.branch_prefix;
-          monty_command = options.monty_command }
-    in
     let without_lines predicates text =
       text |> String.split_on_char '\n'
       |> List.filter (fun line ->
@@ -430,7 +430,7 @@ let script_has_owner_marker (options : options) (prepared : prepared)
     let expected ?(mcp = true) ?(codex_hook = true) ?(job = prepared.job) codex_mode
         codex_trusted_paths =
       Harness_command.launch_script_contents ~mcp ~environment_path ~profile_environment
-        ~options:harness_options
+        ~options:(harness_options options)
         ~codex_hook ~codex_mode ~codex_trusted_paths ~job ~id:prepared.id
         ~branch:prepared.branch
         ~source_repo:prepared.repo ~initial_workdir:prepared.repo
@@ -823,8 +823,6 @@ let preflight_batch options indexed_jobs =
            | Retryable _ | Requested -> Option.is_some item.container_worker
          in
          if not requested then Ok ({ item with container_worker = None } :: acc)
-         else if options.harness <> Harness.Codex then
-           Error "container workers support only headless Codex"
          else if List.length item.workspaces <> 1 then
            Error
              (Printf.sprintf
@@ -1046,18 +1044,13 @@ let stage_reservation options (item : prepared) =
               (Printf.sprintf "failed to stage worker %s via %s(%s): %s"
                  item.id fn arg (Unix.error_message err))
       in
+      let result =
+        let* () = result in
+        let* () = validate_staged_reservation options item staging_dir in
+        fsync_staged_reservation staging_dir
+      in
       (match result with
-      | Ok () -> (
-          match validate_staged_reservation options item staging_dir with
-          | Ok () -> (
-              match fsync_staged_reservation staging_dir with
-              | Ok () -> Ok staging_dir
-              | Error _ as error ->
-                  remove_staging_tree staging_dir;
-                  error)
-          | Error _ as error ->
-              remove_staging_tree staging_dir;
-              error)
+      | Ok () -> Ok staging_dir
       | Error _ as error ->
           remove_staging_tree staging_dir;
           error)
@@ -1126,6 +1119,9 @@ let reservation_fault checkpoint =
   | _ -> Ok ()
 
 let reserve_batch ?(reject_requested = false) options prepared =
+  let cleanup_staged staged =
+    List.iter (fun (_, path) -> Option.iter remove_staging_tree path) staged
+  in
   State_store.with_lock ~home:options.home (fun () ->
       let input_jobs =
         List.map
@@ -1175,9 +1171,7 @@ let reserve_batch ?(reject_requested = false) options prepared =
                 match stage_reservation options item with
                 | Ok path -> stage ((item, Some path) :: acc) rest
                 | Error message ->
-                    List.iter
-                      (fun (_, path) -> Option.iter remove_staging_tree path)
-                      acc;
+                    cleanup_staged acc;
                     Error message)
             | Retryable _ | Requested -> stage ((item, None) :: acc) rest)
       in
@@ -1187,9 +1181,7 @@ let reserve_batch ?(reject_requested = false) options prepared =
         match reservation_fault "reserve-after-stage" with
         | Ok () -> Ok ()
         | Error message ->
-            List.iter
-              (fun (_, path) -> Option.iter remove_staging_tree path)
-              staged;
+            cleanup_staged staged;
             Error message
       in
       let reserved_tasks =
@@ -1198,23 +1190,19 @@ let reserve_batch ?(reject_requested = false) options prepared =
       in
       (match reserved_tasks with
       | Error message ->
-          List.iter
-            (fun (_, path) -> Option.iter remove_staging_tree path)
-            staged;
+          cleanup_staged staged;
           Error message
       | Ok reserved_jobs ->
           let prepared = map_task_jobs prepared reserved_jobs in
           let* () = reservation_fault "reserve-abrupt-after-tasks" in
           (match reservation_fault "reserve-after-tasks" with
           | Error message ->
-              List.iter
-                (fun (_, path) -> Option.iter remove_staging_tree path)
-                staged;
+              cleanup_staged staged;
               Error message
           | Ok () ->
           let rec install installed = function
             | [] -> Ok (List.rev installed)
-            | ((staged_item : prepared), None) :: rest ->
+            | ((staged_item : prepared), staging_dir) :: rest ->
                 let item =
                   match
                     List.find_opt
@@ -1225,41 +1213,25 @@ let reserve_batch ?(reject_requested = false) options prepared =
                   | Some item -> item
                   | None -> staged_item
                 in
-                install (item :: installed) rest
-            | ((staged_item : prepared), Some staging_dir) :: rest ->
-                let item =
-                  match
-                    List.find_opt
-                      (fun (item : prepared) ->
-                        String.equal item.id staged_item.id)
-                      prepared
-                  with
-                  | Some item -> item
-                  | None -> staged_item
-                in
-                if item.job.Job.task_key <> staged_item.job.Job.task_key then (
-                  remove_staging_tree staging_dir;
-                  List.iter
-                    (fun (_, path) -> Option.iter remove_staging_tree path)
-                    rest;
-                  Error
-                    (Printf.sprintf
-                       "worker %s task reservation changed while installing its durable state"
-                       item.id))
-                else
-                  (match
-                     validate_staged_reservation options item staging_dir
-                   with
-                  | Error message ->
-                      remove_staging_tree staging_dir;
-                      List.iter
-                        (fun (_, path) -> Option.iter remove_staging_tree path)
-                        rest;
+                (match staging_dir with
+                | None -> install (item :: installed) rest
+                | Some staging_dir ->
+                    let reject message =
+                      cleanup_staged ((staged_item, Some staging_dir) :: rest);
                       Error message
-                  | Ok () -> (
-                      match fsync_staged_reservation staging_dir with
-                      | Error message -> Error message
-                      | Ok () ->
+                    in
+                    if item.job.Job.task_key <> staged_item.job.Job.task_key then
+                      reject
+                        (Printf.sprintf
+                           "worker %s task reservation changed while installing its durable state"
+                           item.id)
+                    else
+                      let* () =
+                        match validate_staged_reservation options item staging_dir with
+                        | Ok () -> Ok ()
+                        | Error message -> reject message
+                      in
+                      let* () = fsync_staged_reservation staging_dir in
                       try
                         Unix.rename staging_dir item.worker_dir;
                         State_store.fsync_directory
@@ -1267,15 +1239,11 @@ let reserve_batch ?(reject_requested = false) options prepared =
                         State_store.fsync_directory
                           (Filename.dirname staging_dir);
                         install (item :: installed) rest
-                   with Unix.Unix_error (err, fn, arg) ->
-                     remove_staging_tree staging_dir;
-                     List.iter
-                       (fun (_, path) -> Option.iter remove_staging_tree path)
-                       rest;
-                     Error
-                       (Printf.sprintf
-                          "failed to install worker reservation %s via %s(%s): %s"
-                          item.id fn arg (Unix.error_message err))))
+                      with Unix.Unix_error (err, fn, arg) ->
+                        reject
+                          (Printf.sprintf
+                             "failed to install worker reservation %s via %s(%s): %s"
+                             item.id fn arg (Unix.error_message err)))
           in
           let* installed = install [] staged in
           let* () = reservation_fault "reserve-after-install" in
@@ -1316,16 +1284,6 @@ let dry_run ?(codex_mode = Codex_session.Fresh) options
   Fmt.pr "[dry-run] terminal: %s %s\n"
     (Terminal.backend_to_string options.backend)
     (Terminal.target_to_string options.target);
-  let harness_options =
-    Harness_command.
-      { harness = options.harness;
-        command = options.harness_command;
-        codex_yolo = options.codex_yolo;
-        fork = options.fork;
-        script_dir = options.script_dir;
-        branch_prefix = options.branch_prefix;
-        monty_command = options.monty_command }
-  in
   Fmt.pr "[dry-run] harness: %s\n" (Harness.to_string options.harness);
   (match options.harness with
   | Harness.Pi -> ()
@@ -1337,7 +1295,7 @@ let dry_run ?(codex_mode = Codex_session.Fresh) options
         | _ -> ""));
   Fmt.pr "[dry-run] command: %s\n"
     (Harness_command.build_command ~mcp:true ~codex_hook:true ~codex_mode
-       ~options:harness_options
+       ~options:(harness_options options)
        ~codex_trusted_paths:[]
        ~home:options.home ~instructions:(Some prepared.instructions)
        ~job:prepared.job
@@ -1412,16 +1370,6 @@ let mark_failed options (prepared : prepared) ~expected_statuses message =
   | Error persist_error ->
       Printf.sprintf "%s; additionally failed to persist launch-failed: %s" message
         persist_error
-
-let harness_options (options : options) =
-  Harness_command.
-    { harness = options.harness;
-      command = options.harness_command;
-      codex_yolo = options.codex_yolo;
-      fork = options.fork;
-      script_dir = options.script_dir;
-      branch_prefix = options.branch_prefix;
-      monty_command = options.monty_command }
 
 type begun_request = {
   workdir : string;
@@ -1630,6 +1578,15 @@ let execute_batch options ~retry prepared =
   let rec loop results = function
     | [] -> { jobs = List.rev results }
     | item :: rest -> (
+        let stop outcome =
+          let current = result_for options retry item outcome in
+          let later =
+            List.map
+              (fun job -> result_for options retry job Unattempted_prepared)
+              rest
+          in
+          { jobs = List.rev results @ (current :: later) }
+        in
         match item.existing with
         | Requested ->
             loop
@@ -1648,27 +1605,8 @@ let execute_batch options ~retry prepared =
                   (result_for options retry item (Launch_requested None) :: results)
                   rest
             | `Requested_error message ->
-                let requested =
-                  result_for options retry item (Launch_requested (Some message))
-                in
-                let later =
-                  List.map
-                    (fun job ->
-                      result_for options retry job Unattempted_prepared)
-                    rest
-                in
-                { jobs = List.rev results @ (requested :: later) }
-            | `Failed message ->
-                let failed =
-                  result_for options retry item (Launch_failed message)
-                in
-                let later =
-                  List.map
-                    (fun job ->
-                      result_for options retry job Unattempted_prepared)
-                    rest
-                in
-                { jobs = List.rev results @ (failed :: later) }))
+                stop (Launch_requested (Some message))
+            | `Failed message -> stop (Launch_failed message)))
   in
   loop [] prepared
 

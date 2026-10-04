@@ -11,14 +11,6 @@ let worker_state ~home ~id job =
   | Some dir -> State_path.of_worker_dir ~home ~id (Shell.abs_path dir)
   | None -> State_path.active ~home ~run_id:"manual" ~id
 
-let worker_dir_result ~home ~id job =
-  worker_state ~home ~id job |> Result.map (fun state -> state.State_path.worker_dir)
-
-let worker_dir ~home ~id job =
-  match worker_dir_result ~home ~id job with
-  | Ok path -> path
-  | Error msg -> invalid_arg msg
-
 let run_dir_of_worker_dir worker_dir =
   worker_dir |> Filename.dirname |> Filename.dirname |> Shell.normalize
 

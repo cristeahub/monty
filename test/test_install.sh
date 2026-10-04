@@ -19,6 +19,7 @@ wrapper=$prefix/bin/monty
 log=$root/install.log
 real_mv=$(command -v mv)
 fail_wrapper=0
+fail_shell_rc=0
 interrupt_after_source=
 pause_source=
 same_home_argument=$repo
@@ -61,6 +62,11 @@ case "$source_path" in
   */.monty-wrapper-install-*)
     if [ "${FAIL_WRAPPER:-0}" -eq 1 ]; then
       exit 47
+    fi
+    ;;
+  */.monty-shell-rc.*)
+    if [ "${FAIL_SHELL_RC:-0}" -eq 1 ]; then
+      exit 48
     fi
     ;;
 esac
@@ -142,7 +148,7 @@ run_install() {
   (
     cd "$repo"
     PATH="$fake_bin:$PATH" HOME="$home" REAL_MV="$real_mv" \
-      FAIL_WRAPPER="$fail_wrapper" \
+      FAIL_WRAPPER="$fail_wrapper" FAIL_SHELL_RC="$fail_shell_rc" \
       INTERRUPT_AFTER_SOURCE="$interrupt_after_source" \
       PAUSE_SOURCE="$pause_source" PAUSE_READY="$root/paused" PAUSE_RELEASE="$root/released" \
       INSTALL_PID_FILE="$prefix/.monty-install-lock/pid" \
@@ -375,4 +381,99 @@ assert_contents 'rejected alias source marker' \
 assert_contents 'rejected alias control room' \
   "$repo/control-room.txt" 'release five'
 
-printf 'PASS hardened installer and state versioning\n'
+rc_file=$home/existing.zshrc
+cat > "$root/rc-assignments" <<'EOF'
+MONTY_HOME=/plain
+  export MONTY_HOME=/exported
+typeset -gx MONTY_HOME=/typeset
+declare -x MONTY_HOME=/declared
+set -gx MONTY_HOME /fish
+EOF
+cat "$root/rc-assignments" > "$rc_file"
+cat >> "$rc_file" <<'EOF'
+# >>> monty >>>
+export MONTY_HOME=/managed
+# <<< monty <<<
+EOF
+cp "$rc_file" "$root/rc-before"
+run_install --shell-rc "$rc_file" --dry-run </dev/null
+assert_log_contains 'would ask before overriding existing MONTY_HOME'
+cmp -s "$rc_file" "$root/rc-before" || fail 'shell config changed during dry run'
+run_install --shell-rc "$rc_file" </dev/null
+assert_log_contains 'Skipping shell config update because stdin is not interactive.'
+while IFS= read -r assignment; do
+  assert_log_contains "$assignment"
+done < "$root/rc-assignments"
+if grep -F 'MONTY_HOME=/managed' "$log" >/dev/null; then
+  fail 'managed shell assignment was reported as an override conflict'
+fi
+cmp -s "$rc_file" "$root/rc-before" || fail 'unconfirmed shell config changed'
+
+rc_file=$home/.zshrc
+rc_target=$home/dotfiles/zshrc
+mkdir -p "$(dirname "$rc_target")"
+ln -s dotfiles/zshrc "$rc_file"
+cat > "$root/rc-kept" <<'EOF'
+# MONTY_HOME=/comment
+MONTY_HOME_EXTRA=/keep
+export OTHER=/keep # MONTY_HOME=/comment
+typeset OTHER=/keep # MONTY_HOME=/comment
+set -gx MONTY_HOME_EXTRA /keep
+EOF
+cat "$root/rc-kept" > "$rc_target"
+cat >> "$rc_target" <<'EOF'
+# >>> monty >>>
+export MONTY_HOME=/old
+export MONTY_BRANCH_PREFIX=old
+# <<< monty <<<
+# >>> monty >>>
+export MONTY_HOME=/duplicate
+# <<< monty <<<
+EOF
+chmod 640 "$rc_target"
+rc_permissions=$(ls -l "$rc_target" | awk '{ print $1 }')
+cp "$rc_target" "$root/rc-before"
+ln "$rc_target" "$root/rc-original-inode"
+run_install --shell-rc "$rc_file" --branch-prefix cto </dev/null
+assert_log_contains "Updated shell config: $rc_file"
+[ -L "$rc_file" ] || fail 'shell config symlink was replaced'
+[ "$(readlink "$rc_file")" = dotfiles/zshrc ] || fail 'shell config symlink target changed'
+[ "$(ls -l "$rc_target" | awk '{ print $1 }')" = "$rc_permissions" ] ||
+  fail 'shell config permissions changed'
+cmp -s "$root/rc-original-inode" "$root/rc-before" ||
+  fail 'shell config was changed in place instead of atomically replaced'
+cat "$root/rc-kept" > "$root/rc-expected"
+cat >> "$root/rc-expected" <<EOF
+
+# >>> monty >>>
+export MONTY_HOME='$installed_home'
+export MONTY_BRANCH_PREFIX='cto'
+# <<< monty <<<
+EOF
+cmp -s "$rc_target" "$root/rc-expected" || fail 'managed shell blocks were not replaced correctly'
+
+cp "$rc_target" "$root/rc-before"
+fail_shell_rc=1
+if run_install --shell-rc "$rc_file" --branch-prefix changed </dev/null; then
+  fail 'injected shell config publication failure was accepted'
+fi
+fail_shell_rc=0
+cmp -s "$rc_target" "$root/rc-before" || fail 'shell config changed after failed publication'
+for rc_temp in "$(dirname "$rc_target")"/.monty-shell-rc.*; do
+  assert_absent 'shell config temporary file' "$rc_temp"
+done
+
+rc_file=$home/fish/conf.d/monty.fish
+run_install --shell-rc "$rc_file" --branch-prefix cto --dry-run </dev/null
+assert_absent 'shell config directory after dry run' "$home/fish"
+run_install --shell-rc "$rc_file" --branch-prefix cto </dev/null
+cat > "$root/rc-expected" <<EOF
+
+# >>> monty >>>
+set -gx MONTY_HOME '$installed_home'
+set -gx MONTY_BRANCH_PREFIX 'cto'
+# <<< monty <<<
+EOF
+cmp -s "$rc_file" "$root/rc-expected" || fail 'new fish shell config is incorrect'
+
+printf 'PASS hardened installer, state versioning, and shell config\n'
