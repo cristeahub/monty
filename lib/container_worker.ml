@@ -254,6 +254,24 @@ let inspect_image () =
   with Yojson.Json_error message ->
     Error ("invalid Apple image inspection JSON: " ^ message)
 
+let check_harness harness configured_command =
+  match harness with
+  | Harness.Codex -> Ok ()
+  | Harness.Pi ->
+      let* executable = Process.first_command_word configured_command in
+      let* () =
+        if List.mem executable [ "pi"; "/usr/local/bin/pi" ] then Ok ()
+        else Error "container Pi commands must use pi or /usr/local/bin/pi from the worker image"
+      in
+      let* raw = run [ "image"; "inspect"; image ] in
+      try
+        match image_config (Yojson.Safe.from_string raw) with
+        | Some config when
+            Yojson.Safe.Util.(config |> member "Labels" |> member "com.monty.pi")
+            = `String "1.0.2" -> Ok ()
+        | _ -> Error "container worker image has no supported Pi executable; rebuild and register the worker image"
+      with Yojson.Json_error message -> Error message
+
 let load_registered_image ~home =
   let record_path = image_record_path ~home in
   let* state = State_store.lstat record_path in
@@ -387,8 +405,14 @@ let validate_container value =
     let digest = config |> member "image" |> member "descriptor" |> member "digest" |> to_string in
     let no_host_integration name expected = member name config = expected in
     let init = member "initProcess" config in
-    let uid = init |> member "user" |> member "id" |> member "uid" in
-    let gid = init |> member "user" |> member "id" |> member "gid" in
+    let user = init |> member "user" in
+    let is_monty =
+      match member "id" user with
+      | `Assoc fields ->
+          List.assoc_opt "uid" fields = Some (`Int 10001)
+          && List.assoc_opt "gid" fields = Some (`Int 10001)
+      | _ -> member "raw" user = `Assoc [ ("userString", `String "monty") ]
+    in
     let executable = init |> member "executable" in
     let arguments = init |> member "arguments" in
     let environment =
@@ -419,7 +443,7 @@ let validate_container value =
       || member "useInit" config <> `Bool true
     then Error "owned container is not a native ARM64 inert init container"
     else if
-      uid <> `Int 10001 || gid <> `Int 10001
+      not is_monty
       || executable |> to_string |> Filename.basename <> "sleep"
       || arguments <> `List [ `String "infinity" ]
       || forbidden_environment
@@ -452,7 +476,9 @@ let create_arguments value =
     "type=volume,source=" ^ value.volume ^ ",target=/monty"; "--mount";
     "type=tmpfs,target=/tmp,size=1G,mode=1777"; "--mount";
     "type=tmpfs,target=/run/monty-secrets,size=16M,mode=0700"; "--entrypoint";
-    "sleep"; value.image ^ "@" ^ value.image_digest; "infinity" ]
+    (* Apple 1.3.1 cannot resolve locally built tag@digest references. The
+       created container's digest is checked below before it can start. *)
+    "sleep"; value.image; "infinity" ]
 
 let ensure_resources value =
   let* volume_exists = exists [ "volume"; "list" ] value.volume in
@@ -469,32 +495,43 @@ let ensure_resources value =
   let* container_exists = exists [ "list"; "--all" ] value.container in
   if container_exists then validate_container value
   else
+    let* digest = inspect_image () in
+    let* () =
+      if digest = value.image_digest then Ok ()
+      else Error "container worker image changed before container creation"
+    in
     let* _ = run (create_arguments value) in
     validate_container value
 
-let auth_path () =
+let auth_path ~harness =
+  let label = match harness with Harness.Pi -> "Pi" | Harness.Codex -> "Codex" in
+  let variable, default =
+    match harness with
+    | Harness.Pi -> ("PI_CODING_AGENT_DIR", ".pi/agent")
+    | Harness.Codex -> ("CODEX_HOME", ".codex")
+  in
   let path =
-    match Sys.getenv_opt "CODEX_HOME" with
+    match Sys.getenv_opt variable with
     | Some home when String.trim home <> "" -> Filename.concat home "auth.json"
     | _ -> (
         match Sys.getenv_opt "HOME" with
-        | Some home -> Filename.concat (Filename.concat home ".codex") "auth.json"
+        | Some home -> Filename.concat (Filename.concat home default) "auth.json"
         | None -> "")
   in
   if path = "" || Filename.is_relative path then
-    Error "Codex auth.json path must be absolute"
+    Error (label ^ " auth.json path must be absolute")
   else
     try
       let stat = Unix.lstat path in
       if stat.Unix.st_kind <> Unix.S_REG then
-        Error (Printf.sprintf "Codex auth.json is not a regular file: %s" path)
+        Error (Printf.sprintf "%s auth.json is not a regular file: %s" label path)
       else if stat.Unix.st_uid <> Unix.getuid () || stat.Unix.st_perm land 0o077 <> 0 then
-        Error (Printf.sprintf "Codex auth.json must be owned by this user with mode 0600: %s" path)
+        Error (Printf.sprintf "%s auth.json must be owned by this user with mode 0600: %s" label path)
       else Ok path
     with Unix.Unix_error _ ->
-      Error (Printf.sprintf "Codex auth.json is unavailable: %s" path)
+      Error (Printf.sprintf "%s auth.json is unavailable: %s" label path)
 
-let credential_values contents =
+let credential_values ?(harness = Harness.Codex) contents =
   let rec collect acc = function
     | `String value when value <> "" -> value :: acc
     | `Assoc fields ->
@@ -502,16 +539,37 @@ let credential_values contents =
     | `List values -> List.fold_left collect acc values
     | _ -> acc
   in
-  try Ok (Yojson.Safe.from_string contents |> collect [] |> List.sort_uniq String.compare)
-  with Yojson.Json_error _ -> Error "Codex auth.json must contain valid JSON"
+  try
+    let json = Yojson.Safe.from_string contents in
+    let json =
+      match harness, json with
+      | Harness.Pi, `Assoc providers ->
+          `Assoc (List.map (fun (provider, credential) ->
+              let credential = match credential with
+                | `Assoc fields -> `Assoc (List.filter (function
+                    | "type", `String ("oauth" | "api_key") -> false
+                    | _ -> true) fields)
+                | other -> other
+              in (provider, credential)) providers)
+      | Harness.Codex, `Assoc fields ->
+          `Assoc
+            (List.filter
+               (function
+                 | "auth_mode", `String ("chatgpt" | "apikey") -> false
+                 | _ -> true)
+               fields)
+      | _ -> json
+    in
+    Ok (collect [] json |> List.sort_uniq String.compare)
+  with Yojson.Json_error _ -> Error "harness auth.json must contain valid JSON"
 
-let load_auth () =
-  let* path = auth_path () in
+let load_auth ~harness =
+  let* path = auth_path ~harness in
   let* contents =
     try Ok (Shell.read_file path)
-    with Sys_error message -> Error ("could not read Codex auth.json: " ^ message)
+    with Sys_error message -> Error ("could not read harness auth.json: " ^ message)
   in
-  let* credentials = credential_values contents in
+  let* credentials = credential_values ~harness contents in
   Ok (contents, credentials)
 
 let reject_credentials credentials contents =
@@ -519,20 +577,25 @@ let reject_credentials credentials contents =
     List.exists
       (fun credential -> Home.contains_substring contents credential)
       credentials
-  then Error "container output contains a Codex credential value"
+  then Error "container output contains a harness credential value"
   else Ok ()
 
-let inject_auth value =
-  let* contents, credentials = load_auth () in
+let inject_auth ~harness value =
+  let* contents, credentials = load_auth ~harness in
   let* _ =
     run
       [ "exec"; "--user"; "root"; value.container; "sh"; "-c";
         "set -eu; mkdir -p /monty/home/.codex; chown monty:monty /monty/home /monty/home/.codex /run/monty-secrets" ]
   in
   let script =
-    "set -eu; umask 077; cat > /run/monty-secrets/auth.json; "
-    ^ "chmod 600 /run/monty-secrets/auth.json; "
-    ^ "ln -sfn /run/monty-secrets/auth.json /monty/home/.codex/auth.json"
+    match harness with
+    | Harness.Codex ->
+        "set -eu; umask 077; cat > /run/monty-secrets/auth.json; "
+        ^ "chmod 600 /run/monty-secrets/auth.json; "
+        ^ "ln -sfn /run/monty-secrets/auth.json /monty/home/.codex/auth.json"
+    | Harness.Pi ->
+        "set -eu; umask 077; mkdir -p /run/monty-secrets/pi; "
+        ^ "cat > /run/monty-secrets/pi/auth.json; chmod 600 /run/monty-secrets/pi/auth.json"
   in
   let* _ =
     run_stdin
@@ -541,6 +604,19 @@ let inject_auth value =
       contents
   in
   Ok credentials
+
+let phase_credentials ~harness value =
+  let* _, credentials = load_auth ~harness in
+  match harness with
+  | Harness.Codex -> Ok credentials
+  | Harness.Pi ->
+      (* Pi can refresh OAuth credentials while running. Keep those writes in
+         tmpfs and guard collected output against the refreshed values too. *)
+      let* contents = run_stdin
+        [ "exec"; "--user"; "monty"; value.container; "cat";
+          "/run/monty-secrets/pi/auth.json" ] "" in
+      let* refreshed = credential_values ~harness contents in
+      Ok (List.sort_uniq String.compare (credentials @ refreshed))
 
 let stop_started value result =
   match run [ "stop"; "--time"; "1"; value.container ] with
@@ -556,7 +632,7 @@ let stop_started value result =
 let validate_worker_capabilities value =
   run
     [ "exec"; "--user"; "monty"; value.container; "sh"; "-c";
-      "set -eu; for field in CapInh CapPrm CapEff CapAmb; do value=$(sed -n \"s/^$field:[[:space:]]*//p\" /proc/self/status); test -n \"$value\"; case \"$value\" in *[!0]*) exit 1;; esac; done" ]
+      "set -eu; test \"$(id -u)\" = 10001; test \"$(id -g)\" = 10001; for field in CapInh CapPrm CapEff CapAmb; do value=$(sed -n \"s/^$field:[[:space:]]*//p\" /proc/self/status); test -n \"$value\"; case \"$value\" in *[!0]*) exit 1;; esac; done" ]
   |> Result.map (fun _ -> ())
 
 let start_existing ~probe ~authenticate value =
@@ -569,7 +645,9 @@ let start_existing ~probe ~authenticate value =
       else Ok ""
     in
     let* () = if probe then validate_worker_capabilities value else Ok () in
-    let* _ = if authenticate then inject_auth value else Ok [] in
+    let* _ = match authenticate with
+      | Some harness -> inject_auth ~harness value
+      | None -> Ok [] in
     Ok ()
   in
   match (result, was_running) with
@@ -577,11 +655,11 @@ let start_existing ~probe ~authenticate value =
   | Error _ as error, true -> error
   | Error _ as error, false -> stop_started value error
 
-let ensure_running value =
+let ensure_running ~harness value =
   let* () = ensure_resources value in
-  start_existing ~probe:true ~authenticate:true value
+  start_existing ~probe:true ~authenticate:(Some harness) value
 
-let wake value =
+let wake ~harness value =
   let* volume_exists = exists [ "volume"; "list" ] value.volume in
   let* container_exists = exists [ "list"; "--all" ] value.container in
   if not volume_exists then
@@ -591,7 +669,7 @@ let wake value =
   else
     let* () = validate_volume value in
     let* () = validate_container value in
-    start_existing ~probe:true ~authenticate:true value
+    start_existing ~probe:true ~authenticate:(Some harness) value
 
 let start_for_inspection value =
   let* volume_exists = exists [ "volume"; "list" ] value.volume in
@@ -603,7 +681,7 @@ let start_for_inspection value =
   else
     let* () = validate_volume value in
     let* () = validate_container value in
-    start_existing ~probe:false ~authenticate:false value
+    start_existing ~probe:false ~authenticate:None value
 
 let encoded_branch branch =
   let buffer = Buffer.create (String.length branch) in
@@ -692,7 +770,8 @@ let with_temp_bundle repo branch_ref operation =
       in
       let* _ =
         Process.run_success
-          (String.concat " " [ "git"; "bundle"; "verify"; Shell.quote path ])
+          (String.concat " "
+             [ "git"; "-C"; Shell.quote repo; "bundle"; "verify"; Shell.quote path ])
       in
       operation path)
 
@@ -736,8 +815,8 @@ let seed value ~repo ~branch ~branch_ref ~expected_head =
       in
       Ok worktree)
 
-let ensure_prepared value ~id ~title ~repo ~branch ~context =
-  let* was_running, _ready = ensure_running value in
+let ensure_prepared ~harness value ~id ~title ~repo ~branch ~context =
+  let* was_running, _ready = ensure_running ~harness value in
   let result =
     let* expected_head, branch_ref = seed_revision repo branch in
     let* worktree = seed value ~repo ~branch ~branch_ref ~expected_head in
@@ -827,12 +906,12 @@ let collect_file value ~credentials ~guest ~host =
   in
   match result with Ok () -> Ok () | Error message -> fail message
 
-let run_codex_phase value ~attempt ~name ~worktree ~codex_yolo ~writable ~prompt
+let run_phase ~harness ~command value ~attempt ~name ~worktree ~codex_yolo ~writable ~prompt
     ~output ~events ~progress =
   let* is_running = running value in
   let* () =
     if is_running then Ok ()
-    else Error "container worker stopped before its Codex phase started"
+    else Error "container worker stopped before its headless phase started"
   in
   let* _ = State_path.safe_component ~label:"headless attempt id" attempt in
   let* _ = State_path.safe_component ~label:"headless phase name" name in
@@ -845,41 +924,54 @@ let run_codex_phase value ~attempt ~name ~worktree ~codex_yolo ~writable ~prompt
     else if writable then " --sandbox workspace-write"
     else " --sandbox read-only"
   in
-  let codex =
-    "codex exec -c " ^ Shell.quote "model_reasoning_effort=\"xhigh\""
-    ^ Codex_trust.argument worktree
-    ^ " --ephemeral --json --color never" ^ permission ^ " -C "
-    ^ Shell.quote worktree ^ " --output-last-message " ^ Shell.quote guest_output
-    ^ " - > " ^ Shell.quote guest_events ^ " 2> " ^ Shell.quote guest_progress
+  let invocation =
+    match harness with
+    | Harness.Pi ->
+        "PI_CODING_AGENT_DIR=/run/monty-secrets/pi " ^ command
+        ^ Harness.pi_headless_args ~writable
+    | Harness.Codex ->
+        command ^ " exec -c " ^ Shell.quote "model_reasoning_effort=\"xhigh\""
+        ^ Codex_trust.argument worktree
+        ^ " --ephemeral --json --color never" ^ permission ^ " -C "
+        ^ Shell.quote worktree ^ " --output-last-message " ^ Shell.quote guest_output
+        ^ " -"
   in
   let script =
-    "set -eu; umask 077; mkdir -p " ^ Shell.quote outbox ^ "; " ^ codex
+    "set -eu; umask 077; mkdir -p " ^ Shell.quote outbox ^ "; " ^ invocation
+    ^ " > " ^ Shell.quote guest_events ^ " 2> " ^ Shell.quote guest_progress
   in
   let result =
-    let* credentials = inject_auth value in
-    Process.run_capture_with_stdin
-      (shell_command
-         [ "exec"; "--interactive"; "--user"; "monty"; "--workdir";
-           worktree; value.container; "sh"; "-c"; script ])
-      prompt
-    |> Result.map (fun result -> (credentials, result))
+    let* credentials =
+      match harness with
+      | Harness.Codex -> inject_auth ~harness value
+      | Harness.Pi -> phase_credentials ~harness value
+    in
+    let* result =
+      Process.run_capture_with_stdin
+        (shell_command
+           [ "exec"; "--interactive"; "--user"; "monty"; "--workdir";
+             worktree; value.container; "sh"; "-c"; script ])
+        prompt
+    in
+    let* refreshed = phase_credentials ~harness value in
+    Ok (List.sort_uniq String.compare (credentials @ refreshed), result)
   in
   let collect credentials guest host =
     collect_file value ~credentials ~guest ~host
   in
   match result with
-  | Error message ->
-      let _ = message in
-      Error message
+  | Error _ as error -> error
   | Ok (credentials, { Process.status = `Exited 0; _ }) ->
       let* () = collect credentials guest_events events in
       let* () = collect credentials guest_progress progress in
-      collect credentials guest_output output
+      (match harness with
+      | Harness.Codex -> collect credentials guest_output output
+      | Harness.Pi -> Ok ())
   | Ok (credentials, { status; _ }) ->
       let _ = collect credentials guest_events events in
       let _ = collect credentials guest_progress progress in
       Error
-        (Printf.sprintf "containerized Codex %s phase %s" name
+        (Printf.sprintf "containerized %s %s phase %s" (Harness.to_string harness) name
            (Process.status_to_string status))
 
 let split_nul value =
@@ -950,8 +1042,8 @@ let parse_change_summary output =
   in
   Ok { files; insertions; deletions }
 
-let collect_changes value ~worktree ~branch =
-  let* _, credentials = load_auth () in
+let collect_changes ~harness value ~worktree ~branch =
+  let* credentials = phase_credentials ~harness value in
   let* captured =
     capture
       [ "exec"; value.container; "monty-inspect"; "--changes"; worktree;

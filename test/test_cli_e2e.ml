@@ -155,7 +155,7 @@ type result = {
   argv : string array;
 }
 
-let spawn ?(program = executable) ?(stdin_path = "/dev/null") ?(new_session = false) ~root ~env index args =
+let spawn ?cwd ?(program = executable) ?(stdin_path = "/dev/null") ?(new_session = false) ~root ~env index args =
   let stdout_path = Filename.concat root (Printf.sprintf "stdout-%d" index) in
   let stderr_path = Filename.concat root (Printf.sprintf "stderr-%d" index) in
   let stdout_fd =
@@ -167,10 +167,11 @@ let spawn ?(program = executable) ?(stdin_path = "/dev/null") ?(new_session = fa
   let stdin_fd = Unix.openfile stdin_path [ Unix.O_RDONLY ] 0 in
   let argv = Array.of_list (program :: args) in
   let pid =
-    if not new_session then Unix.create_process_env program argv env stdin_fd stdout_fd stderr_fd
+    if not new_session && Option.is_none cwd then Unix.create_process_env program argv env stdin_fd stdout_fd stderr_fd
     else match Unix.fork () with
       | 0 ->
-          ignore (Unix.setsid ());
+          if new_session then ignore (Unix.setsid ());
+          Option.iter Unix.chdir cwd;
           Unix.dup2 stdin_fd Unix.stdin;
           Unix.dup2 stdout_fd Unix.stdout;
           Unix.dup2 stderr_fd Unix.stderr;
@@ -198,7 +199,7 @@ let await child =
     argv = child.argv;
   }
 
-let run ?program ~root ~env index args = spawn ?program ~root ~env index args |> await
+let run ?cwd ?program ~root ~env index args = spawn ?cwd ?program ~root ~env index args |> await
 
 let run_with_stdin ~root ~env index input args =
   let stdin_path = Filename.concat root (Printf.sprintf "stdin-%d" index) in
@@ -1206,6 +1207,9 @@ let test_completion_makes_ignored_artifacts_removable () =
 let test_completion_recovers_after_partial_worktree_removal () =
   with_temp_root "partial-worktree-removal" (fun root ->
       let home, _tool_log, env = setup_environment root in
+      (* TMPDIR can be inside the checkout; missing fixture metadata must not
+         discover that unrelated parent repository. *)
+      let env = replace_env env [ ("GIT_CEILING_DIRECTORIES", root) ] in
       let repo = Filename.concat root "repo" in
       let worktree = Filename.concat root "worktree" in
       let context = Filename.concat root "context.md" in
@@ -3147,7 +3151,7 @@ let test_retry_uses_recorded_script_and_absolute_commands () =
       let args =
         [ "launch-many"; "--manifest"; manifest; "--home"; home;
           "--terminal"; "ghostty"; "--worktree"; "never"; "--pi-command";
-          "/usr/bin/true --fixed argument" ]
+          "/bin/sh -c true --fixed argument" ]
       in
       let fault_env =
         replace_env env [ ("MONTY_FAULT_INJECT", "launch-before-request-state") ]
@@ -3189,7 +3193,7 @@ let test_retry_uses_recorded_script_and_absolute_commands () =
         failwith "retry changed recorded script ownership";
       let resume_args backend =
         [ "resume"; "script-worker"; "--home"; home; "--terminal"; backend;
-          "--pi-command"; "/usr/bin/true --fixed argument" ]
+          "--pi-command"; "/bin/sh -c true --fixed argument" ]
       in
       let strange_path = Filename.concat root "quote'$(touch SHOULD_NOT_EXIST)" in
       let changed_path = Filename.concat root "fake-bin" ^ ":/usr/bin:/bin:" ^ strange_path in
@@ -3233,7 +3237,7 @@ let test_ghostty_launch_script_matches_ensure_worktree_cli () =
         run ~root ~env 1322
           [ "launch-many"; "--manifest"; manifest; "--home"; home;
             "--terminal"; "ghostty"; "--worktree"; "always";
-            "--pi-command"; "/usr/bin/true"; "--wt-command"; "wt" ]
+            "--pi-command"; "/bin/sh -c true"; "--wt-command"; "wt" ]
       in
       require_code 0 launched;
       let job_file =
@@ -6353,8 +6357,22 @@ let test_containerized_codex_worker_lifecycle () =
         failwith "interrupted container creation reported success";
       if job_status job_file <> "prepared" then
         failwith "interrupted container creation was not retryable";
+      let wrong_image =
+        run ~root
+          ~env:(replace_env env
+                  [ ("MONTY_FAKE_CONTAINER_INSPECT_DIGEST",
+                     "sha256:" ^ String.make 64 'b') ])
+          60061
+          [ "headless"; "prepare-many"; "--manifest"; manifest; "--home";
+            home ]
+      in
+      require_code 1 wrong_image;
+      require_contains "created container digest is checked" wrong_image.stderr
+        "owned container uses a different image digest";
+      if string_contains (read_file container_log) " start monty-worker-" then
+        failwith "wrong-image container was started";
       let prepared =
-        run ~root ~env 6007
+        run ~cwd:root ~root ~env 6007
           [ "headless"; "prepare-many"; "--manifest"; manifest; "--home";
             home ]
       in
@@ -6457,7 +6475,7 @@ let test_containerized_codex_worker_lifecycle () =
       if leaked.code = 0 then
         failwith "container report containing auth data was persisted";
       require_contains "credential report rejection" leaked.stderr
-        "contains a Codex credential value";
+        "contains a harness credential value";
       require_contains "container YOLO execution" (read_file container_log)
         "--dangerously-bypass-approvals-and-sandbox";
       if job_status job_file <> "launch-requested" then
@@ -6490,7 +6508,8 @@ let test_containerized_codex_worker_lifecycle () =
         |> List.filter (fun line -> line <> "") |> List.length
       in
       if injections_after_failed_collect <= injections_before_failed_collect then
-        failwith "running container resume did not refresh authentication";
+        failf "running container resume did not refresh authentication:\n%s\n%s"
+          failed_collect.stdout failed_collect.stderr;
       if tree_has worker_dir (fun path -> Filename.check_suffix path ".partial") then
         failwith "failed collection left a partial host artifact";
       if tree_has (Filename.concat container_dir "rootfs") (fun _ -> true) then
@@ -6572,7 +6591,7 @@ let test_containerized_codex_worker_lifecycle () =
       if string_contains guarded_handoff_text secret then
         failwith "credential-bearing Git change evidence reached the handoff";
       require_contains "credential change-summary rejection" guarded_handoff_text
-        "container output contains a Codex credential value";
+        "container output contains a harness credential value";
       Sys.remove credential_path;
       require_code 0
         (run ~root ~env 601222
@@ -6701,6 +6720,124 @@ let test_containerized_codex_worker_lifecycle () =
       if local_task_status home <> "done" then
         failwith "container completion did not close its linked local task")
 
+let test_containerized_pi_worker_lifecycle () =
+  with_temp_root "container-pi" (fun root ->
+      let home, host_log, base_env = setup_environment root in
+      let repo = Filename.concat root "repo" in
+      init_git_repo repo;
+      let context = Filename.concat root "context.md" in
+      Shell.write_file context "# Pi container task\n";
+      let manifest = Filename.concat home ".monty/runs/pi/jobs.json" in
+      let worker_dir = Filename.concat home ".monty/runs/pi/workers/pi-worker" in
+      let job_file = Filename.concat worker_dir "job.json" in
+      let state = Filename.concat root "containers" in
+      let log = Filename.concat root "container.log" in
+      let agent_dir = Filename.concat root "pi-agent" in
+      let auth = Filename.concat agent_dir "auth.json" in
+      let secret = "private-pi-oauth-token" in
+      let refreshed = "refreshed-private-pi-token" in
+      let auth_contents =
+        {|{"openai-codex":{"type":"oauth","access":"private-pi-oauth-token","refresh":"private-pi-refresh-token","expires":123}}|} in
+      Shell.write_file auth auth_contents;
+      Unix.chmod auth 0o600;
+      let fixture = Filename.concat
+        (Option.value ~default:(Sys.getcwd ()) (Sys.getenv_opt "DUNE_SOURCEROOT"))
+        "test/fake_container.sh" in
+      let container = Filename.concat root "fake-bin/container" in
+      Shell.write_file container (Shell.read_file fixture);
+      Shell.chmod_executable container;
+      let pi = Filename.concat root "fake-bin/pi" in
+      Shell.write_file pi (String.concat "\n"
+        [ "#!/bin/sh"; "set -eu";
+          "printf '%s\\n' \"$0 $*\" >> " ^ Shell.quote log;
+          "test -f tracked.txt";
+          "test -f \"$PI_CODING_AGENT_DIR/auth.json\"";
+          "case \"$PI_CODING_AGENT_DIR\" in */secrets/pi) ;; *) exit 91;; esac";
+          "case \"$*\" in *'--provider openai-codex --model fake'*) ;; *) exit 92;; esac";
+          "cat >/dev/null";
+          "case \"$*\" in *'read,bash,edit,write,grep,find,ls'*) printf 'pi change\\n' > private-pi.txt;; esac";
+          "text='Pi oauth validation complete'";
+          "case \"${MONTY_TEST_PI_RESULT:-}\" in";
+          "  leak) text=" ^ Shell.quote secret ^ ";;";
+          "  rotated) printf '%s\\n' '{\"openai-codex\":{\"type\":\"oauth\",\"access\":\"" ^ refreshed ^ "\"}}' > \"$PI_CODING_AGENT_DIR/auth.json\"; text=" ^ Shell.quote refreshed ^ ";;";
+          "esac";
+          "printf '%s\\n' '{\"type\":\"agent_start\"}'";
+          "printf '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"stopReason\":\"stop\",\"content\":[{\"type\":\"text\",\"text\":\"%s\"}]}}\\n' \"$text\"";
+          "if [ \"${MONTY_TEST_PI_RESULT:-}\" != incomplete ]; then printf '%s\\n' '{\"type\":\"agent_end\"}'; fi"; "" ]);
+      Shell.chmod_executable pi;
+      let env = replace_env base_env
+        [ ("MONTY_FAKE_CONTAINER_STATE", state); ("MONTY_FAKE_CONTAINER_LOG", log);
+          ("PI_CODING_AGENT_DIR", agent_dir);
+          ("MONTY_PI_COMMAND", "pi --provider openai-codex --model fake") ] in
+      add_project ~root ~home ~env repo;
+      let call ?(env = env) n args = run ~root ~env n (args @ [ "--home"; home ]) in
+      require_code 0 (call 6100 [ "settings"; "set"; "harness"; "pi" ]);
+      require_code 0 (call 6101 [ "settings"; "set"; "container-workers"; "true" ]);
+      require_code 0 (call 6102 [ "container-image"; "register" ]);
+      write_manifest manifest [ manifest_job ~id:"pi-worker" ~branch:"cto/pi-worker"
+          ~title:"Pi container worker" ~repo ~context () ];
+      let prepare = [ "headless"; "prepare-many"; "--manifest"; manifest ] in
+      require_code 0 (call 6103 (prepare @ [ "--dry-run" ]));
+      if Sys.file_exists worker_dir then failwith "Pi dry-run reserved worker state";
+      let invalid_command = call 6104
+          (prepare @ [ "--pi-command"; "/host-only/pi" ]) in
+      require_code 1 invalid_command;
+      require_contains "Pi command preflight" invalid_command.stderr "must use pi";
+      Unix.chmod auth 0o644;
+      let unsafe_auth = call 6105 prepare in
+      require_code 1 unsafe_auth;
+      require_contains "Pi auth permissions" unsafe_auth.stderr "mode 0600";
+      if Sys.file_exists worker_dir then failwith "invalid Pi auth reserved worker state";
+      Unix.chmod auth 0o600;
+      require_code 0 (call 6106 prepare);
+      let legacy = call 6107 [ "headless"; "begin"; "pi-worker" ] in
+      require_code 1 legacy;
+      require_contains "Pi container legacy rejection" legacy.stderr "require monty headless run";
+      if job_status job_file <> "prepared" then failwith "legacy begin claimed container Pi";
+      (* Runtime is persisted, while the harness still follows invocation precedence. *)
+      require_code 0 (call 6108 [ "settings"; "set"; "container-workers"; "false" ]);
+      require_code 0 (call 6109 [ "settings"; "set"; "harness"; "codex" ]);
+      let run_args action = [ "headless"; action; "pi-worker"; "--wait"; "--harness"; "pi" ] in
+      require_code 0 (call 6110 (run_args "run"));
+      require_empty_log host_log;
+      let calls = read_file log in
+      if count_lines_containing log "/pi --provider" <> 4 then
+        failwith "Pi reviewed container chain did not run four phases";
+      require_contains "Pi reviewers have no shell tool" calls "--tools read,grep,find,ls";
+      if string_contains calls "codex exec" then failwith "Pi container ran Codex";
+      let job = Yojson.Safe.from_file job_file in
+      let open Yojson.Safe.Util in
+      let container_name = job |> member "container_worker" |> member "container" |> to_string in
+      let container_dir = Filename.concat state ("containers/" ^ container_name) in
+      let notices = call 6111 [ "handoff"; "pending" ] in
+      require_code 0 notices;
+      require_contains "Pi container final handoff" notices.stdout "Pi oauth validation complete";
+      require_contains "Pi container changes" notices.stdout "**Changed:** 1 files";
+      if not (tree_has (Filename.concat home ".monty/handoffs")
+          (fun path -> string_contains (read_file path) "private-pi.txt")) then
+        failwith "Pi durable handoff omitted its changed file";
+      let reject_mode n mode expected =
+        let failed = call ~env:(replace_env env [ ("MONTY_TEST_PI_RESULT", mode) ]) n
+            (run_args "resume") in
+        require_code 1 failed;
+        require_contains "Pi failure diagnostic" failed.stderr expected;
+        if job_status job_file <> "launch-requested" then failwith "failed Pi chain reset status";
+        if tree_has worker_dir (fun path -> let contents = read_file path in
+            string_contains contents secret || string_contains contents refreshed) then
+          failwith "Pi credentials reached durable state";
+        if tree_has worker_dir (fun path -> Filename.check_suffix path ".partial") then
+          failwith "Pi collection left a partial report"
+      in
+      reject_mode 6112 "incomplete" "ended without a completed agent";
+      reject_mode 6113 "leak" "contains a harness credential value";
+      reject_mode 6114 "rotated" "contains a harness credential value";
+      require_code 0 (call 6115 [ "stop"; "pi-worker" ]);
+      if Sys.file_exists (Filename.concat container_dir "secrets/pi/auth.json") then
+        failwith "stopped Pi worker retained credentials";
+      require_code 0 (call 6116 (run_args "resume"));
+      if read_file auth <> auth_contents then failwith "Pi worker changed host auth";
+      require_code 0 (call 6117 [ "stop"; "pi-worker" ]))
+
 let test_cli_parser_and_doctor_contracts () =
   with_temp_root "parser-doctor" (fun root ->
       let home, _log, env = setup_environment root in
@@ -6827,7 +6964,7 @@ let test_json_shape_errors_are_actionable () =
           require_contains "corrupt path warning" listed.stderr corrupt;
           let doctor = run ~root ~env (3110 + index)
               [ "doctor"; "--home"; home; "--terminal"; "dry-run";
-                "--worktree"; "never"; "--pi-command"; "/usr/bin/true" ] in
+                "--worktree"; "never"; "--pi-command"; "/bin/sh -c true" ] in
           require_code 1 doctor;
           require_contains "corrupt state doctor" doctor.stdout "FAIL";
           require_contains "structural JSON diagnostic" doctor.stdout "invalid JSON structure";
@@ -7500,6 +7637,8 @@ let () =
       test_settings_commands_and_effective_harness );
     ( "cli_containerized_codex_worker_lifecycle",
       test_containerized_codex_worker_lifecycle );
+    ( "cli_containerized_pi_worker_lifecycle",
+      test_containerized_pi_worker_lifecycle );
     ( "cli_head_butler_continue_uses_native_sessions_without_monty_state",
       test_head_butler_continue_uses_native_sessions_without_monty_state );
     ( "cli_parser_and_doctor_contracts", test_cli_parser_and_doctor_contracts ) ]

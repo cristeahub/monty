@@ -15,14 +15,15 @@ fail_once() {
 }
 
 json_image() {
-  printf '%s\n' '[{"configuration":{"descriptor":{"digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}},"variants":[{"platform":{"architecture":"arm64","os":"linux"},"config":{"config":{"Cmd":["sleep","infinity"],"Env":["HOME=/monty/home"],"Labels":{"com.monty.image":"apple-worker-v1"},"User":"monty"}}}]}]'
+  printf '%s\n' '[{"configuration":{"descriptor":{"digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}},"variants":[{"platform":{"architecture":"arm64","os":"linux"},"config":{"config":{"Cmd":["sleep","infinity"],"Env":["HOME=/monty/home"],"Labels":{"com.monty.image":"apple-worker-v1","com.monty.pi":"1.0.2"},"User":"monty"}}}]}]'
 }
 
 container_json() {
   dir=$1
   owner=$(cat "$dir/owner")
   volume=$(cat "$dir/volume")
-  printf '[{"configuration":{"labels":{"com.monty.worker":"%s"},"image":{"descriptor":{"digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}},"platform":{"architecture":"arm64","os":"linux"},"useInit":true,"capAdd":["CAP_CHOWN","CAP_DAC_OVERRIDE"],"capDrop":["ALL"],"initProcess":{"executable":"/usr/bin/sleep","arguments":["infinity"],"environment":["HOME=/monty/home","CODEX_HOME=/monty/home/.codex"],"user":{"id":{"uid":10001,"gid":10001}}},"publishedPorts":[],"publishedSockets":[],"rosetta":false,"ssh":false,"virtualization":false,"mounts":[{"destination":"/monty","type":{"volume":{"name":"%s"}}},{"destination":"/tmp","type":{"tmpfs":{}}},{"destination":"/run/monty-secrets","type":{"tmpfs":{}}}]}}]\n' "$owner" "$volume"
+  digest=${MONTY_FAKE_CONTAINER_INSPECT_DIGEST:-sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}
+  printf '[{"configuration":{"labels":{"com.monty.worker":"%s"},"image":{"descriptor":{"digest":"%s"}},"platform":{"architecture":"arm64","os":"linux"},"useInit":true,"capAdd":["CAP_CHOWN","CAP_DAC_OVERRIDE"],"capDrop":["ALL"],"initProcess":{"executable":"sleep","arguments":["infinity"],"environment":["HOME=/monty/home","CODEX_HOME=/monty/home/.codex"],"user":{"raw":{"userString":"monty"}}},"publishedPorts":[],"publishedSockets":[],"rosetta":false,"ssh":false,"virtualization":false,"mounts":[{"destination":"/monty","type":{"volume":{"name":"%s"}}},{"destination":"/tmp","type":{"tmpfs":{}}},{"destination":"/run/monty-secrets","type":{"tmpfs":{}}}]}}]\n' "$owner" "$digest" "$volume"
 }
 
 case "$1" in
@@ -104,6 +105,7 @@ case "$1" in
         --cpus|--memory|--platform|--user|--env|--cap-drop|--entrypoint)
           shift 2 ;;
         --init) shift ;;
+        monty-apple-worker:1@*) exit 95 ;;
         *) shift ;;
       esac
     done
@@ -161,10 +163,12 @@ case "$1" in
     ;;
   exec)
     shift
+    workdir=
     while [ "$#" -gt 0 ]; do
       case "$1" in
         --interactive) shift ;;
-        --user|--workdir|--env) shift 2 ;;
+        --workdir) workdir=$2; shift 2 ;;
+        --user|--env) shift 2 ;;
         *) break ;;
       esac
     done
@@ -175,6 +179,9 @@ case "$1" in
     volume_dir="$state/volumes/$volume"
     case "$1" in
       true) exit 0 ;;
+      cat)
+        cat "$container_dir/secrets/${2#/run/monty-secrets/}"
+        exit 0 ;;
       monty-inspect)
         internal=$(cat "$volume_dir/context/worktree")
         branch=$(cat "$volume_dir/context/branch")
@@ -233,6 +240,11 @@ case "$1" in
             ln -sfn "$container_dir/secrets/auth.json" "$volume_dir/home/.codex/auth.json"
             shasum -a 256 "$container_dir/secrets/auth.json" | awk '{print $1}' >> "$state/auth-hashes"
             ;;
+          *'cat > /run/monty-secrets/pi/auth.json'*)
+            mkdir -p "$container_dir/secrets/pi"
+            cat > "$container_dir/secrets/pi/auth.json"
+            shasum -a 256 "$container_dir/secrets/pi/auth.json" | awk '{print $1}' >> "$state/auth-hashes"
+            ;;
           *'cat > '*'/monty/context/task.md'*)
             mkdir -p "$volume_dir/context"; cat > "$volume_dir/context/task.md"
             ;;
@@ -284,6 +296,11 @@ case "$1" in
           *'codex exec'*)
             translated=$(printf '%s' "$script" | sed "s#/monty#$volume_dir#g")
             HOME="$volume_dir/home" CODEX_HOME="$volume_dir/home/.codex" sh -c "$translated"
+            ;;
+          *'PI_CODING_AGENT_DIR=/run/monty-secrets/pi '*)
+            translated=$(printf '%s' "$script" | sed "s#/monty/#$volume_dir/#g; s#/run/monty-secrets/#$container_dir/secrets/#g")
+            cd "$volume_dir/${workdir#/monty/}"
+            HOME="$volume_dir/home" sh -c "$translated"
             ;;
           *) exit 92 ;;
         esac

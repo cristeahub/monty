@@ -413,7 +413,8 @@ let ensure_worktree options (prepared : Launcher.prepared) =
           options prepared
     | Some container_worker ->
         let* worktree =
-          Container_worker.ensure_prepared container_worker ~id:prepared.id
+          Container_worker.ensure_prepared ~harness:options.Launcher.harness
+            container_worker ~id:prepared.id
             ~title:prepared.job.Job.title ~repo:prepared.repo
             ~branch:prepared.branch ~context:prepared.context
         in
@@ -464,9 +465,13 @@ let prepare_many ~dry_run options indexed_jobs =
     if needs_host then
       Launcher.check_dependencies
         { options with Launcher.container_workers = false }
-    else
+    else Ok ()
+  in
+  let* () =
+    if List.exists (fun worker -> Option.is_some worker.Launcher.container_worker) prepared then
       Launcher.check_dependencies
         { options with Launcher.container_workers = true }
+    else Ok ()
   in
   let* () =
     match
@@ -535,8 +540,6 @@ let prepare_existing options (record : Job_store.record) =
     | None ->
         Launcher.check_dependencies
           { options with Launcher.container_workers = false }
-    | Some _ when options.harness <> Harness.Codex ->
-        Error "container workers support only the Codex headless harness"
     | Some value ->
         let* () =
           Launcher.check_dependencies
@@ -579,7 +582,7 @@ let claim_begin (plan : begin_plan) =
           plan.options plan.prepared
           ~expected_statuses:[ plan.record.Job_store.status ]
     | Some container_worker -> (
-        match Container_worker.wake container_worker with
+        match Container_worker.wake ~harness:plan.options.harness container_worker with
         | Error message -> `Failed message
         | Ok (was_running, _) ->
             let worktree =
@@ -666,6 +669,11 @@ let begin_worker ~explicit_resume options worker =
     Error "headless begin emits a Pi subagent call, but the effective harness is codex; use monty headless run"
   else
     let* record = Job_store.find ~home:options.Launcher.home ~scope:Job_store.Active worker in
+    let* () =
+      if Option.is_some record.container_worker then
+        Error "container workers require monty headless run or resume, not headless begin"
+      else Ok ()
+    in
     Worker_lock.with_lock ~home:options.home ~record (fun () ->
         begin_worker_unlocked ~explicit_resume options worker)
 
@@ -851,7 +859,8 @@ let run_codex_phase (options : Launcher.options) (dispatch : dispatch)
   match dispatch.container_worker with
   | Some container_worker ->
       let prompt_contents = Shell.read_file prompt in
-      Container_worker.run_codex_phase container_worker ~attempt:paths.id ~name
+      Container_worker.run_phase ~harness:Harness.Codex ~command:"codex"
+        container_worker ~attempt:paths.id ~name
         ~worktree:dispatch.worktree ~codex_yolo:options.codex_yolo ~writable
         ~prompt:prompt_contents ~output ~events ~progress
   | None -> (
@@ -928,22 +937,29 @@ let run_pi_phase (options : Launcher.options) (dispatch : dispatch)
   let progress = phase_path paths.logs name ".log" in
   (* A shell cannot be made read-only with a prompt. Pi reviewers inspect with
      file tools; writers retain bash for installation and validation. *)
-  let tool_names =
-    if writable then "read,bash,edit,write,grep,find,ls" else "read,grep,find,ls"
-  in
   let command =
     "umask 077 && " ^ options.harness_command
-    ^ " --print --mode json --no-session --tools " ^ tool_names
+    ^ Harness.pi_headless_args ~writable
     ^ " < " ^ Shell.quote prompt ^ " > " ^ Shell.quote events
     ^ " 2> " ^ Shell.quote progress
   in
-  let* result = Process.run_capture ~cwd:dispatch.worktree command in
   let result =
-    match result.status with
-    | `Exited 0 ->
-        let* final = pi_final_message events in
-        State_store.write_file_atomic ~path:output ~perm:0o600 final
-    | status -> Error (Process.status_to_string status)
+    match dispatch.container_worker with
+    | Some value ->
+        Container_worker.run_phase ~harness:Harness.Pi
+          ~command:options.harness_command value ~attempt:paths.id ~name
+          ~worktree:dispatch.worktree ~codex_yolo:false ~writable
+          ~prompt:(Shell.read_file prompt) ~output ~events ~progress
+    | None ->
+        let* result = Process.run_capture ~cwd:dispatch.worktree command in
+        match result.status with
+        | `Exited 0 -> Ok ()
+        | status -> Error (Process.status_to_string status)
+  in
+  let result =
+    let* () = result in
+    let* final = pi_final_message events in
+    State_store.write_file_atomic ~path:output ~perm:0o600 final
   in
   Result.map_error (fun message ->
       Printf.sprintf "Pi %s phase failed: %s (events: %s; progress: %s)"
@@ -1092,7 +1108,7 @@ let preflight_worker ~explicit_resume options worker =
   let* inputs = load_phase_inputs plan in
   Ok (plan, inputs)
 
-let container_handoff_changes (dispatch : dispatch) =
+let container_handoff_changes ~harness (dispatch : dispatch) =
   match dispatch.container_worker with
   | None -> None
   | Some value ->
@@ -1104,7 +1120,7 @@ let container_handoff_changes (dispatch : dispatch) =
       in
       Some
         [ match
-            Container_worker.collect_changes value ~worktree:dispatch.worktree
+            Container_worker.collect_changes ~harness value ~worktree:dispatch.worktree
               ~branch:dispatch.branch
           with
           | Ok summary ->
@@ -1240,7 +1256,7 @@ let run_worker_unlocked ~on_started ~explicit_resume options worker =
         Ok final_handoff
     with exn -> Error (Printexc.to_string exn)
   in
-  let changes = container_handoff_changes dispatch in
+  let changes = container_handoff_changes ~harness:plan.options.harness dispatch in
   (match execution with
   | Error message ->
       let handoff =

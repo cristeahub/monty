@@ -125,9 +125,9 @@ let check_dependencies options =
     | _ -> Ok ()
   in
   if options.container_workers then
-    if options.harness <> Harness.Codex then
-      Error "container workers support only the Codex headless harness"
-    else check_dependency "Apple container" (Container_worker.command ())
+    let* () = check_dependency "Apple container" (Container_worker.command ()) in
+    let* () = Container_worker.check_harness options.harness options.harness_command in
+    Container_worker.load_auth ~harness:options.harness |> Result.map (fun _ -> ())
   else
     let* () =
       check_dependency (Harness.to_string options.harness) options.harness_command
@@ -816,8 +816,6 @@ let preflight_batch options indexed_jobs =
            | Retryable _ | Requested -> Option.is_some item.container_worker
          in
          if not requested then Ok ({ item with container_worker = None } :: acc)
-         else if options.harness <> Harness.Codex then
-           Error "container workers support only headless Codex"
          else if List.length item.workspaces <> 1 then
            Error
              (Printf.sprintf

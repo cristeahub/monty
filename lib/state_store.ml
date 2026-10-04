@@ -203,7 +203,7 @@ let replace_file_atomic ?perm ?(before_rename = fun () -> Ok ()) ~path contents 
         try Unix.unlink temp_path with _ -> ())
     (fun () ->
       write_all fd contents;
-      Option.iter (Unix.fchmod fd) perm;
+      Unix.fchmod fd creation_perm;
       Unix.fsync fd;
       let* () = before_rename () in
       Unix.close fd;
