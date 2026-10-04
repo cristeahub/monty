@@ -963,7 +963,7 @@ let test_doctor_typed_checks_and_configuration () =
 
 let test_head_butler_continuation_commands () =
   let command harness continuation =
-    Head_butler.continuation_command ~home:"/monty home" ~harness
+    Head_butler.continuation_command ~monty_command:"/monty/bin/monty" ~home:"/monty home" ~harness
       ~harness_command:
         (match harness with Harness.Pi -> "pi --fixed" | Harness.Codex -> "codex --fixed")
       ~codex_yolo:true continuation
@@ -990,7 +990,7 @@ let test_head_butler_continuation_commands () =
   assert_contains "continued Codex YOLO" codex_picker
     "--dangerously-bypass-approvals-and-sandbox";
   let codex_safe =
-    Head_butler.continuation_command ~home:"/monty home"
+    Head_butler.continuation_command ~monty_command:"/monty/bin/monty" ~home:"/monty home"
       ~harness:Harness.Codex ~harness_command:"codex --fixed"
       ~codex_yolo:false Head_butler.Picker
   in
@@ -1019,7 +1019,7 @@ let test_codex_harness_command () =
         monty_command = "monty" }
   in
   let command =
-    Harness_command.build_command ~codex_hook:true
+    Harness_command.build_command ~mcp:true ~codex_hook:true
       ~codex_mode:Codex_session.Fresh
       ~codex_trusted_paths:[ "/repo" ] ~options ~home:"/monty"
       ~instructions:(Some "/monty/MONTY.md") ~job ~context:job.context
@@ -1037,7 +1037,7 @@ let test_codex_harness_command () =
     "codex-session-capture";
   assert_contains "Codex hook explicit Monty home" command "/monty";
   let relative_home_command =
-    Harness_command.build_command ~codex_hook:true
+    Harness_command.build_command ~mcp:true ~codex_hook:true
       ~codex_mode:Codex_session.Fresh ~codex_trusted_paths:[] ~options
       ~home:"." ~instructions:(Some "/monty/MONTY.md") ~job
       ~context:job.context
@@ -1054,7 +1054,7 @@ let test_codex_harness_command () =
   assert_not_contains "Codex YOLO defaults off" command
     "--dangerously-bypass-approvals-and-sandbox";
   let picker_command =
-    Harness_command.build_command ~codex_hook:true
+    Harness_command.build_command ~mcp:true ~codex_hook:true
       ~codex_mode:Codex_session.Picker
       ~codex_trusted_paths:[] ~options ~home:"/monty"
       ~instructions:(Some "/monty/MONTY.md") ~job ~context:job.context
@@ -1064,7 +1064,7 @@ let test_codex_harness_command () =
     "Read the files below before acting";
   assert_not_contains "Codex picker never uses last" picker_command "--last";
   let exact_command =
-    Harness_command.build_command ~codex_hook:true
+    Harness_command.build_command ~mcp:true ~codex_hook:true
       ~codex_mode:(Codex_session.Exact "thread's exact id")
       ~codex_trusted_paths:[] ~options ~home:"/monty"
       ~instructions:(Some "/monty/MONTY.md") ~job ~context:job.context
@@ -1098,7 +1098,7 @@ let test_codex_harness_command () =
       ~context:"/monty/context.md" ~task_key:"local:local-005" ()
   in
   let multi_command =
-    Harness_command.build_command ~codex_hook:true
+    Harness_command.build_command ~mcp:true ~codex_hook:true
       ~codex_mode:Codex_session.Fresh
       ~codex_trusted_paths:[] ~options ~home:"/monty"
       ~instructions:(Some "/monty/MONTY.md") ~job:multi_job
@@ -1156,7 +1156,7 @@ let test_codex_harness_command () =
     unlinked_always_script
     "ensure-worktree --repo '/admin' --branch 'cto/admin-task-1' --home";
   let yolo_command =
-    Harness_command.build_command ~codex_hook:true
+    Harness_command.build_command ~mcp:true ~codex_hook:true
       ~codex_mode:Codex_session.Fresh
       ~codex_trusted_paths:[]
       ~options:{ options with codex_yolo = true }
@@ -1166,7 +1166,7 @@ let test_codex_harness_command () =
   assert_contains "Codex YOLO flag" yolo_command
     "--dangerously-bypass-approvals-and-sandbox";
   let head_butler =
-    Head_butler.command ~home:"/monty" ~harness:Harness.Codex
+    Head_butler.command ~monty_command:"/monty/bin/monty" ~home:"/monty" ~harness:Harness.Codex
       ~harness_command:"codex" ~codex_yolo:true ~name:"Monty Head Butler"
   in
   assert_contains "head-butler Codex YOLO flag" head_butler

@@ -414,7 +414,10 @@ let script_has_owner_marker (options : options) (prepared : prepared)
         (* Pre-profile scripts go straight from PATH to the title. *)
         match consume "printf " start with
         | Some _ -> Some []
-        | None -> profiles start Harness_command.profile_environment_names
+        | None ->
+            (match profiles start Harness_command.profile_environment_names with
+             | Some _ as current -> current
+             | None -> profiles start (List.filter ((<>) "PI_CODING_AGENT_DIR") Harness_command.profile_environment_names))
       in
       Some (environment_path, profile_environment)
     in
@@ -424,9 +427,9 @@ let script_has_owner_marker (options : options) (prepared : prepared)
     (* Decode only the fixed preamble, including multiline quoted values, then
        authenticate the entire template using its historical environment.
        Resume replaces it with a fresh script before requesting execution. *)
-    let expected ?(codex_hook = true) ?(job = prepared.job) codex_mode
+    let expected ?(mcp = true) ?(codex_hook = true) ?(job = prepared.job) codex_mode
         codex_trusted_paths =
-      Harness_command.launch_script_contents ~environment_path ~profile_environment
+      Harness_command.launch_script_contents ~mcp ~environment_path ~profile_environment
         ~options:harness_options
         ~codex_hook ~codex_mode ~codex_trusted_paths ~job ~id:prepared.id
         ~branch:prepared.branch
@@ -482,7 +485,9 @@ let script_has_owner_marker (options : options) (prepared : prepared)
       modes
       |> List.concat_map (fun mode ->
              variants (expected mode trusted_paths)
-             @ variants (expected mode []))
+             @ variants (expected mode [])
+             @ variants (expected ~mcp:false mode trusted_paths)
+             @ variants (expected ~mcp:false mode []))
     in
     let legacy_worker_dirs =
       [ None; Some prepared.worker_dir ]
@@ -505,15 +510,17 @@ let script_has_owner_marker (options : options) (prepared : prepared)
       |> List.concat_map (fun worker_dir ->
              let job = { prepared.job with Job.worker_dir = worker_dir } in
              variants
-               (expected ~codex_hook:false ~job Codex_session.Fresh
+               (expected ~mcp:false ~codex_hook:false ~job Codex_session.Fresh
                   trusted_paths)
              @ variants
-                 (expected ~codex_hook:false ~job Codex_session.Fresh []))
+                 (expected ~mcp:false ~codex_hook:false ~job Codex_session.Fresh []))
     in
     let sentinel = "monty-codex-session-id-sentinel" in
     let exact_templates =
       variants (expected (Codex_session.Exact sentinel) trusted_paths)
       @ variants (expected (Codex_session.Exact sentinel) [])
+      @ variants (expected ~mcp:false (Codex_session.Exact sentinel) trusted_paths)
+      @ variants (expected ~mcp:false (Codex_session.Exact sentinel) [])
     in
     List.exists (String.equal contents) (accepted @ legacy)
     || List.exists (exact_template_matches contents) exact_templates
@@ -1329,7 +1336,7 @@ let dry_run ?(codex_mode = Codex_session.Fresh) options
         | Codex_session.Exact session_id -> " " ^ session_id
         | _ -> ""));
   Fmt.pr "[dry-run] command: %s\n"
-    (Harness_command.build_command ~codex_hook:true ~codex_mode
+    (Harness_command.build_command ~mcp:true ~codex_hook:true ~codex_mode
        ~options:harness_options
        ~codex_trusted_paths:[]
        ~home:options.home ~instructions:(Some prepared.instructions)

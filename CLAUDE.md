@@ -1,0 +1,3 @@
+# Monty instructions
+
+@AGENTS.md

@@ -82,6 +82,13 @@ Preview the commands without changing anything:
 
 ## Start the head butler
 
+Monty connects its portable documentation MCP automatically for host Codex and
+Pi sessions. Agents share the workflow manual while keeping behavior rules in
+AGENTS.md / worker MONTY.md. Claude Code and other local MCP clients can connect
+to `monty mcp serve` independently of Monty's harness support. See
+[MCP setup and portability](docs/mcp.md); `monty mcp guide` reads the same manual
+without MCP.
+
 From this repo, run:
 
 ```sh

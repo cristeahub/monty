@@ -57,7 +57,7 @@ let codex_hook_args ~home options =
   " --enable " ^ Shell.quote "hooks" ^ " --dangerously-bypass-hook-trust -c "
   ^ Shell.quote hook_config
 
-let build_command ~codex_hook ~codex_mode ~codex_trusted_paths ~options ~home
+let build_command ~mcp ~codex_hook ~codex_mode ~codex_trusted_paths ~options ~home
     ~instructions ~job ~context =
   match options.harness with
   | Harness.Pi ->
@@ -74,7 +74,7 @@ let build_command ~codex_hook ~codex_mode ~codex_trusted_paths ~options ~home
         | None -> ""
         | Some id -> " --fork " ^ Shell.quote id
       in
-      Printf.sprintf "exec %s --name %s%s%s %s %s" options.command name fork
+      (if mcp then Mcp_config.pi_setup_command ~home ~monty_command:options.monty_command ^ " && " else "") ^ Printf.sprintf "exec %s --name %s%s%s %s %s" options.command name fork
         instruction_arg context_arg prompt
   | Harness.Codex ->
       let yolo =
@@ -94,7 +94,8 @@ let build_command ~codex_hook ~codex_mode ~codex_trusted_paths ~options ~home
       in
       let base =
         Printf.sprintf "exec %s%s%s%s%s%s" options.command codex_effort_arg
-          codex_vim_arg (Codex_trust.arguments codex_trusted_paths)
+          (codex_vim_arg ^ (if mcp then Mcp_config.codex_args ~monty_command:options.monty_command else ""))
+          (Codex_trust.arguments codex_trusted_paths)
           (if codex_hook then codex_hook_args ~home options else "") yolo
       in
       (match codex_mode with
@@ -163,17 +164,17 @@ let static_workspace_lines (job : Job.t) =
       "cd \"$MONTY_JOB_WORKTREE\"" ]
 
 let profile_environment_names =
-  [ "CODEX_HOME"; "MANTLE_CONTEXT"; "_MANTLE_SELECTED_HOME";
+  [ "PI_CODING_AGENT_DIR"; "CODEX_HOME"; "MANTLE_CONTEXT"; "_MANTLE_SELECTED_HOME";
     "_MANTLE_PREV_STATE"; "_MANTLE_PREV_HOME" ]
 
-let launch_script_contents ?environment_path
+let launch_script_contents ?(mcp = true) ?environment_path
     ?(profile_environment =
       List.map (fun name -> (name, Sys.getenv_opt name)) profile_environment_names)
     ~codex_hook ~codex_mode ~codex_trusted_paths ~options
     ~job ~id ~branch ~source_repo ~initial_workdir ~home ~context ~instructions
     ~worker_dir ~worktree_mode ~wt_command () =
   let command =
-    build_command ~codex_hook ~codex_mode ~codex_trusted_paths ~options ~home
+    build_command ~mcp ~codex_hook ~codex_mode ~codex_trusted_paths ~options ~home
       ~instructions:(Some instructions) ~job ~context
   in
   let setup_lines =

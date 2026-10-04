@@ -238,6 +238,7 @@ let setup_environment ?(agent_profile = Some "reviewed") root =
   let env =
     env_with
       [ ("MONTY_HOME", home);
+        ("PI_CODING_AGENT_DIR", Filename.concat root "pi-agent");
         ("MANTLE_CONTEXT", "");
         ("CODEX_HOME", Filename.concat root "codex-home");
         ("PATH", fake_bin ^ ":/usr/bin:/bin");
@@ -2114,7 +2115,7 @@ let test_codex_session_capture_and_resume_modes () =
           (fun () ->
             Unix.putenv "PATH"
               (Filename.concat root "fake-bin" ^ ":/usr/bin:/bin");
-            Harness_command.launch_script_contents ~profile_environment:[] ~codex_hook:false
+            Harness_command.launch_script_contents ~mcp:false ~profile_environment:[] ~codex_hook:false
               ~codex_mode:Codex_session.Fresh ~codex_trusted_paths:[]
               ~options:harness_options ~job:legacy_job ~id:legacy_id
               ~branch:legacy_branch ~source_repo:repo ~initial_workdir:repo ~home
@@ -2780,7 +2781,7 @@ let test_codex_launch_preserves_mantle_environment () =
   with_temp_root "codex-mantle-environment" (fun root ->
       let home, log, base_env = setup_environment root in
       let names =
-        [ "CODEX_HOME"; "MANTLE_CONTEXT"; "_MANTLE_SELECTED_HOME";
+        [ "PI_CODING_AGENT_DIR"; "CODEX_HOME"; "MANTLE_CONTEXT"; "_MANTLE_SELECTED_HOME";
           "_MANTLE_PREV_STATE"; "_MANTLE_PREV_HOME" ]
       in
       let clean_env =
@@ -2837,6 +2838,7 @@ let test_codex_launch_preserves_mantle_environment () =
           ("client-a", profile "client-a" "local" special, Some "client-a");
           ("off", [], None);
           ("custom-home", [ ("CODEX_HOME", special) ], None);
+          ("pi-agent-home", [ ("PI_CODING_AGENT_DIR", special) ], None);
           ("empty", List.map (fun name -> (name, "")) names, None);
           ("mixed", [ ("CODEX_HOME", ""); ("_MANTLE_PREV_HOME", "") ], None) ]
       in
@@ -5035,7 +5037,7 @@ test -z "${MONTY_WORKSPACE_3:-}"
 case "$prompt" in
   *'Independently review Monty worker'*)
     case "$prompt" in *'Review correctness.'*) phase=correctness ;; *) phase=quality ;; esac
-    test "$tools" = read,grep,find,ls
+    test "$tools" = read,grep,find,ls,mcp__monty__monty_help,mcp__monty__monty_command_help
     case "$prompt" in *'HANDOFF-correctness'*|*'HANDOFF-quality'*) exit 82 ;; esac
     touch "$root/$MONTY_JOB_ID-$phase"
     count=0
@@ -5073,7 +5075,7 @@ if [ -n "$output" ]; then
 else
   case "$args" in *'--print --mode json --no-session --tools '*) ;; *) exit 87 ;; esac
   if [ "$phase" != correctness ] && [ "$phase" != quality ]; then
-    test "$tools" = read,bash,edit,write,grep,find,ls
+    test "$tools" = read,bash,edit,write,grep,find,ls,mcp__monty__monty_help,mcp__monty__monty_command_help
   fi
   reason=stop
   if [ "${FAIL_PI:-}" = yes ]; then reason=error; fi

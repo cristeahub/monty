@@ -832,6 +832,7 @@ let run_codex_phase (options : Launcher.options) (dispatch : dispatch)
   let command =
     "umask 077 && " ^ options.harness_command ^ " exec"
     ^ Harness_command.codex_effort_arg
+    ^ Mcp_config.codex_args ~monty_command:options.monty_command
     ^ Codex_trust.arguments
         (match
            dispatch.workspaces
@@ -924,12 +925,14 @@ let pi_final_message events =
 
 let run_pi_phase (options : Launcher.options) (dispatch : dispatch)
     (paths : attempt_paths) ~name ~writable ~prompt ~output =
+  let* () = Mcp_config.ensure_pi ~home:dispatch.home ~monty_command:options.monty_command in
   let events = phase_path paths.events name ".jsonl" in
   let progress = phase_path paths.logs name ".log" in
   (* A shell cannot be made read-only with a prompt. Pi reviewers inspect with
      file tools; writers retain bash for installation and validation. *)
   let tool_names =
-    if writable then "read,bash,edit,write,grep,find,ls" else "read,grep,find,ls"
+    (if writable then "read,bash,edit,write,grep,find,ls" else "read,grep,find,ls")
+    ^ ",mcp__monty__monty_help,mcp__monty__monty_command_help"
   in
   let command =
     "umask 077 && " ^ options.harness_command

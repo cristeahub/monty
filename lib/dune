@@ -2,3 +2,13 @@
  (name monty)
  (foreign_stubs (language c) (names worker_lock_stubs))
  (libraries cmdliner fmt fpath unix yojson))
+
+(rule
+ (target embedded_manual.ml)
+ (deps ../docs/monty-workflows.md)
+ (action
+  (with-stdout-to %{target}
+   (progn
+    (echo "let text = {monty_manual|")
+    (cat %{dep:../docs/monty-workflows.md})
+    (echo "|monty_manual}")))))

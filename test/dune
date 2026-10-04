@@ -33,3 +33,8 @@
  (alias runtest)
  (deps test_context_adapters.py ../helpers/context_source.py)
  (action (run python3 %{dep:test_context_adapters.py} %{dep:../helpers/context_source.py})))
+
+(rule
+ (alias runtest)
+ (deps test_mcp.py ../bin/main.exe)
+ (action (run python3 %{dep:test_mcp.py} %{dep:../bin/main.exe})))

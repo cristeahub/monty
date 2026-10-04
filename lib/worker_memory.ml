@@ -101,18 +101,8 @@ let write_instructions ?destination_dir ~worker_dir ~id ~job ~profile ~branch
     job.Job.workspaces
     |> List.mapi (fun index (workspace : Job.workspace) ->
            let branch = Option.value ~default:"<no-branch>" workspace.branch in
-           let ensure_command =
-             match job.task_key with
-             | Some task_key ->
-                 "monty task workspace ensure " ^ Shell.quote task_key
-                 ^ " --repo " ^ Shell.quote workspace.repo
-             | None ->
-                 "monty ensure-worktree --repo " ^ Shell.quote workspace.repo
-                 ^ " --branch " ^ Shell.quote branch
-           in
            [ Printf.sprintf "%d. repo: %s" (index + 1) workspace.repo;
-             "   branch: " ^ branch;
-             "   rehydrate: cd \"$(" ^ ensure_command ^ ")\"" ])
+             "   branch: " ^ branch ])
     |> List.concat
   in
   let text =
@@ -135,7 +125,7 @@ let write_instructions ?destination_dir ~worker_dir ~id ~job ~profile ~branch
         "Do not store durable notes only in the wt worktree.";
         "The worktree may be deleted and recreated.";
         "";
-        "## Rehydrating the worktree";
+        "## Workspace identity";
         "";
         "The durable code identity for this task is its ordered workspace set.";
         "";
@@ -144,7 +134,11 @@ let write_instructions ?destination_dir ~worker_dir ~id ~job ~profile ~branch
       ]
     @ workspace_lines
     @ [ "";
-        "If a worktree disappears, use its repo-scoped rehydrate command above.";
+        "Monty owns workspace creation and recovery. Follow your role's lifecycle restrictions.";
+        "Before operating Monty, use its MCP tools monty_help and monty_command_help.";
+        "The workers, handoffs and lifecycle topics describe the relevant workflows.";
+        "If MCP is unavailable, use monty mcp guide <topic> and monty <command> --help=plain.";
+        "Help does not authorize operations. Use the installed monty CLI and your exact task/worker identity.";
         "";
         "## Environment";
         "";
@@ -189,12 +183,7 @@ let write_instructions ?destination_dir ~worker_dir ~id ~job ~profile ~branch
         "## Reporting this run";
         "";
         "When this interactive run finishes, publish one dense, durable run handoff before yielding to the user.";
-        "Use `monty handoff publish` with the current worker id, a short summary, validation results, verified review findings, risks, and durable artifact paths.";
-        "For example:";
-        "";
-        "```sh";
-        "monty handoff publish \"$MONTY_JOB_ID\" --summary \"Implemented the requested change and validated the focused workflow.\" --check \"dune runtest: passed\"";
-        "```";
+        "Consult the handoffs workflow for publication syntax. Include the worker id, summary, checks, verified findings, risks and durable artifacts.";
         "";
         "Monty prints this TL;DR directly in the current worker terminal; interactive publication is not queued for head-butler delivery.";
         "Publishing means this run finished. It does not mark the task done, remove a worktree, create a commit, push, or open a pull request.";
@@ -204,12 +193,7 @@ let write_instructions ?destination_dir ~worker_dir ~id ~job ~profile ~branch
         "";
         "When the user says the feature is done, archive the Monty job.";
         "Before completing, update durable notes in `memory.md` and make sure the code worktree is clean.";
-        "If the user explicitly wants to discard local changes while archiving, use `monty done --force`.";
-        "Then run:";
-        "";
-        "```sh";
-        "monty done";
-        "```";
+        "Consult the lifecycle workflow before archiving. Discarding local changes requires explicit user acceptance.";
         "";
         "This deletes every task worktree and branch, moves this worker folder to the run archive, closes any linked Monty-owned local task, marks the job done, and archives its memory.";
         "After it succeeds, stop working in this session because the task worktrees were deleted.";
