@@ -210,7 +210,7 @@ with tempfile.TemporaryDirectory(prefix="monty-mcp-") as directory:
     fake.write_text(f"#!{sys.executable}\nimport json,sys\nfrom pathlib import Path\nPath({str(log)!r}).write_text(json.dumps(sys.argv[1:]))\n")
     fake.chmod(0o755)
     import shlex
-    for harness in ["codex", "pi"]:
+    for harness in ["pi"]:
         for command in [["start"], ["continue", "--last"], ["continue", "saved-session"]]:
             cli(*command, "--harness", harness, "--" + harness + "-command", shlex.quote(str(fake)))
             argv = json.loads(log.read_text())
@@ -220,6 +220,10 @@ with tempfile.TemporaryDirectory(prefix="monty-mcp-") as directory:
                 assert str(executable) in entries[0]
             else:
                 assert json.loads(config.read_text())["mcpServers"]["monty"]["command"] == str(executable)
+    # Codex now configures MCP on the service thread (covered by API E2E).
+    missing = subprocess.run([str(executable), "start", "--harness", "codex", "--codex-command", shlex.quote(str(fake))],
+                             cwd=root, env=env, capture_output=True, text=True)
+    assert missing.returncode != 0 and "Monty command receipt" in missing.stderr
     assert not (root / "INJECTED").exists()
     assert not (home / ".monty/tasks.local.json").exists()
     assert not (home / ".monty/runs").exists()

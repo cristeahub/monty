@@ -717,8 +717,8 @@ let test_codex_launch_uses_command_local_trust () =
         | `String path -> path
         | _ -> failwith "Codex worker did not record its launch script"
       in
-      require_contains "Codex command-local trust" (Shell.read_file launch_script)
-        (String.trim (Codex_trust.argument repo));
+      require_contains "Codex uses service" (Shell.read_file launch_script)
+        " terminal --home ";
       require_contains "Codex terminal requested" (Shell.read_file log) "osascript")
 
 let local_task_status home =
@@ -2031,12 +2031,8 @@ let test_codex_session_capture_and_resume_modes () =
         Yojson.Safe.from_file job_file |> json_string "launch_script"
       in
       let initial_script = Shell.read_file launch_script in
-      require_contains "initial Codex capture hook" initial_script
-        "hooks.SessionStart";
-      require_contains "initial Codex capture command" initial_script
-        "codex-session-capture";
-      require_contains "initial Codex hook trust scope" initial_script
-        "--dangerously-bypass-hook-trust";
+      require_contains "initial Codex service launch" initial_script " terminal --home ";
+      require_contains "initial Codex service fresh mode" initial_script "--mode fresh";
       require_contains "initial Codex prompt" initial_script
         "Read the files below before acting";
       let capture_env = replace_env env [ ("MONTY_WORKER_DIR", worker_dir) ] in
@@ -2075,7 +2071,7 @@ let test_codex_session_capture_and_resume_modes () =
       require_contains "exact Codex dry-run mode" exact_dry.stdout
         ("[dry-run] Codex session: exact " ^ exact_one);
       require_contains "exact Codex resume selector" exact_dry.stdout
-        (" resume -C . -- " ^ Shell.quote exact_one);
+        (" --session " ^ Shell.quote exact_one);
       if string_contains exact_dry.stdout "--last" then
         failwith "exact Codex resume used --last";
       if string_contains exact_dry.stdout "Read the files below before acting" then
@@ -2086,7 +2082,7 @@ let test_codex_session_capture_and_resume_modes () =
       in
       require_code 0 exact_resume;
       require_contains "exact Codex launch script" (Shell.read_file launch_script)
-        (" resume -C . -- " ^ Shell.quote exact_one);
+        (" --session " ^ Shell.quote exact_one);
       let failed_fresh =
         run ~root
           ~env:
@@ -2115,7 +2111,7 @@ let test_codex_session_capture_and_resume_modes () =
       in
       require_code 0 picker_resume;
       let picker_script = Shell.read_file launch_script in
-      require_contains "Codex native picker" picker_script " resume -C .";
+      require_contains "Codex native picker" picker_script " --mode picker";
       if string_contains picker_script "--last"
          || string_contains picker_script "Read the files below before acting"
       then failwith "Codex picker used --last or resent the original prompt";
@@ -2129,14 +2125,14 @@ let test_codex_session_capture_and_resume_modes () =
            ([ "resume"; id ] @ codex_options "ghostty"));
       require_contains "picker capture became exact resume"
         (Shell.read_file launch_script)
-        (" resume -C . -- " ^ Shell.quote exact_two);
+        (" --session " ^ Shell.quote exact_two);
       Sys.remove sidecar;
       require_code 0
         (run ~root ~env 888
            ([ "resume"; id ] @ codex_options "ghostty"));
       let missing_sidecar_script = Shell.read_file launch_script in
       require_contains "missing sidecar rewrote exact script to picker"
-        missing_sidecar_script " resume -C .";
+        missing_sidecar_script " --mode picker";
       if string_contains missing_sidecar_script exact_two then
         failwith "missing sidecar retained the old exact Codex selector";
       require_code 0
@@ -2262,9 +2258,9 @@ let test_codex_session_capture_and_resume_modes () =
       require_code 0 legacy_resume;
       let rewritten_legacy = Shell.read_file legacy_script in
       require_contains "legacy Codex worker gained capture hook" rewritten_legacy
-        "codex-session-capture";
+        "terminal --home";
       require_contains "legacy Codex worker opened picker" rewritten_legacy
-        " resume -C .")
+        " --mode picker")
 
 let test_invalid_links_duplicate_ids_and_ambiguous_workers () =
   with_temp_root "invalid-links" (fun root ->
@@ -2492,10 +2488,8 @@ let test_launch_batch_preflight_is_all_or_nothing () =
       require_code 0 codex_dry;
       require_contains "Codex dry-run harness" codex_dry.stdout
         "[dry-run] harness: codex";
-      require_contains "Codex dry-run command" codex_dry.stdout
-        "model_reasoning_effort=\"xhigh\"";
-      require_contains "Codex dry-run Vim mode" codex_dry.stdout
-        "tui.vim_mode_default=true";
+      require_contains "Codex dry-run command" codex_dry.stdout "terminal --home";
+      require_contains "Codex dry-run fixed args" codex_dry.stdout "--codex-command 'codex --fixed value'";
       if Shell.read_file tasks_path <> tasks_before then
         failwith "Codex dry-run created planned tasks";
       if Sys.file_exists workers then
@@ -2990,6 +2984,16 @@ let test_codex_launch_preserves_mantle_environment () =
       let terminal_home = Filename.concat root "terminal-home" in
       Shell.ensure_dir terminal_home;
       let execute script bindings selected =
+        (* Isolate the Ghostty environment preamble from the service protocol,
+           which has its own checkout-binary E2E test. The original authenticated
+           launch script is never edited by this fixture. *)
+        let fixture = script ^ ".environment-test" in
+        let prefix = "exec " ^ Shell.quote executable ^ " terminal" in
+        Shell.write_file fixture (Shell.read_file script |> String.split_on_char '\n'
+          |> List.map (fun line -> if String.starts_with ~prefix line then
+            "exec " ^ Shell.quote codex ^ String.sub line (String.length prefix) (String.length line-String.length prefix)
+            else line) |> String.concat "\n");
+        let script = fixture in
         List.iter (fun conflicting ->
             (* Exercise Ghostty's actual login-shell command with an isolated
                startup file, not the developer's shell configuration. *)
@@ -3031,12 +3035,9 @@ let test_codex_launch_preserves_mantle_environment () =
           execute script bindings selected;
           if string_contains (Shell.read_file script) "unrelated-secret-sentinel" then
             failwith "launch script captured an unrelated credential";
-          (* These paths already inherit the caller's environment without Ghostty. *)
-          List.iter (fun command ->
-              require_code 0
-                (cli bindings (command @ [ "--home"; home; "--harness"; "codex";
-                                           "--codex-command"; "codex" ]));
-              check_received bindings selected) [ [ "start" ]; [ "continue"; "--last" ] ]) cases;
+          (* Head-butler Codex requires the managed service; API E2E exercises
+             its endpoint and profile checks. *)
+          ()) cases;
       let script = script_for "work" in
       let resume terminal = [ "resume"; "work" ] @ options terminal in
       (* Repeatedly change/disable the profile of the same worker. Its historical
@@ -6111,12 +6112,9 @@ let test_settings_commands_and_effective_harness () =
       require_code 0 dry_run;
       require_contains "persisted Codex harness command" dry_run.stdout
         "[dry-run] harness: codex";
-      require_contains "persisted Codex YOLO command" dry_run.stdout
-        "--dangerously-bypass-approvals-and-sandbox";
-      require_contains "persisted Codex xhigh command" dry_run.stdout
-        "model_reasoning_effort=\"xhigh\"";
-      require_contains "persisted Codex Vim mode" dry_run.stdout
-        "tui.vim_mode_default=true";
+      require_contains "persisted explicit unsafe request" dry_run.stdout
+        "--codex-yolo";
+      require_contains "persisted Codex service command" dry_run.stdout "terminal --home";
       let doctor =
         run ~root ~env 1953
           [ "doctor"; "--home"; home; "--terminal"; "dry-run";
@@ -6160,16 +6158,8 @@ let test_head_butler_continue_uses_native_sessions_without_monty_state () =
           [ "continue"; "saved-chat"; "--home"; home; "--harness"; "codex";
             "--codex-command"; "codex"; "--codex-yolo" ]
       in
-      require_code 97 codex;
-      let calls = read_file log in
-      require_contains "Codex native exact session" calls "codex resume";
-      require_contains "continued Codex reasoning configuration" calls
-        "model_reasoning_effort=\"xhigh\"";
-      require_contains "continued Codex Vim configuration" calls
-        "tui.vim_mode_default=true";
-      require_contains "continued Codex YOLO configuration" calls
-        "--dangerously-bypass-approvals-and-sandbox";
-      require_contains "continued Codex exact selector" calls "saved-chat";
+      require_code 1 codex;
+      require_contains "managed unsafe policy fails closed" codex.stderr "does not support approval/sandbox bypass";
       let conflict =
         run ~root ~env 1959
           [ "continue"; "saved-chat"; "--last"; "--home"; home ]

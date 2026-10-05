@@ -58,18 +58,7 @@ let worktree_default getenv =
   | Ok mode -> mode
   | Error _ -> Launcher.Always
 
-let mantle_profile getenv =
-  let env name = Option.value ~default:"" (getenv name) in
-  let name = env "MANTLE_CONTEXT" in
-  (* Match Mantle's shell-local active_context contract without invoking a CLI. *)
-  if String.length name > 0 && String.length name <= 32
-     && name.[0] >= 'a' && name.[0] <= 'z'
-     && String.for_all (function 'a' .. 'z' | '0' .. '9' | '-' | '_' -> true | _ -> false) name
-     && not (List.mem name [ "init"; "list"; "create"; "off"; "status"; "prompt" ])
-     && List.mem (env "_MANTLE_PREV_STATE") [ "unset"; "local"; "export" ]
-     && env "_MANTLE_SELECTED_HOME" <> ""
-     && env "CODEX_HOME" = env "_MANTLE_SELECTED_HOME"
-  then Some name else None
+let mantle_profile = List_jobs.mantle_profile
 
 let rec make_cmd ?(getenv = Sys.getenv_opt) () =
 let home_arg =
@@ -822,25 +811,7 @@ let project_filter_arg =
   let doc = "Only list tasks for this project; overrides the default Mantle group." in
   Cmdliner.Arg.(value & opt (some string) None & info [ "project" ] ~docv:"PROJECT" ~doc)
  in
-let list_selection ?project group all_groups =
-  if all_groups && group <> None then Error "--group and --all-groups cannot be combined"
-  else
-    let profile = mantle_profile getenv in
-    let selected =
-      if group <> None then group
-      else if all_groups || project <> None then None else profile
-    in
-    let scope =
-      if all_groups then "Groups: all (--all-groups)"
-      else match group, project, profile with
-      | Some group, _, _ -> "Group: " ^ group ^ " (--group)"
-      | None, Some project, Some _ -> "Project: " ^ project ^ " (--project)"
-      | None, None, Some profile -> "Group: " ^ profile
-      | _ -> ""
-    in
-    let profile = Option.fold ~none:"" ~some:(fun name -> "Profile: " ^ name ^ " (Mantle)") profile in
-    let banner = [ profile; scope ] |> List.filter (fun text -> text <> "") |> String.concat " | " in
-    Ok (selected, if banner = "" then "" else banner ^ "\n")
+let list_selection = List_jobs.selection ~getenv
  in
 let list_jobs archived all run project group all_groups no_sync home =
   let scope = if all then Job_store.All else if archived then Job_store.Archived else Job_store.Active in
@@ -1533,6 +1504,8 @@ let main_cmd =
   Cmdliner.Cmd.group ~default:start_term
     (Cmdliner.Cmd.info "monty" ~version:"dev" ~doc ~man)
     ([
+      Client_cli.command ~home_arg;
+      Client_cli.terminal ~home_arg;
       start_cmd;
       continue_cmd;
       launch_cmd;

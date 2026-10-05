@@ -1,3 +1,36 @@
+let mantle_profile getenv =
+  let env name = Option.value ~default:"" (getenv name) in
+  let name = env "MANTLE_CONTEXT" in
+  (* Match Mantle's shell-local active_context contract without invoking a CLI. *)
+  if String.length name > 0 && String.length name <= 32
+     && name.[0] >= 'a' && name.[0] <= 'z'
+     && String.for_all (function 'a' .. 'z' | '0' .. '9' | '-' | '_' -> true | _ -> false) name
+     && not (List.mem name [ "init"; "list"; "create"; "off"; "status"; "prompt" ])
+     && List.mem (env "_MANTLE_PREV_STATE") [ "unset"; "local"; "export" ]
+     && env "_MANTLE_SELECTED_HOME" <> ""
+     && env "CODEX_HOME" = env "_MANTLE_SELECTED_HOME"
+  then Some name else None
+
+let selection ~getenv ?project group all_groups =
+  if all_groups && group <> None then Error "--group and --all-groups cannot be combined"
+  else
+    let profile = mantle_profile getenv in
+    let selected =
+      if group <> None then group
+      else if all_groups || project <> None then None else profile
+    in
+    let scope =
+      if all_groups then "Groups: all (--all-groups)"
+      else match group, project, profile with
+      | Some group, _, _ -> "Group: " ^ group ^ " (--group)"
+      | None, Some project, Some _ -> "Project: " ^ project ^ " (--project)"
+      | None, None, Some profile -> "Group: " ^ profile
+      | _ -> ""
+    in
+    let profile = Option.fold ~none:"" ~some:(fun name -> "Profile: " ^ name ^ " (Mantle)") profile in
+    let banner = [ profile; scope ] |> List.filter (fun text -> text <> "") |> String.concat " | " in
+    Ok (selected, if banner = "" then "" else banner ^ "\n")
+
 let run_matches run record =
   match run with
   | None -> true
@@ -34,7 +67,7 @@ let task_matches_run task_keys task =
 let print_warnings warnings =
   List.iter (fun warning -> Fmt.epr "monty: warning: %s\n" warning) warnings
 
-let run ~home ~scope ?run ?project ?group ?(banner = "") ?(sync = true) () =
+let inventory ~home ~scope ?run ?project ?group ?(sync = false) () =
   let ( let* ) = Result.bind in
   let* () =
     match group with
@@ -52,11 +85,16 @@ let run ~home ~scope ?run ?project ?group ?(banner = "") ?(sync = true) () =
   let* tasks, inventory_warnings =
     Project_overview.load_tasks_with_warnings ~home ?project ?group ~scan ~all:true ()
   in
-  print_warnings
-    (List.sort_uniq String.compare (sync_warnings @ inventory_warnings));
+  let warnings = List.sort_uniq String.compare (sync_warnings @ inventory_warnings) in
   let tasks =
     tasks |> List.filter (task_in_scope scope)
     |> List.filter (task_matches_run task_keys)
   in
+  Ok (tasks, warnings)
+
+let run ~home ~scope ?run ?project ?group ?(banner = "") ?(sync = true) () =
+  let ( let* ) = Result.bind in
+  let* tasks, warnings = inventory ~home ~scope ?run ?project ?group ~sync () in
+  print_warnings warnings;
   Fmt.pr "%s%s" banner (Project_overview.render_tasks tasks);
   Ok ()

@@ -1,16 +1,20 @@
 (version 1.1.1)
 
 (build
- (run
-  ocaml
-  pkg/pkg.ml
-  build
-  --pkg-name
-  %{pkg-self:name}
-  --dev-pkg
-  %{pkg-self:dev}))
+ (all_platforms
+  ((action
+    (run
+     ocaml
+     pkg/pkg.ml
+     build
+     --pkg-name
+     %{pkg-self:name}
+     --dev-pkg
+     %{pkg-self:dev})))))
 
-(depends ocaml ocamlfind ocamlbuild)
+(depends
+ (all_platforms
+  (ocaml ocamlfind ocamlbuild)))
 
 (source
  (fetch

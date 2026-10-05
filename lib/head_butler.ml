@@ -1,21 +1,14 @@
 type continuation = Picker | Last | Session of string
 
-let codex_options ~monty_command ~home ~codex_yolo =
-  let yolo =
-    if codex_yolo then " --dangerously-bypass-approvals-and-sandbox" else ""
-  in
-  Harness_command.codex_effort_arg ^ Harness_command.codex_vim_arg
-  ^ Mcp_config.codex_args ~monty_command
-  ^ Codex_trust.arguments [ home ] ^ yolo
-
 let command ~monty_command ~home ~harness ~harness_command ~codex_yolo ~name =
   match harness with
   | Harness.Pi ->
       Printf.sprintf "cd %s && exec %s --name %s" (Shell.quote home)
         harness_command (Shell.quote name)
   | Harness.Codex ->
-      Printf.sprintf "cd %s && exec %s%s -C ." (Shell.quote home)
-        harness_command (codex_options ~monty_command ~home ~codex_yolo)
+      Printf.sprintf "cd %s && exec %s terminal --home %s --codex-command %s"
+        (Shell.quote home) (Shell.quote monty_command) (Shell.quote home) (Shell.quote harness_command)
+      ^ (if codex_yolo then " --codex-yolo" else "")
 
 let continuation_command ~monty_command ~home ~harness ~harness_command ~codex_yolo
     continuation =
@@ -30,14 +23,12 @@ let continuation_command ~monty_command ~home ~harness ~harness_command ~codex_y
       Printf.sprintf "cd %s && exec %s%s" (Shell.quote home) harness_command
         selector
   | Harness.Codex ->
-      let selector =
-        match continuation with
-        | Picker -> ""
-        | Last -> " --last"
-        | Session session -> " " ^ Shell.quote session
-      in
-      Printf.sprintf "cd %s && exec %s resume%s -C .%s" (Shell.quote home)
-        harness_command (codex_options ~monty_command ~home ~codex_yolo) selector
+      let selector = match continuation with
+        | Picker -> " --mode picker" | Last -> " --mode last"
+        | Session id -> " --mode exact --session " ^ Shell.quote id in
+      Printf.sprintf "cd %s && exec %s terminal --home %s --codex-command %s%s"
+        (Shell.quote home) (Shell.quote monty_command) (Shell.quote home) (Shell.quote harness_command) selector
+      ^ (if codex_yolo then " --codex-yolo" else "")
 
 let run ~monty_command ~home ~harness ~harness_command command =
   let ( let* ) = Result.bind in

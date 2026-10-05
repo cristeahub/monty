@@ -1,0 +1,34 @@
+(version 2.17)
+
+(build
+ (all_platforms
+  ((action
+    (progn
+     (when %{pkg-self:dev} (run dune subst))
+     (run
+      dune
+      build
+      -p
+      %{pkg-self:name}
+      -j
+      %{jobs}
+      --promote-install-files=false
+      @install)
+     (run
+      dune
+      install
+      -p
+      %{pkg-self:name}
+      --create-install-files
+      %{pkg-self:name}))))))
+
+(depends
+ (all_platforms
+  (dune ocaml base64 conduit cohttp ocplib-endian astring mirage-crypto-rng)))
+
+(source
+ (fetch
+  (url
+   https://github.com/vbmithr/ocaml-websocket/releases/download/2.17/websocket-2.17.tbz)
+  (checksum
+   sha512=a8cd168236acfa1156fac5a007fe6875a35f8fb03eee30a94eb712a2dc981a967bb8fb74fdd7aa7892d148176070333d49311ea9600f5a210e56be8da32197c8)))

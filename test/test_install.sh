@@ -35,7 +35,7 @@ cat > "$fake_bin/dune" <<'EOF'
 set -eu
 case "${1:-}" in
   --version)
-    printf '3.20.0\n'
+    printf '3.24.2\n'
     ;;
   build)
     mkdir -p _build/default/bin

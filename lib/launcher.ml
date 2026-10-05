@@ -427,9 +427,9 @@ let script_has_owner_marker (options : options) (prepared : prepared)
     (* Decode only the fixed preamble, including multiline quoted values, then
        authenticate the entire template using its historical environment.
        Resume replaces it with a fresh script before requesting execution. *)
-    let expected ?(mcp = true) ?(codex_hook = true) ?(job = prepared.job) codex_mode
+    let expected ?(managed = true) ?(mcp = true) ?(codex_hook = true) ?(job = prepared.job) codex_mode
         codex_trusted_paths =
-      Harness_command.launch_script_contents ~mcp ~environment_path ~profile_environment
+      Harness_command.launch_script_contents ~managed ~mcp ~environment_path ~profile_environment
         ~options:(harness_options options)
         ~codex_hook ~codex_mode ~codex_trusted_paths ~job ~id:prepared.id
         ~branch:prepared.branch
@@ -484,7 +484,9 @@ let script_has_owner_marker (options : options) (prepared : prepared)
     let accepted =
       modes
       |> List.concat_map (fun mode ->
-             variants (expected mode trusted_paths)
+             variants (expected ~managed:false mode trusted_paths)
+             @ variants (expected ~managed:false mode [])
+             @ variants (expected mode trusted_paths)
              @ variants (expected mode [])
              @ variants (expected ~mcp:false mode trusted_paths)
              @ variants (expected ~mcp:false mode []))
@@ -517,7 +519,9 @@ let script_has_owner_marker (options : options) (prepared : prepared)
     in
     let sentinel = "monty-codex-session-id-sentinel" in
     let exact_templates =
-      variants (expected (Codex_session.Exact sentinel) trusted_paths)
+      variants (expected ~managed:false (Codex_session.Exact sentinel) trusted_paths)
+      @ variants (expected ~managed:false (Codex_session.Exact sentinel) [])
+      @ variants (expected (Codex_session.Exact sentinel) trusted_paths)
       @ variants (expected (Codex_session.Exact sentinel) [])
       @ variants (expected ~mcp:false (Codex_session.Exact sentinel) trusted_paths)
       @ variants (expected ~mcp:false (Codex_session.Exact sentinel) [])

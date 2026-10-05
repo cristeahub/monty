@@ -21,8 +21,7 @@ let pi_agent_dir () =
   | Some dir when String.trim dir <> "" -> Shell.abs_path dir |> Shell.normalize
   | _ -> Filename.concat (Option.value ~default:"" (Sys.getenv_opt "HOME")) ".pi/agent"
 
-let ensure_pi ~home ~monty_command =
-  let directory = pi_agent_dir () in
+let ensure_pi_at ~directory ~home ~monty_command =
   let path = Filename.concat directory "mcp.json" in
   let read () =
     let* stat = State_store.lstat path in
@@ -74,6 +73,8 @@ let ensure_pi ~home ~monty_command =
               let* fields = read () in
               let* change = merge fields in
               match change with None -> Ok () | Some json -> State_store.write_json_atomic ~path json))
+
+let ensure_pi ~home ~monty_command = ensure_pi_at ~directory:(pi_agent_dir ()) ~home ~monty_command
 
 let pi_setup_command ~home ~monty_command =
   Shell.quote monty_command ^ " mcp setup-pi --home " ^ Shell.quote home

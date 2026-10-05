@@ -1016,29 +1016,14 @@ let test_head_butler_continuation_commands () =
     ^ Shell.quote "design's notes")
     (command Harness.Pi (Head_butler.Session "design's notes"));
   let codex_picker = command Harness.Codex Head_butler.Picker in
-  assert_contains "Codex continuation picker" codex_picker
-    "exec codex --fixed resume";
-  assert_contains "continued Codex xhigh reasoning" codex_picker
-    "model_reasoning_effort=\"xhigh\"";
-  assert_contains "continued Codex Vim mode" codex_picker
-    "tui.vim_mode_default=true";
-  assert_contains "continued Codex command-local trust" codex_picker
-    (String.trim (Codex_trust.argument "/monty home"));
-  assert_contains "continued Codex YOLO" codex_picker
-    "--dangerously-bypass-approvals-and-sandbox";
-  let codex_safe =
-    Head_butler.continuation_command ~monty_command:"/monty/bin/monty" ~home:"/monty home"
-      ~harness:Harness.Codex ~harness_command:"codex --fixed"
-      ~codex_yolo:false Head_butler.Picker
-  in
-  assert_not_contains "continued Codex YOLO defaults off" codex_safe
-    "--dangerously-bypass-approvals-and-sandbox";
-  assert_contains "continued Codex home cwd" codex_picker "-C .";
-  assert_contains "Codex continuation last"
-    (command Harness.Codex Head_butler.Last) "-C . --last";
+  assert_contains "Codex continuation picker" codex_picker "terminal --home '/monty home'";
+  assert_contains "Codex fixed command" codex_picker "--codex-command 'codex --fixed'";
+  assert_contains "Codex managed picker" codex_picker "--mode picker";
+  assert_contains "explicit unsafe request remains visible" codex_picker "--codex-yolo";
+  assert_contains "Codex continuation last" (command Harness.Codex Head_butler.Last) "--mode last";
   assert_contains "Codex continuation exact selector"
     (command Harness.Codex (Head_butler.Session "design's notes"))
-    ("-C . " ^ Shell.quote "design's notes")
+    ("--session " ^ Shell.quote "design's notes")
 
 let test_codex_harness_command () =
   let job =
@@ -1061,29 +1046,11 @@ let test_codex_harness_command () =
       ~codex_trusted_paths:[ "/repo" ] ~options ~home:"/monty"
       ~instructions:(Some "/monty/MONTY.md") ~job ~context:job.context
   in
-  assert_contains "codex executable and fixed args" command
-    "exec codex --model fixed";
-  assert_contains "Codex xhigh reasoning effort" command
-    "model_reasoning_effort=\"xhigh\"";
-  assert_contains "Codex Vim mode default" command "tui.vim_mode_default=true";
-  assert_contains "Codex command-local trust" command
-    (String.trim (Codex_trust.argument "/repo"));
-  assert_contains "Codex command-local SessionStart hook" command
-    "hooks.SessionStart";
-  assert_contains "Codex hook capture command" command
-    "codex-session-capture";
-  assert_contains "Codex hook explicit Monty home" command "/monty";
-  let relative_home_command =
-    Harness_command.build_command ~mcp:true ~codex_hook:true
-      ~codex_mode:Codex_session.Fresh ~codex_trusted_paths:[] ~options
-      ~home:"." ~instructions:(Some "/monty/MONTY.md") ~job
-      ~context:job.context
-  in
-  assert_contains "Codex hook resolves relative Monty home"
-    relative_home_command (Unix.realpath ".");
-  assert_contains "Codex hook feature" command "--enable 'hooks'";
-  assert_contains "Codex scoped hook trust bypass" command
-    "--dangerously-bypass-hook-trust";
+  assert_contains "managed terminal" command "exec 'monty' terminal";
+  assert_contains "explicit worker identity" command " --worker ";
+  assert_contains "codex executable and fixed args" command "--codex-command 'codex --model fixed'";
+  assert_contains "explicit Monty home" command "--home '/monty'";
+  assert_not_contains "no unobserved hook launch" command "hooks.SessionStart";
   assert_contains "codex instruction path" command "/monty/MONTY.md";
   assert_contains "codex context path" command "/monty/context.md";
   assert_contains "codex worker memory" command "/monty/workers/task-1/memory.md";
@@ -1096,7 +1063,7 @@ let test_codex_harness_command () =
       ~codex_trusted_paths:[] ~options ~home:"/monty"
       ~instructions:(Some "/monty/MONTY.md") ~job ~context:job.context
   in
-  assert_contains "Codex worker native picker" picker_command " resume -C .";
+  assert_contains "Codex worker native picker" picker_command " --mode picker";
   assert_not_contains "Codex picker omits original prompt" picker_command
     "Read the files below before acting";
   assert_not_contains "Codex picker never uses last" picker_command "--last";
@@ -1107,7 +1074,7 @@ let test_codex_harness_command () =
       ~instructions:(Some "/monty/MONTY.md") ~job ~context:job.context
   in
   assert_contains "Codex worker exact resume" exact_command
-    (" resume -C . -- " ^ Shell.quote "thread's exact id");
+    (" --session " ^ Shell.quote "thread's exact id");
   assert_not_contains "Codex exact resume omits original prompt" exact_command
     "Read the files below before acting";
   assert_not_contains "Codex exact resume never uses last" exact_command "--last";
@@ -1141,8 +1108,7 @@ let test_codex_harness_command () =
       ~instructions:(Some "/monty/MONTY.md") ~job:multi_job
       ~context:multi_job.context
   in
-  assert_contains "Codex secondary workspace permission" multi_command
-    "--add-dir \"$MONTY_WORKSPACE_2\"";
+  assert_contains "Codex service receives workspace environment" multi_command "terminal";
   let never_script =
     Harness_command.launch_script_contents ~codex_hook:true
       ~codex_mode:Codex_session.Fresh
@@ -1200,20 +1166,10 @@ let test_codex_harness_command () =
       ~home:"/monty" ~instructions:(Some "/monty/MONTY.md") ~job
       ~context:job.context
   in
-  assert_contains "Codex YOLO flag" yolo_command
-    "--dangerously-bypass-approvals-and-sandbox";
-  let head_butler =
-    Head_butler.command ~monty_command:"/monty/bin/monty" ~home:"/monty" ~harness:Harness.Codex
-      ~harness_command:"codex" ~codex_yolo:true ~name:"Monty Head Butler"
-  in
-  assert_contains "head-butler Codex YOLO flag" head_butler
-    "--dangerously-bypass-approvals-and-sandbox";
-  assert_contains "head-butler Codex xhigh reasoning effort" head_butler
-    "model_reasoning_effort=\"xhigh\"";
-  assert_contains "head-butler Codex Vim mode default" head_butler
-    "tui.vim_mode_default=true";
-  assert_contains "head-butler Codex command-local trust" head_butler
-    (String.trim (Codex_trust.argument "/monty"))
+  assert_contains "explicit unsafe request remains visible" yolo_command "--codex-yolo";
+  let head_butler = Head_butler.command ~monty_command:"/monty/bin/monty" ~home:"/monty"
+      ~harness:Harness.Codex ~harness_command:"codex" ~codex_yolo:false ~name:"Monty Head Butler" in
+  assert_contains "head-butler uses service" head_butler "terminal --home '/monty'"
 
 let test_codex_harness_rejects_fork () =
   let options =

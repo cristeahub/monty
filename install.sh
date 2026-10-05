@@ -304,8 +304,8 @@ case "$dune_major:$dune_minor" in
     exit 1
     ;;
 esac
-if [ "$dune_major" -lt 3 ] || { [ "$dune_major" -eq 3 ] && [ "$dune_minor" -lt 20 ]; }; then
-  echo "install.sh: dune 3.20 or newer is required, found $dune_version" >&2
+if [ "$dune_major" -lt 3 ] || { [ "$dune_major" -eq 3 ] && [ "$dune_minor" -lt 24 ]; }; then
+  echo "install.sh: dune 3.24 or newer is required, found $dune_version" >&2
   exit 1
 fi
 

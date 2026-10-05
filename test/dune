@@ -38,3 +38,13 @@
  (alias runtest)
  (deps test_mcp.py ../bin/main.exe)
  (action (run python3 %{dep:test_mcp.py} %{dep:../bin/main.exe})))
+
+(rule
+ (alias runtest)
+ (deps test_client_api.py ../bin/main.exe)
+ (action (run python3 %{dep:test_client_api.py} %{dep:../bin/main.exe})))
+
+(rule
+ (alias runtest)
+ (deps test_pi_api.py fake_pi.py test_client_api.py ../bin/main.exe)
+ (action (run python3 %{dep:test_pi_api.py} %{dep:../bin/main.exe})))
