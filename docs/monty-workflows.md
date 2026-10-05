@@ -667,7 +667,11 @@ a new name can rebind the same scope; renaming does not bypass purge tombstones.
 selects registered Monty conversations. `--prompt` sends initial native TUI input.
 Worker starts/resumes and Codex head-butler start/continue use this entry point;
 Ghostty environment and Monty-managed workspace creation stay in the existing
-launcher. Generated worker commands pass `--worker` to preserve their task link,
+launcher. Before attaching, Monty enables `tui.vim_mode_default` in the selected
+Codex account through its native configuration API and passes the same terminal
+override. This also makes Vim the default for later Codex sessions in that account.
+Codex initially displays `Vim: Insert`; press Escape to enter Normal mode.
+Generated worker commands pass `--worker` to preserve their task link,
 workspace environment and `codex-session-id` sidecar. Task-free/head-butler
 terminals ignore ambient worker identity even when started from a worker shell.
 Native runtime IDs are not written to `job.json`. Headless phase supervision and

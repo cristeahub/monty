@@ -139,6 +139,9 @@ class Handler(socketserver.StreamRequestHandler):
                     result = {'thread': server.threads[native]} if method == 'thread/start' else {'session': native, 'entries': []}
                 elif method == 'thread/name/set':
                     result = {}
+                elif method == 'config/value/write':
+                    assert params == {'keyPath': 'tui.vim_mode_default', 'value': True, 'mergeStrategy': 'replace'}, params
+                    result = {'status': 'ok'}
                 elif method == 'thread/loaded/list':
                     result = {'data': sorted(server.loaded), 'nextCursor': None}
                 elif method in ('thread/read', 'thread/resume', 'history', 'join'):
@@ -478,6 +481,7 @@ def fake_suite(home):
         run=subprocess.run([BIN,'terminal','--home',str(home),'--codex-command',str(codex),'--request-id','terminal-start'],cwd=repo,env=env,capture_output=True,text=True)
         assert run.returncode==0,run.stderr
         args=json.loads((home/'terminal.json').read_text());assert args[:3]==['resume','--remote','unix://'+str(home/'codex.sock')],args
+        assert ('config/value/write', {'keyPath':'tui.vim_mode_default','value':True,'mergeStrategy':'replace'}) in server.calls
         assert args[-1] in server.threads
         task_free=c.req('commands/terminal-start')['result']
         assert task_free['title']=='Monty conversation'
@@ -506,6 +510,7 @@ def fake_suite(home):
         assert len(server.threads)==count
         args=json.loads((home/'terminal.json').read_text())
         assert args[-1]==resumed and '--dangerously-bypass-approvals-and-sandbox' not in args
+        assert args[args.index('-c')+1]=='tui.vim_mode_default=true'
         c.cmd('invalid-yolo',{**request,'codex_yolo':'true'},status='rejected')
         assert len(server.threads)==count
         subprocess.run([BIN,'settings','set','codex-yolo','false','--home',str(home)],env=service.env,check=True,capture_output=True)
@@ -771,6 +776,10 @@ def real_spike(home):
             except OSError:pass
         threading.Thread(target=drain,daemon=True).start()
         assert model.started.wait(15),b''.join(terminal_output).decode(errors='replace')
+
+        assert first.call('config/read',{})['config']['tui']['vim_mode_default'] is True
+        os.write(master,b'\x1b')
+        until(lambda:b''.join(terminal_output),lambda output:b'Vim: Normal' in output)
 
         second=Peer(endpoint);peers.append(second)
         joined=second.call('thread/resume',{'threadId':nid})

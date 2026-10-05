@@ -812,9 +812,10 @@ enable it when the surrounding environment provides the isolation you need.
 Monty also pins `model_reasoning_effort="xhigh"` with a Codex `-c` override for
 every Codex head-butler, launch, and resume command. This takes precedence over
 a lower effort configured in the user's global Codex configuration.
-Monty likewise sets `tui.vim_mode_default=true`, so each Codex composer starts
-in Vim normal mode. Use `/vim` inside Codex to toggle it for the current
-session.
+Monty likewise sets `tui.vim_mode_default=true`; managed terminals also persist
+it in the selected Codex account's configuration for later sessions. Codex
+initially displays `Vim: Insert`; press Escape to enter Normal mode. Use `/vim`
+inside Codex to toggle it for the current session.
 
 Interactive worker launches, retries, and resumes use the invoking shell's
 `CODEX_HOME` and Mantle state (`MANTLE_CONTEXT`, `_MANTLE_SELECTED_HOME`,

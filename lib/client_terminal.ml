@@ -145,6 +145,12 @@ let launch ~home ~profile ~codex_command ~codex_yolo ~mode ~session_id ~prompt ~
     let endpoint=required "endpoint" sess in
     if not(String.starts_with ~prefix:"unix://" endpoint) then fail 500 "only local Unix Codex endpoints are supported";
     let native=s "native_id" sess in
+    (* Remote Codex also reads the account defaults when opening another session.
+       Keep Vim enabled there as well as in this terminal's CLI overrides. *)
+    Codex_rpc.connect (String.sub endpoint 7 (String.length endpoint-7)) >>= fun rpc ->
+    Codex_rpc.call rpc "config/value/write" (obj ["keyPath",string "tui.vim_mode_default";
+      "value",`Bool true;"mergeStrategy",string "replace"]) >>= fun _ ->
+    Lwt_io.close rpc.oc >>= fun () ->
     (if worker then
       get(Codex_session.capture ~home (Yojson.Safe.to_string(obj ["hook_event_name",string "SessionStart";
         "source",string "resume";"session_id",string native]))));
