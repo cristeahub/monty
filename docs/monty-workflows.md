@@ -670,7 +670,10 @@ Ghostty environment and Monty-managed workspace creation stay in the existing
 launcher. Before attaching, Monty enables `tui.vim_mode_default` in the selected
 Codex account through its native configuration API and passes the same terminal
 override. This also makes Vim the default for later Codex sessions in that account.
-Codex initially displays `Vim: Insert`; press Escape to enter Normal mode.
+Managed interactive terminals enter Vim Normal mode automatically. Codex 0.160.0
+forces Insert mode during startup despite that setting, so Monty uses `expect`
+(included with macOS) to send Escape once the native Vim footer appears. It
+preserves later user mode changes, terminal resizing and native exit codes.
 Generated worker commands pass `--worker` to preserve their task link,
 workspace environment and `codex-session-id` sidecar. Task-free/head-butler
 terminals ignore ambient worker identity even when started from a worker shell.

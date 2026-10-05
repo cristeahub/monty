@@ -84,6 +84,8 @@ let command ~home id json =
 let launch ~home ~profile ~codex_command ~codex_yolo ~mode ~session_id ~prompt ~instructions ~context ~request_id ~worker =
   if not (List.mem mode ["fresh";"picker";"last";"exact"]) || (mode="exact" && session_id=None) then
     fail 400 "choose fresh, picker, last, or exact with --session";
+  let expect = if Unix.isatty Unix.stdin && Unix.isatty Unix.stdout then
+      Some (get (Process.command_exists_with_arguments "expect")) else None in
   let home=Unix.realpath home in
   let id=Option.value ~default:(random_id ()) request_id in
   let workspaces =
@@ -160,4 +162,30 @@ let launch ~home ~profile ~codex_command ~codex_yolo ~mode ~session_id ~prompt ~
     | Failure _ as e -> raise e | _ -> fail 503 ("service unavailable; command receipt " ^ id ^ " may need inspection; no standalone fallback") in
   let command=codex_command ^ " resume --remote " ^ Shell.quote endpoint ^ " -C " ^ Shell.quote (Sys.getcwd ())
     ^ " -c " ^ Shell.quote "tui.vim_mode_default=true" ^ " -- " ^ Shell.quote native ^ Option.fold ~none:"" ~some:(fun p -> " " ^ Shell.quote p) prompt in
-  Unix.execv "/bin/sh" [|"/bin/sh";"-c";"exec " ^ command|]
+  match expect with
+  | None -> Unix.execv "/bin/sh" [|"/bin/sh";"-c";"exec " ^ command|]
+  | Some expect ->
+      (* ponytail: match the native Vim footer once; remove this bridge when Codex
+         honors vim_mode_default at startup instead of forcing Insert mode. *)
+      Unix.putenv "MONTY_CODEX_TUI_COMMAND" ("exec " ^ command);
+      Unix.execv expect [|expect;"-N";"-n";"-c";{|
+set command $env(MONTY_CODEX_TUI_COMMAND)
+unset env(MONTY_CODEX_TUI_COMMAND)
+spawn -noecho /bin/sh -c $command
+proc resize {} {
+    global spawn_out
+    stty rows [stty rows < /dev/fd/0] columns [stty columns < /dev/fd/0] < $spawn_out(slave,name)
+}
+resize
+trap resize WINCH
+set initialized 0
+interact -o -nobuffer -re {Vim: (Insert|Normal)} {
+    if {!$initialized} {
+        set initialized 1
+        if {$interact_out(1,string) eq "Insert"} {send -- "\033"}
+    }
+}
+set result [wait]
+if {[lindex $result 2] != 0 || [llength $result] > 4} {exit 1}
+exit [lindex $result 3]
+|}|]

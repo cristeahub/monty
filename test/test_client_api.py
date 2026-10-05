@@ -7,6 +7,7 @@ import http.server
 import json
 import os
 import pty
+import select
 import signal
 import termios
 import fcntl
@@ -511,6 +512,54 @@ def fake_suite(home):
         args=json.loads((home/'terminal.json').read_text())
         assert args[-1]==resumed and '--dangerously-bypass-approvals-and-sandbox' not in args
         assert args[args.index('-c')+1]=='tui.vim_mode_default=true'
+        # Exercise the real PTY bridge with a fake TUI: one startup Escape,
+        # later Insert left alone, resize forwarding, and native exit status.
+        tui_fixture=home/'fake-tui'
+        tui_fixture.write_text(r'''#!/usr/bin/env python3
+import os, select, sys, time, tty
+tty.setraw(0)
+assert 'MONTY_CODEX_TUI_COMMAND' not in os.environ
+assert os.get_terminal_size(0)==(120,40)
+mode=os.environ['FIXTURE_VIM_MODE']
+if mode=='exit':
+    print('startup failed',flush=True)
+    sys.exit(7)
+print('Vim: '+mode,flush=True)
+if mode=='Insert':
+    assert select.select([0],[],[],5)[0]
+    assert os.read(0,1)==b'\x1b'
+print('Vim: Insert ready',flush=True)
+assert select.select([0],[],[],5)[0]
+assert os.read(0,1)==b'i'
+deadline=time.monotonic()+5
+while os.get_terminal_size(0)!=(132,50) and time.monotonic()<deadline:time.sleep(.01)
+assert os.get_terminal_size(0)==(132,50)
+sys.exit(7)
+''')
+        tui_fixture.chmod(0o700)
+        for initial in ['Insert','Normal','exit']:
+            master,slave=pty.openpty();tui=None;output=b''
+            try:
+                fcntl.ioctl(slave,termios.TIOCSWINSZ,struct.pack('HHHH',40,120,0,0))
+                tui=subprocess.Popen([BIN,'continue',resumed,'--home',str(home)],cwd=repo,
+                    env={**launch_env,'MONTY_CODEX_COMMAND':str(tui_fixture),'FIXTURE_VIM_MODE':initial},
+                    stdin=slave,stdout=slave,stderr=slave,start_new_session=True)
+                os.close(slave);slave=None
+                deadline=time.monotonic()+10
+                marker=b'startup failed' if initial=='exit' else b'ready'
+                while marker not in output and time.monotonic()<deadline:
+                    if select.select([master],[],[],.1)[0]:
+                        try:output+=os.read(master,8192)
+                        except OSError:break
+                assert marker in output,output
+                if initial!='exit':
+                    fcntl.ioctl(master,termios.TIOCSWINSZ,struct.pack('HHHH',50,132,0,0))
+                    tui.send_signal(signal.SIGWINCH);os.write(master,b'i')
+                assert tui.wait(timeout=10)==7,output
+            finally:
+                if tui and tui.poll() is None:tui.kill();tui.wait(timeout=5)
+                if slave is not None:os.close(slave)
+                os.close(master)
         c.cmd('invalid-yolo',{**request,'codex_yolo':'true'},status='rejected')
         assert len(server.threads)==count
         subprocess.run([BIN,'settings','set','codex-yolo','false','--home',str(home)],env=service.env,check=True,capture_output=True)
@@ -778,7 +827,7 @@ def real_spike(home):
         assert model.started.wait(15),b''.join(terminal_output).decode(errors='replace')
 
         assert first.call('config/read',{})['config']['tui']['vim_mode_default'] is True
-        os.write(master,b'\x1b')
+        # Startup itself must select Normal mode, without a user keypress.
         until(lambda:b''.join(terminal_output),lambda output:b'Vim: Normal' in output)
 
         second=Peer(endpoint);peers.append(second)
