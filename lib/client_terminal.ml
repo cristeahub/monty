@@ -102,9 +102,20 @@ let launch ~home ~profile ~codex_command ~codex_yolo ~mode ~session_id ~prompt ~
   let context=obj ["workspaces",`List workspaces;"instructions",string instruction_text;"environment",`Assoc environment] in
   let flow () =
     ensure_service ~home () >>= fun health ->
-    let p=match List.find_opt (fun p -> s "id" p=profile) (xs "profiles" health) with Some p->p|None->fail 400 "profile not configured in service" in
     let native_home=Option.value ~default:(Filename.concat (Sys.getenv "HOME") ".codex") (Sys.getenv_opt "CODEX_HOME") |> Unix.realpath in
-    if field "scope" p<>string(sha native_home) then fail 409 "terminal CODEX_HOME does not match service profile";
+    let matches p = field "harness" p=string "codex" && field "scope" p=string(sha native_home) in
+    let profiles=xs "profiles" health in
+    let p=match profile with
+      | Some id -> (match List.find_opt (fun p -> s "id" p=id) profiles with
+          | Some p when matches p -> p
+          | Some _ -> fail 409 "terminal CODEX_HOME does not match service profile"
+          | None -> fail 400 "profile not configured in service")
+      | None -> (match List.filter matches profiles with
+          | [p] -> p
+          | [] -> fail 409 ("No Codex service profile matches CODEX_HOME " ^ native_home ^
+              "; add this account home to the service's profile configuration, then run monty service stop and monty service start")
+          | _ -> fail 409 "Multiple Codex service profiles match CODEX_HOME; select one with --profile or MONTY_API_PROFILE") in
+    let profile=s "id" p in
     (if mode="fresh" then
       command ~home id (obj ["op",string "start";"profile",string profile;"context",context;"codex_yolo",`Bool codex_yolo;
         "title",string (Option.value ~default:"Monty conversation" (if worker then Sys.getenv_opt "MONTY_JOB_TITLE" else None));

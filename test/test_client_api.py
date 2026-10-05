@@ -598,6 +598,71 @@ def recovery_suite(home):
     finally:
         service.close();source.close();dest.close()
 
+def terminal_profiles_suite(home):
+    repo=home/'repo';repo.mkdir();subprocess.run(['git','init','-q',str(repo)],check=True)
+    personal=home/'codex';personal.mkdir()
+    work=home/'work';work.mkdir()
+    servers=[Native(home/'personal.sock'),Native(home/'work.sock')]
+    sockets={str(personal):str(home/'personal.sock'),str(work):str(home/'work.sock')}
+    codex=home/'fake-codex'
+    codex.write_text('#!/usr/bin/env python3\nimport json,os,sys\nfrom pathlib import Path\n'
+      +'if sys.argv[1:4]==["app-server","daemon","start"]:\n'
+      +' print(json.dumps({"socketPath":'+repr(sockets)+'[os.environ["CODEX_HOME"]],"appServerVersion":"0.160.0"}))\n'
+      +'else:Path('+repr(str(home/'terminal.json'))+').write_text(json.dumps(sys.argv[1:]))\n')
+    codex.chmod(0o700)
+    profiles={'profiles':[{'id':name,'harness':'codex','command':str(codex),'codex_home':str(account),'roots':[str(home)]}
+                          for name,account in [('default',personal),('company',work)]]}
+    config=home/'profiles.json';config.write_text(json.dumps(profiles))
+    service=Service(home,config)
+    env={**service.env,'MONTY_CODEX_COMMAND':str(codex)}
+    work_env={**env,'CODEX_HOME':str(work),'MANTLE_CONTEXT':'work',
+              '_MANTLE_SELECTED_HOME':str(work),'_MANTLE_PREV_STATE':'export','_MANTLE_PREV_HOME':str(personal)}
+    def launch(args=(),environment=env):
+        return subprocess.run([BIN,*args,'--home',str(home)],cwd=repo,env=environment,
+                              capture_output=True,text=True,timeout=25)
+    def attached(run,account):
+        assert run.returncode==0,run.stderr
+        args=json.loads((home/'terminal.json').read_text())
+        assert args[:3]==['resume','--remote','unix://'+sockets[str(account)]],args
+        return args[-1]
+    def rejected(args,environment,message):
+        before=[len(server.threads) for server in servers]
+        run=launch(args,environment)
+        assert run.returncode==1 and message in run.stderr,run.stderr
+        assert [len(server.threads) for server in servers]==before
+    terminal=['terminal','--codex-command',str(codex)]
+    try:
+        subprocess.run([BIN,'settings','set','harness','codex','--home',str(home)],env=env,check=True,capture_output=True)
+        personal_id=attached(launch(),personal)
+        work_id=attached(launch(environment=work_env),work)
+        # Different accounts may have identical native thread IDs. Continue
+        # must resolve them within the active account, including after switching off.
+        assert personal_id==work_id
+        attached(launch(['continue',work_id],work_env),work)
+        attached(launch(['continue',personal_id]),personal)
+        assert [len(server.threads) for server in servers]==[1,1]
+        shell_home=home/'shell';shell_home.mkdir();(shell_home/'.codex').symlink_to(personal,target_is_directory=True)
+        unset_env={**env,'HOME':str(shell_home)};unset_env.pop('CODEX_HOME')
+        attached(launch(environment=unset_env),personal)
+        alias=home/'work-alias';alias.symlink_to(work,target_is_directory=True)
+        attached(launch(terminal,{**work_env,'CODEX_HOME':str(alias)}),work)
+        rejected(terminal+['--profile','default'],work_env,'CODEX_HOME does not match')
+        rejected((),{**work_env,'MONTY_API_PROFILE':'default'},'CODEX_HOME does not match')
+        rejected(terminal+['--profile','missing'],work_env,'profile not configured')
+        attached(launch(terminal+['--profile','company'],{**work_env,'MONTY_API_PROFILE':'default'}),work)
+        unknown=home/'unknown';unknown.mkdir()
+        rejected((),{**work_env,'CODEX_HOME':str(unknown)},'No Codex service profile matches CODEX_HOME')
+        assert not (home/'.monty/tasks.local.json').exists()
+        # Ambiguous profiles need explicit selection, never list-order fallback.
+        service.stop();profiles['profiles'].append({**profiles['profiles'][1],'id':'company-alias'})
+        config.write_text(json.dumps(profiles));service.start()
+        rejected((),work_env,'Multiple Codex service profiles match CODEX_HOME')
+        attached(launch(terminal,{**work_env,'MONTY_API_PROFILE':'company'}),work)
+        print('terminal account selection, Mantle switching, overrides and isolation passed')
+    finally:
+        service.close()
+        for server in servers:server.close()
+
 def scope_suite(home):
     repo=home/'repo';repo.mkdir();subprocess.run(['git','init','-q',str(repo)],check=True)
     source=Native(home/'source.sock');other=Native(home/'other.sock')
@@ -746,3 +811,5 @@ if __name__=='__main__':
                 scope_suite(Path(scoped).resolve())
             with tempfile.TemporaryDirectory(prefix='mcab-',dir='/tmp') as startup:
                 autostart_suite(Path(startup).resolve())
+            with tempfile.TemporaryDirectory(prefix='mcap-',dir='/tmp') as profiles:
+                terminal_profiles_suite(Path(profiles).resolve())

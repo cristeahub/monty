@@ -650,8 +650,15 @@ replayed. No Monty-specific Pi extension or second conversation database is used
 
 `monty terminal` starts a task-free thread on the configured service and execs
 native `codex resume --remote unix://EXACT_SOCKET ... EXACT_THREAD`. It never
-falls back to standalone Codex. `MONTY_API_PROFILE` (or `--profile`) selects the
-configured profile; its scope must match the terminal's canonical `CODEX_HOME`.
+falls back to standalone Codex. By default it selects the configured Codex
+profile matching the terminal's canonical `CODEX_HOME` (or `~/.codex` when unset),
+so Mantle switches select the corresponding account without another environment
+variable. Add each account home to the trusted service configuration once, with
+its own profile ID and allowed roots, then restart the service. For example,
+Mantle work normally uses `~/.local/share/mantle/profiles/work/codex`.
+`--profile` overrides `MONTY_API_PROFILE`; either explicitly selects a configured
+profile whose account scope must still match `CODEX_HOME`. Missing or ambiguous
+matches fail before creating a thread; Monty never falls back to another account.
 Sessions pin that account scope independently of the profile name. Reconfiguring
 a profile to another account blocks native observation/control of its older
 sessions while their owned history remains readable. Explicit attachment under

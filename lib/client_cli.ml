@@ -23,7 +23,8 @@ let command ~home_arg =
 let terminal ~home_arg =
   let open Cmdliner in
   let opt name doc = Arg.(value & opt (some string) None & info [name] ~doc) in
-  let profile=Arg.(value & opt string (Option.value ~default:"default" (Sys.getenv_opt "MONTY_API_PROFILE")) & info ["profile"]) in
+  let profile=Arg.(value & opt (some string) (Sys.getenv_opt "MONTY_API_PROFILE") & info ["profile"]
+    ~doc:"Configured service profile. Defaults to the Codex profile matching the active CODEX_HOME.") in
   let codex=Arg.(value & opt string "codex" & info ["codex-command"]) in
   let yolo=Arg.(value & flag & info ["codex-yolo"] ~doc:"Run Codex without approvals or sandboxing. This is dangerous.") in
   let worker=Arg.(value & flag & info ["worker"] ~doc:"Use the explicit Monty worker environment, task link, workspaces and session sidecar.") in

@@ -823,6 +823,9 @@ startup has a different profile. Unset and empty values stay distinct, so
 `mantle off` and a custom `CODEX_HOME` also carry through. Each request captures
 the current environment; it does not pin an account to the task. Start/continue
 and host headless Codex inherit the invoking environment directly.
+Managed terminals select the configured service profile matching that Codex home.
+Register each Mantle account home in the service configuration once; an explicit
+`MONTY_API_PROFILE` or `monty terminal --profile` must match the same account.
 
 Harness selection uses this precedence:
 
