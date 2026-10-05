@@ -36,10 +36,13 @@ The lock is generated with Dune 3.24.2 and uses its upstream relocatable OCaml
 5.2.2 compiler packages. Normal builds use this committed lock; no opam files
 or global service installation are required.
 
-Interactive Codex launches now require a running Monty client service in the
+Interactive Codex launches use a Monty client service in the
 same Monty home and an explicitly configured account profile. See the
 [service workflow](docs/monty-workflows.md#client-service) before rolling out
-this binary. The same service supports Pi 1.0.2 RPC control and read-only
+this binary. After that one-time setup, plain `monty` starts the service in the
+background when needed and reuses it on later launches; no separate service
+terminal is needed. Use `monty service start` and `monty service stop` to manage
+it explicitly. The same service supports Pi 1.0.2 RPC control and read-only
 mirroring of explicitly selected native Pi session logs. See
 [Pi history and RPC](docs/monty-workflows.md#pi-history-and-rpc) for configuration
 and the native-terminal ownership boundary. Existing native Pi launches and
@@ -798,9 +801,12 @@ Monty also trusts the exact head-butler directory or worker worktree with a
 command-local `-c` override. This only suppresses Codex's initial
 directory-trust question; it does not enable YOLO mode or change `config.toml`.
 
-When enabled, Monty adds
-`--dangerously-bypass-approvals-and-sandbox` to Codex head-butler and worker
-commands. This disables both approval prompts and the Codex sandbox, so only
+When enabled, Monty creates managed Codex threads with `never` approvals and
+`danger-full-access`. The native terminal attaches using that thread's policy;
+remote resumes cannot accept CLI permission overrides. Rejoining a running thread preserves its
+native policy. Unrelated API starts keep the safe defaults unless their request
+explicitly sets `codex_yolo: true`. Headless Codex still uses its native bypass
+flag. YOLO disables both approval prompts and the Codex sandbox, so only
 enable it when the surrounding environment provides the isolation you need.
 
 Monty also pins `model_reasoning_effort="xhigh"` with a Codex `-c` override for

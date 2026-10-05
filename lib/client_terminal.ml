@@ -3,7 +3,7 @@ open Context_store
 open Conversation_store
 let request ~home meth path body =
   let metadata_path=file home ["client-service.json"] in
-  if not(Sys.file_exists metadata_path) then fail 503 "Monty client service is not running; start monty service serve with an explicit profile configuration";
+  if not(Sys.file_exists metadata_path) then fail 503 "Monty client service is not running; run monty service start --config FILE";
   let state=read metadata_path in
   let base=s "url" state in
   let uri=Uri.of_string base in
@@ -17,6 +17,63 @@ let request ~home meth path body =
     let json=Yojson.Safe.from_string text in
     let code=Cohttp.Code.code_of_status (Cohttp.Response.status response) in
     if code>=400 then fail code (Yojson.Safe.to_string json);json)
+let health ~home = Lwt.catch (fun () ->
+    Lwt_unix.with_timeout 1. (fun () -> request ~home `GET "/v1/health" `Null) >|= Option.some)
+    (function
+      | Failure(503,_) | Lwt_unix.Timeout
+      | Unix.Unix_error((Unix.ECONNREFUSED|Unix.ECONNRESET|Unix.ETIMEDOUT),_,_) -> Lwt.return_none
+      | error -> Lwt.fail error)
+let ensure_service ?config_path ?port ~home () =
+  let config_path=Option.map Unix.realpath config_path in
+  let metadata=file home ["client-service.json"] in
+  let saved () = if Sys.file_exists metadata then read metadata else `Null in
+  let ready result =
+    let state=saved () in
+    if Option.fold ~none:false ~some:(fun path -> path<>s "config_path" state) config_path ||
+       Option.fold ~none:false ~some:(fun port -> port<>i "port" state) port then
+      fail 409 "service is running with different startup settings; run monty service stop first";
+    Lwt.return result in
+  health ~home >>= function
+  | Some result -> ready result
+  | None ->
+      let state=saved () in
+      let path=match config_path,field "config_path" state with
+        | Some path,_ | None,`String path when path<>"" -> path
+        | _ -> fail 503 "Monty client service is not running and no startup configuration is saved; run monty service start --config FILE" in
+      let port=match port,field "port" state with Some port,_->port|None,`Null->0|None,_->i "port" state in
+      Client_service.start_background ~home ~config_path:path ~port;
+      let deadline=Unix.gettimeofday ()+.15. in
+      let rec wait () = health ~home >>= function
+        | Some result -> ready result
+        | None when Unix.gettimeofday ()<deadline -> Lwt_unix.sleep 0.1 >>= wait
+        | None -> fail 503 ("Monty client service did not become ready; inspect " ^ file home ["client-service.log"]) in
+      wait ()
+let service_running ~home =
+  let path=file home ["client-service.lock"] in
+  if not(Sys.file_exists path) then false else
+  let fd=get(State_store.open_lock_file path) in
+  Fun.protect ~finally:(fun () -> Unix.close fd) (fun () ->
+    try Unix.lockf fd Unix.F_TLOCK 0;false with
+    | Unix.Unix_error((Unix.EAGAIN|Unix.EACCES),_,_) -> true)
+let stop_service ~home =
+  if not(service_running ~home) then Lwt.return_false else
+  let epoch=field "epoch" (read (file home ["client-service.json"])) in
+  let stopped () = not(service_running ~home) || field "epoch" (read (file home ["client-service.json"]))<>epoch in
+  let deadline=Unix.gettimeofday ()+.15. in
+  let rec wait () =
+    if stopped () then Lwt.return_true else
+    if Unix.gettimeofday ()>=deadline then fail 503 "Monty service did not stop; inspect .monty/client-service.log" else
+    Lwt_unix.sleep 0.1 >>= wait in
+  health ~home >>= function
+  | None -> wait ()
+  | Some state when field "epoch" state<>epoch -> Lwt.return_true
+  | Some state ->
+      Lwt.catch (fun () -> Lwt_unix.with_timeout 1. (fun () ->
+        request ~home `POST "/v1/shutdown" (obj ["epoch",field "epoch" state])) >|= fun _ -> ())
+        (fun error -> if stopped () then Lwt.return_unit else
+          match error with
+          | Failure _ -> Lwt.fail error
+          | _ -> health ~home >>= function None -> Lwt.return_unit | Some _ -> Lwt.fail error) >>= wait
 let command ~home id json =
   request ~home `POST ("/v1/commands/" ^ component id) json >>= fun _ ->
   let rec poll () = request ~home `GET ("/v1/commands/" ^ id) `Null >>= fun receipt ->
@@ -24,7 +81,7 @@ let command ~home id json =
     | "finished" -> Lwt.return (field "result" receipt)
     | "accepted"|"running" -> Lwt_unix.sleep 0.2 >>= poll
     | _ -> Lwt.fail (Failure (409,"command " ^ id ^ ": " ^ Yojson.Safe.to_string receipt)) in poll ()
-let launch ~home ~profile ~codex_command ~mode ~session_id ~prompt ~instructions ~context ~request_id ~worker =
+let launch ~home ~profile ~codex_command ~codex_yolo ~mode ~session_id ~prompt ~instructions ~context ~request_id ~worker =
   if not (List.mem mode ["fresh";"picker";"last";"exact"]) || (mode="exact" && session_id=None) then
     fail 400 "choose fresh, picker, last, or exact with --session";
   let home=Unix.realpath home in
@@ -44,12 +101,12 @@ let launch ~home ~profile ~codex_command ~mode ~session_id ~prompt ~instructions
       then Some(key,string(String.sub binding (pos+1) (String.length binding-pos-1))) else None) in
   let context=obj ["workspaces",`List workspaces;"instructions",string instruction_text;"environment",`Assoc environment] in
   let flow () =
-    request ~home `GET "/v1/health" `Null >>= fun health ->
+    ensure_service ~home () >>= fun health ->
     let p=match List.find_opt (fun p -> s "id" p=profile) (xs "profiles" health) with Some p->p|None->fail 400 "profile not configured in service" in
     let native_home=Option.value ~default:(Filename.concat (Sys.getenv "HOME") ".codex") (Sys.getenv_opt "CODEX_HOME") |> Unix.realpath in
     if field "scope" p<>string(sha native_home) then fail 409 "terminal CODEX_HOME does not match service profile";
     (if mode="fresh" then
-      command ~home id (obj ["op",string "start";"profile",string profile;"context",context;
+      command ~home id (obj ["op",string "start";"profile",string profile;"context",context;"codex_yolo",`Bool codex_yolo;
         "title",string (Option.value ~default:"Monty conversation" (if worker then Sys.getenv_opt "MONTY_JOB_TITLE" else None));
         "task_keys",`List (match (if worker then Sys.getenv_opt "MONTY_TASK_KEY" else None) with Some k when k<>""->[string k]|_->[])])
     else request ~home `GET "/v1/conversations" `Null >>= fun catalog ->

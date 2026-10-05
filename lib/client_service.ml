@@ -193,12 +193,15 @@ let validate_context t pid request =
   obj ["workspaces",`List (List.map string workspaces);"instructions",string instructions;
     "environment",`Assoc env;"objective",field "objective" context]
 let start_params t context request =
+  let codex_yolo=match field "codex_yolo" request with
+    | `Null -> false | `Bool value -> value | _ -> fail 400 "codex_yolo must be a boolean" in
   let dirs=xs "workspaces" context in
   let config = obj ["model_reasoning_effort",string "xhigh";"shell_environment_policy.set",field "environment" context;
     "sandbox_workspace_write.writable_roots",`List dirs;
     "mcp_servers.monty",obj ["command",string (Unix.realpath Sys.executable_name);
       "args",`List [string "mcp";string "serve";string "--home";string t.home];"env",field "environment" context]] in
-  obj (["cwd",List.hd dirs;"approvalPolicy",string "on-request";"sandbox",string "workspace-write";
+  obj (["cwd",List.hd dirs;"approvalPolicy",string (if codex_yolo then "never" else "on-request");
+    "sandbox",string (if codex_yolo then "danger-full-access" else "workspace-write");
     "developerInstructions",field "instructions" context;"config",config]
     @ (List.filter_map (fun k -> if field k request=`Null then None else Some(k,field k request)) ["model";"modelProvider"]))
 let register t request ~mode =
@@ -478,7 +481,7 @@ let stream t last =
   Cohttp_lwt_unix.Server.respond ~status:`OK ~headers:(Cohttp.Header.of_list
     ["content-type","text/event-stream";"cache-control","no-store";"connection","close"])
     ~body ()
-let callback t ~token ~port _conn req body =
+let callback t ~token ~port ~shutdown conn req body =
   Lwt.catch (fun () ->
     let headers=Cohttp.Request.headers req in
     let host=Printf.sprintf "127.0.0.1:%d" port in
@@ -490,6 +493,12 @@ let callback t ~token ~port _conn req body =
     let parts=Uri.path uri |> String.split_on_char '/' |> List.filter ((<>) "") in
     match Cohttp.Request.meth req,parts with
     | `GET,["v1";"health"] -> response (capabilities t)
+    | `POST,["v1";"shutdown"] ->
+        if Cohttp.Header.get headers "content-type"<>Some "application/json" then fail 415 "application/json required";
+        bounded_body body >>= fun request ->
+        if required "epoch" request<>t.epoch then fail 409 "service epoch changed; retry stop";
+        shutdown conn;
+        response ~status:`Accepted (obj ["epoch",string t.epoch])
     | `GET,["v1";"inventory"] -> response (inventory t uri)
     | `GET,["v1";"conversations"] -> response (`List (list t.home))
     | `GET,["v1";"conversations";id] -> response (load t.home id)
@@ -546,8 +555,11 @@ let validate_config json =
     put "scope" (string (sha (s (match harness with "codex"->"codex_home"|"pi"->"pi_home"|_->"socket") p))) p) profiles in
   put "profiles" (`List profiles) json
 let serve ~home ~config_path ~port =
+  if port<0 || port>65535 then fail 400 "port must be between 0 and 65535";
   let home=Unix.realpath home in
-  let config=read (Unix.realpath config_path) |> validate_config in
+  let config_path=Unix.realpath config_path in
+  let config=read config_path |> validate_config in
+  let configured_port=port in
   let state_dir=get (State_store.ensure_state_dir ~home) in
   let lock=get (State_store.open_lock_file (Filename.concat state_dir "client-service.lock")) in
   (try Unix.lockf lock Unix.F_TLOCK 0 with _ -> Unix.close lock;fail 409 "a client service is already running for this Monty home");
@@ -577,7 +589,8 @@ let serve ~home ~config_path ~port =
       Lwt_unix.listen socket 32;
       let port=match Lwt_unix.getsockname socket with Unix.ADDR_INET(_,p)->p|_->assert false in
       locked home (fun () -> write (file home ["client-service.json"])
-        (obj ["url",string (Printf.sprintf "http://127.0.0.1:%d" port);"pid",`Int (Unix.getpid ());"epoch",string t.epoch]));
+        (obj ["url",string (Printf.sprintf "http://127.0.0.1:%d" port);"pid",`Int (Unix.getpid ());"epoch",string t.epoch;
+          "config_path",string config_path;"port",`Int configured_port]));
       Printf.printf "Monty client API http://127.0.0.1:%d (token: %s)\n%!" port (file home ["client-service-token"]);
       let observed=Hashtbl.create 32 in
       let previous_inventory=ref "" in
@@ -597,10 +610,42 @@ let serve ~home ~config_path ~port =
         Lwt_unix.sleep 1. >>= poll in
       Lwt.async poll;
       let stop,wake=Lwt.wait () in
-      let signals=List.map (fun signal -> Lwt_unix.on_signal signal (fun _ ->
-        if Lwt.is_sleeping stop then Lwt.wakeup_later wake ())) [Sys.sigint;Sys.sigterm] in
+      let shutdown () = if Lwt.is_sleeping stop then Lwt.wakeup_later wake () in
+      let shutdown_connection=ref None in
+      let signals=List.map (fun signal -> Lwt_unix.on_signal signal (fun _ -> shutdown ())) [Sys.sigint;Sys.sigterm] in
       Lwt.finalize (fun () -> Cohttp_lwt_unix.Server.create ~stop ~timeout:30 ~mode:(`TCP (`Socket socket))
-        (Cohttp_lwt_unix.Server.make ~callback:(callback t ~token ~port) ()))
+        (Cohttp_lwt_unix.Server.make
+          ~callback:(callback t ~token ~port ~shutdown:(fun (_,id) -> shutdown_connection:=Some id))
+          ~conn_closed:(fun (_,id) -> if !shutdown_connection=Some id then shutdown ()) ()))
         (fun () -> List.iter Lwt_unix.disable_signal_handler signals;
           Hashtbl.to_seq_values t.pi_clients |> List.of_seq |> Lwt_list.iter_p Pi_rpc.close) in
     Lwt_main.run (run ()))
+
+let start_background ~home ~config_path ~port =
+  if port<0 || port>65535 then fail 400 "port must be between 0 and 65535";
+  let config_path=Unix.realpath config_path in
+  ignore(read config_path |> validate_config);
+  ignore(get(State_store.ensure_state_dir ~home));
+  let executable=Unix.realpath Sys.executable_name in
+  let log=get(State_store.open_verified_lock (file home ["client-service.log"])
+    [Unix.O_WRONLY;Unix.O_CREAT;Unix.O_APPEND]) in
+  Fun.protect ~finally:(fun () -> Unix.close log) (fun () ->
+    Unix.fchmod log 0o600;
+    match Unix.fork () with
+    | 0 -> (try
+        ignore(Unix.setsid ());
+        if Unix.fork ()<>0 then Unix._exit 0;
+        Unix.chdir home;
+        let input=Unix.openfile "/dev/null" [Unix.O_RDONLY] 0 in
+        Unix.dup2 input Unix.stdin; Unix.close input;
+        Unix.dup2 log Unix.stdout; Unix.dup2 log Unix.stderr; Unix.close log;
+        Unix.execve executable [|executable;"service";"serve";"--home";home;
+          "--config";config_path;"--port";string_of_int port|]
+          (native_environment ["MONTY_HOME=" ^ home])
+      with _ -> Unix._exit 127)
+    | pid ->
+        let rec wait () = try snd(Unix.waitpid [] pid) with
+          Unix.Unix_error(Unix.EINTR,_,_) -> wait () in
+        match wait () with
+        | Unix.WEXITED 0 -> ()
+        | _ -> fail 503 "Could not start Monty client service; inspect .monty/client-service.log")

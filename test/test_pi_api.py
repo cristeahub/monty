@@ -36,7 +36,9 @@ def suite(home):
       {'id':'second','harness':'pi','command':str(fake_pi),'pi_home':str(second),'roots':[str(repo)]},
       {'id':'codex','harness':'codex','command':str(codex),'codex_home':str(codex_home),'roots':[str(repo)]}]}))
     service=Service(home,config,{'MONTY_UNRELATED_WORKER':'must-not-inherit'});c=service.client
-    context={'workspaces':[str(repo)],'instructions':'Trusted Monty instructions','environment':{'MONTY_JOB_TITLE':'explicit'}}
+    stop_gate=home/'stop-gate'
+    context={'workspaces':[str(repo)],'instructions':'Trusted Monty instructions','environment':{
+        'MONTY_JOB_TITLE':'explicit','MONTY_FIXTURE_STOP_GATE':str(stop_gate)}}
     try:
         assert 'pi' in c.req('health')['real_adapters']
         path=pi/'sessions/native.jsonl'
@@ -146,7 +148,24 @@ def suite(home):
         assert not any(x.get('command',{}).get('type')=='bash' for x in second_calls)
         # Restart closes service-owned children; history stays available without respawn.
         counts=len([x for x in calls() if 'start' in x])
-        service.stop();service.start();c=service.client
+        # Concurrent stop also waits while the listener is closed and Pi cleanup
+        # still owns the service lock.
+        stop_gate.touch()
+        def stop():
+            return subprocess.run([BIN,'service','stop','--home',str(home)],env=service.env,
+                                  capture_output=True,text=True,timeout=25)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            first=pool.submit(stop)
+            try:
+                until(lambda:any('stopping' in call for call in calls()))
+                second_stop=pool.submit(stop)
+                time.sleep(1.5)
+                assert not second_stop.done(),second_stop.result().stderr
+            finally:stop_gate.unlink()
+            for result in [first.result(),second_stop.result()]:
+                assert result.returncode==0,result.stderr
+        service.process.wait(timeout=5)
+        service.start();c=service.client
         assert len([x for x in calls() if 'start' in x])==counts
         assert entries(c,cid)
         c.cmd('missing-runtime',{'op':'send','conversation':cid,'revision':c.revision(cid),'text':'no'},status='rejected')
@@ -166,7 +185,7 @@ def suite(home):
         service.stop();service.env['MONTY_FAULT_INJECT']='conversation-after-batch';service.start();c=service.client
         crash_request=dict(request,session_file=str(crash_path))
         c.cmd('pi-batch-fault',crash_request,status='outcome_unknown')
-        imported=next(chat for chat in c.req('conversations') if chat['sessions'][0]['native_id']=='crash-file')
+        imported=next(chat for chat in c.req('conversations') if any(s['native_id']=='crash-file' for s in chat['sessions']))
         assert imported['sessions'][0]['checkpoint']==0
         orphans=list((home/'.monty/conversations'/imported['id']/'sessions').glob('*/batches/*.json'))
         assert orphans

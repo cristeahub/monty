@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import sys
+import time
 
 if '--version' in sys.argv:
     print('1.0.2')
@@ -107,4 +108,8 @@ for line in sys.stdin:
         respond(command,model)
     else:
         emit({'id':command['id'],'type':'response','command':kind,'success':False,'error':'unsupported fixture command'})
+gate=os.environ.get('MONTY_FIXTURE_STOP_GATE')
+if gate:
+    log({'stopping':header['id']})
+    while Path(gate).exists():time.sleep(.05)
 log({'stopped':header['id'],'pid':os.getpid()})

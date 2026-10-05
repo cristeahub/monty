@@ -223,6 +223,123 @@ def http_error(code, fn):
     except urllib.error.HTTPError as e:assert e.code == code, (e.code,e.read())
     else:raise AssertionError('expected HTTP '+str(code))
 
+def autostart_suite(home):
+    repo=home/'repo';repo.mkdir();subprocess.run(['git','init','-q',str(repo)],check=True)
+    native=home/'codex';native.mkdir()
+    server=Native(home/'codex.sock')
+    codex=home/'fake-codex'
+    codex.write_text('#!/usr/bin/env python3\nimport json,sys\n'
+      + 'if sys.argv[1:4]==["app-server","daemon","start"]:print(json.dumps('+repr({'socketPath':str(home/'codex.sock'),'appServerVersion':'0.160.0'})+'))\n'
+      + 'else:\n assert sys.argv[1:3]==["resume","--remote"]\n assert "--dangerously-bypass-approvals-and-sandbox" not in sys.argv\n')
+    codex.chmod(0o700)
+    config=home/'profiles.json';config.write_text(json.dumps({'profiles':[
+        {'id':'default','harness':'codex','command':str(codex),'codex_home':str(native),'roots':[str(home)]}]}))
+    service=Service(home,config)
+    metadata=home/'.monty/client-service.json'
+    log=home/'.monty/client-service.log'
+    def unlocked():
+        with (home/'.monty/client-service.lock').open('r+') as lock:
+            try:fcntl.lockf(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+            except BlockingIOError:return False
+            return True
+    def stop_background():
+        def stopped():
+            if unlocked():return True
+            try:os.kill(json.loads(metadata.read_text())['pid'],signal.SIGTERM)
+            except ProcessLookupError:pass
+            return False
+        until(stopped)
+    def launch():
+        return subprocess.run([BIN],cwd=repo,env={**service.env,'MONTY_CODEX_COMMAND':str(codex)},
+                              capture_output=True,text=True,timeout=25)
+    def lifecycle(*args, target=home):
+        return subprocess.run([BIN,'service',*args,'--home',str(target)],cwd=repo,env=service.env,
+                              capture_output=True,text=True,timeout=25)
+    fresh=home/'fresh';fresh.mkdir()
+    try:
+        # Explicit commands also work before any foreground service was configured.
+        run=lifecycle('stop',target=fresh)
+        assert run.returncode==0 and 'already stopped' in run.stdout,run.stderr
+        assert not (fresh/'.monty').exists()
+        run=lifecycle('start',target=fresh)
+        assert run.returncode==1 and 'service start --config FILE' in run.stderr,run.stderr
+        for port in ['-1','65536']:
+            run=lifecycle('start','--config',str(config),'--port='+port,target=fresh)
+            assert run.returncode==1 and 'port must be' in run.stderr,run.stderr
+        run=lifecycle('start','--config',str(config),target=fresh)
+        assert run.returncode==0,run.stderr
+        assert Client(fresh).req('health')['profiles'][0]['id']=='default'
+        assert not server.threads and not (fresh/'.monty/tasks.local.json').exists()
+        client=Client(fresh);epoch=client.req('health')['epoch']
+        assert client.req('shutdown',{'epoch':epoch})=={'epoch':epoch}
+        run=lifecycle('stop',target=fresh);assert run.returncode==0,run.stderr
+        for key,value in [('harness','codex'),('codex-yolo','true')]:
+            subprocess.run([BIN,'settings','set',key,value,'--home',str(home)],env=service.env,check=True,capture_output=True)
+        configured=json.loads(metadata.read_text())
+        assert configured['config_path']==str(config) and configured['port']==0
+        run=lifecycle('stop');assert run.returncode==0,run.stderr
+        service.process.wait(timeout=5)
+        # Dead service metadata is expected after shutdown. Concurrent plain
+        # launches must reach one detached service and one thread per caller.
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+            runs=list(pool.map(lambda _:launch(),range(4)))
+        assert all(run.returncode==0 for run in runs),[run.stderr for run in runs]
+        started=json.loads(metadata.read_text())
+        assert started['epoch']!=configured['epoch']
+        assert len(server.threads)==4 and log.read_text().count('Monty client API ')==1
+        assert all(p['approvalPolicy']=='never' and p['sandbox']=='danger-full-access'
+                   for method,p in server.calls if method=='thread/start')
+        assert log.stat().st_mode&0o777==0o600
+        assert not (home/'.monty/tasks.local.json').exists()
+        run=launch();assert run.returncode==0,run.stderr
+        assert json.loads(metadata.read_text())==started
+        count=len(server.threads)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+            runs=list(pool.map(lambda _:lifecycle('start'),range(4)))
+        assert all(run.returncode==0 for run in runs),[run.stderr for run in runs]
+        assert len(server.threads)==count and json.loads(metadata.read_text())==started
+        alternate=home/'alternate.json';alternate.write_text(config.read_text())
+        for args in [('start','--config',str(alternate)),('start','--port','8765')]:
+            run=lifecycle(*args)
+            assert run.returncode==1 and 'service stop first' in run.stderr,run.stderr
+        client=Client(home)
+        http_error(409,lambda:client.req('shutdown',{'epoch':configured['epoch']}))
+        assert client.req('health')['epoch']==started['epoch']
+        # Authentication failure must not replace a live service or dispatch a thread.
+        token=home/'.monty/client-service-token';original=token.read_text()
+        try:
+            token.write_text('invalid-token')
+            count=len(server.threads)
+            run=launch();assert run.returncode==1 and 'bearer authentication required' in run.stderr,run.stderr
+            for operation in ['start','stop']:
+                run=lifecycle(operation)
+                assert run.returncode==1 and 'bearer authentication required' in run.stderr,run.stderr
+            assert len(server.threads)==count and json.loads(metadata.read_text())==started
+        finally:token.write_text(original)
+        # A stale/reused PID must never be signalled; stop targets the authenticated epoch.
+        metadata.write_text(json.dumps({**started,'pid':os.getpid()}))
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+                runs=list(pool.map(lambda _:lifecycle('stop'),range(4)))
+            assert all(run.returncode==0 for run in runs),[run.stderr for run in runs]
+        finally:metadata.write_text(json.dumps(started))
+        assert unlocked() and len(server.threads)==count
+        run=lifecycle('stop');assert run.returncode==0 and 'already stopped' in run.stdout,run.stderr
+        # Invalid saved configuration fails before starting another process.
+        original=config.read_text();config.write_text('{"profiles":[]}')
+        try:
+            before=log.read_text()
+            run=launch();assert run.returncode==1 and 'configure one to 32 profiles' in run.stderr,run.stderr
+            assert unlocked() and log.read_text()==before
+        finally:config.write_text(original)
+        run=launch();assert run.returncode==0,run.stderr
+        assert json.loads(metadata.read_text())['epoch']!=started['epoch']
+        assert log.read_text().count('Monty client API ')==2
+        print('client service start/stop, automatic startup, reuse, concurrency and recovery passed')
+    finally:
+        lifecycle('stop',target=fresh)
+        service.close();stop_background();server.close()
+
 def fake_suite(home):
     repo=home/'repo';repo.mkdir();subprocess.run(['git','init','-q',str(repo)],check=True)
     native_home=home/'codex';native_home.mkdir()
@@ -233,7 +350,7 @@ def fake_suite(home):
       + 'else:Path('+repr(str(home/'terminal.json'))+').write_text(json.dumps(sys.argv[1:]))\n')
     codex.chmod(0o700)
     config=home/'profiles.json';config.write_text(json.dumps({'allow_fixture':True,'profiles':[
-        {'id':'default','harness':'codex','command':str(codex),'codex_home':str(native_home),'roots':[str(repo)]},
+        {'id':'default','harness':'codex','command':str(codex),'codex_home':str(native_home),'roots':[str(repo),str(home)]},
         {'id':'second','harness':'fixture','socket':str(home/'second.sock'),'roots':[str(repo)]}]}))
     service=Service(home,config);c=service.client
     try:
@@ -248,7 +365,9 @@ def fake_suite(home):
         cid=receipts[0]['id'];native=receipts[0]['sessions'][0]['native_id']
         assert len({r['id'] for r in receipts})==1 and len(server.threads)==1
         http_error(409,lambda:c.req('commands/start-once',{**request,'title':'different'}))
-        assert next(params for method,params in server.calls if method=='thread/start')['config']['shell_environment_policy.set']['MONTY_JOB_TITLE']=='isolated'
+        params=next(params for method,params in server.calls if method=='thread/start')
+        assert params['config']['shell_environment_policy.set']['MONTY_JOB_TITLE']=='isolated'
+        assert (params['approvalPolicy'],params['sandbox'])==('on-request','workspace-write')
         assert c.history(cid)['sessions'][0]['records']
         send={'op':'send','conversation':cid,'revision':c.revision(cid),'text':'one turn'}
         with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
@@ -365,6 +484,31 @@ def fake_suite(home):
         assert task_free['task_keys']==[] and task_free['sessions'][0]['context']['workspaces']==[str(repo)]
         assert task_free['sessions'][0]['context']['environment']=={}
         assert sidecar.read_text()=='existing-worker-thread\n'
+        assert '--dangerously-bypass-approvals-and-sandbox' not in args
+        # Regression: plain monty forwards the existing setting into the service
+        # and still connects its native terminal to the exact registered thread.
+        for key,value in [('harness','codex'),('codex-yolo','true')]:
+            subprocess.run([BIN,'settings','set',key,value,'--home',str(home)],env=service.env,check=True,capture_output=True)
+        launch_env={**service.env,'MONTY_CODEX_COMMAND':str(codex)}
+        for command,extra,yolo in [([],{},True),(['start'],{'MONTY_CODEX_YOLO':'false'},False),
+                                  (['start','--codex-yolo'],{'MONTY_CODEX_YOLO':'false'},True),
+                                  (['terminal','--codex-command',str(codex)],{},True)]:
+            run=subprocess.run([BIN,*command,'--home',str(home)],cwd=repo,env={**launch_env,**extra},capture_output=True,text=True)
+            assert run.returncode==0,run.stderr
+            params=next(p for method,p in reversed(server.calls) if method=='thread/start')
+            assert (params['approvalPolicy'],params['sandbox'])==(('never','danger-full-access') if yolo else ('on-request','workspace-write'))
+            args=json.loads((home/'terminal.json').read_text())
+            assert args[:3]==['resume','--remote','unix://'+str(home/'codex.sock')],args
+            assert '--dangerously-bypass-approvals-and-sandbox' not in args,args
+        resumed=args[-1];count=len(server.threads)
+        run=subprocess.run([BIN,'continue',resumed,'--home',str(home)],env=launch_env,capture_output=True,text=True)
+        assert run.returncode==0,run.stderr
+        assert len(server.threads)==count
+        args=json.loads((home/'terminal.json').read_text())
+        assert args[-1]==resumed and '--dangerously-bypass-approvals-and-sandbox' not in args
+        c.cmd('invalid-yolo',{**request,'codex_yolo':'true'},status='rejected')
+        assert len(server.threads)==count
+        subprocess.run([BIN,'settings','set','codex-yolo','false','--home',str(home)],env=service.env,check=True,capture_output=True)
         # Source failure is visible while previously owned history stays readable.
         second.close();until(lambda:c.req('conversations/'+cid)['sessions'][1]['coverage']['state'],lambda x:x=='unavailable')
         assert c.history(cid)['sessions'][0]['records']
@@ -541,14 +685,16 @@ def real_spike(home):
         'command':subprocess.check_output(['which','codex'],text=True).strip(),'codex_home':str(native),'roots':[str(repo)]}]}))
     service=Service(home,config);c=service.client;peers=[];tui=None;master=None
     try:
-        result=c.cmd('real-start',{'op':'start','profile':'default','context':{'workspaces':[str(repo)]}})
+        result=c.cmd('real-start',{'op':'start','profile':'default','codex_yolo':True,'context':{'workspaces':[str(repo)]}})
         cid=result['id'];sess=result['sessions'][0];nid=sess['native_id'];endpoint=sess['endpoint'][7:]
         first=Peer(endpoint);peers.append(first)
-        assert first.call('thread/resume',{'threadId':nid})['thread']['id']==nid
+        joined=first.call('thread/resume',{'threadId':nid})
+        assert joined['thread']['id']==nid
+        assert joined['approvalPolicy']=='never' and joined['sandbox']['type']=='dangerFullAccess',joined
         master,slave=pty.openpty()
         fcntl.ioctl(slave,termios.TIOCSWINSZ,struct.pack('HHHH',40,120,0,0))
-        tui=subprocess.Popen(['codex','resume','--remote',sess['endpoint'],'-C',str(repo),nid,
-          'Reply with the fixture text. Do not run tools.'],env={**service.env,'TERM':'xterm-256color'},
+        tui=subprocess.Popen([BIN,'terminal','--home',str(home),'--mode','exact','--session',nid,'--codex-yolo','--prompt',
+          'Reply with the fixture text. Do not run tools.'],cwd=repo,env={**service.env,'TERM':'xterm-256color'},
           stdin=slave,stdout=slave,stderr=slave,start_new_session=True)
         os.close(slave);terminal_output=[]
         def drain():
@@ -564,6 +710,7 @@ def real_spike(home):
         second=Peer(endpoint);peers.append(second)
         joined=second.call('thread/resume',{'threadId':nid})
         assert joined['thread']['id']==nid,joined
+        assert joined['approvalPolicy']=='never' and joined['sandbox']['type']=='dangerFullAccess',joined
         assert any(turn['status']=='inProgress' for turn in joined['thread']['turns']),joined
         first.close();peers.remove(first)
         tui.send_signal(signal.SIGHUP);tui.wait(timeout=10)
@@ -597,3 +744,5 @@ if __name__=='__main__':
                 recovery_suite(Path(recovery).resolve())
             with tempfile.TemporaryDirectory(prefix='mcas-',dir='/tmp') as scoped:
                 scope_suite(Path(scoped).resolve())
+            with tempfile.TemporaryDirectory(prefix='mcab-',dir='/tmp') as startup:
+                autostart_suite(Path(startup).resolve())

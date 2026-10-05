@@ -6159,7 +6159,7 @@ let test_head_butler_continue_uses_native_sessions_without_monty_state () =
             "--codex-command"; "codex"; "--codex-yolo" ]
       in
       require_code 1 codex;
-      require_contains "managed unsafe policy fails closed" codex.stderr "does not support approval/sandbox bypass";
+      require_contains "managed continuation requires service" codex.stderr "Monty client service is not running";
       let conflict =
         run ~root ~env 1959
           [ "continue"; "saved-chat"; "--last"; "--home"; home ]

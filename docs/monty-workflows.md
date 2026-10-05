@@ -402,17 +402,43 @@ Monty worker variables or ambient API keys. Use account configuration in the
 selected native home. Per-thread workspace roots, instructions, shell Monty
 variables and the Monty MCP environment are supplied in `thread/start` config.
 Approvals default to `on-request` and sandboxing to `workspace-write`. Managed
-terminals reject `--codex-yolo`; they do not silently enable or ignore bypass.
+terminals honor the existing `--codex-yolo`, `MONTY_CODEX_YOLO` and persisted
+`codex-yolo` setting, in that order. When explicitly enabled, new threads use
+`never` approvals and `danger-full-access`. The terminal attaches without CLI
+permission overrides, which Codex rejects for remote resumes. The service does not inherit the
+operator's setting for unrelated API requests: Codex `start` and `switch`
+requests must explicitly supply the boolean `codex_yolo: true` to opt in.
+Rejoining an already-running thread preserves its native execution policy;
+changing a launch setting does not reconfigure that running thread. The YOLO
+launch setting applies to fresh threads.
 Existing custom provider, hook and other native account settings remain owned
 by Codex. Per-thread configuration of arbitrary external MCP server environments
 is not an API capability; configure those servers within their account scope.
 
 ```sh
-monty service serve --home /absolute/monty-home --config /absolute/profiles.json --port 8765
+monty service start --home /absolute/monty-home --config /absolute/profiles.json --port 8765
 ```
 
-Run this in a dedicated terminal. No background supervisor or startup agent is
-installed. Stop the foreground service with Ctrl-C or SIGTERM. This disconnects
+Run this once to select the trusted configuration and start in the background. Monty remembers its absolute
+path and requested port in `.monty/client-service.json`. Later Codex launches,
+including plain `monty`, automatically start the service in the background if
+needed and wait for authenticated health before opening the terminal. A healthy
+service is reused; concurrent launches share the existing service lock. Logs go
+to `.monty/client-service.log`, and the service survives terminal exit. No login
+agent or background supervisor is installed. A first launch without a saved
+configuration gives the setup command instead of guessing account homes or roots.
+
+```sh
+monty service start  # Reuse the running service or start from saved configuration.
+monty service stop   # Wait for shutdown; also safe if already stopped.
+```
+
+Use the same `--home` when managing a nondefault Monty home. Stop before changing
+the saved configuration or port with `start --config FILE --port PORT`.
+`service serve --config FILE` remains available for foreground operation with
+Ctrl-C to stop. `service stop` also works for foreground services, authenticates
+to the current service epoch, and never signals a PID from saved metadata. The
+next Codex launch starts it again. Stopping the service disconnects
 Monty's observer and API clients. The shared Codex daemon keeps running, but
 service-owned Pi RPC children are shut down, ending their active execution.
 Restart with the same configuration and home for history catch-up; Pi control
@@ -449,6 +475,7 @@ components; paths cannot select arbitrary files. HTTP connection timeout is
 | Method/path | Result or action |
 | --- | --- |
 | `GET /health` | Capabilities, account scope hashes, service epoch and current cursor |
+| `POST /shutdown` | Authenticate and supply `{"epoch":"CURRENT_HEALTH_EPOCH"}`; HTTP 202 acknowledges shutdown through the shared cleanup path |
 | `GET /inventory` | Read-only CLI inventory, exact ordering/values, canonical keys, every workspace, profile/group banner and warnings |
 | `GET /conversations` | Monty conversation manifests and native provenance |
 | `GET /conversations/ID` | One manifest, revision, selected session, transfers and coverage |
@@ -641,7 +668,8 @@ Pi launches retain their existing paths. Old authenticated worker scripts are
 recognized for migration and rewritten on explicit resume.
 
 For ad hoc use, invoke `monty terminal --home ...` explicitly. There is no vendor
-binary replacement or shell alias. A missing service fails with startup guidance.
+binary replacement or shell alias. A stopped service starts from its saved
+configuration; missing setup or startup failure produces actionable guidance.
 The native stored-session picker is replaced by Monty's registered catalog;
 explicitly import a selected older session before resuming it.
 
