@@ -62,7 +62,6 @@ let connection t pid =
         process ~env:(native_environment ["CODEX_HOME=" ^ s "codex_home" p])
           [s "command" p;"app-server";"daemon";"start"] >|= fun out ->
         let result=Yojson.Safe.from_string out in
-        if field "appServerVersion" result <> string "0.160.0" then fail 501 "Codex adapter tested only with app-server 0.160.0";
         s "socketPath" result) >>= fun socket ->
       Codex_rpc.connect socket >|= fun c ->
       Hashtbl.replace t.endpoints pid ("unix://" ^ socket);
@@ -207,7 +206,7 @@ let start_params t context request =
     "sandbox_workspace_write.writable_roots",`List dirs;
     "mcp_servers.monty",obj ["command",string (Unix.realpath Sys.executable_name);
       "args",`List [string "mcp";string "serve";string "--home";string t.home];"env",field "environment" context]] in
-  obj (["cwd",List.hd dirs;"approvalPolicy",string (if codex_yolo then "never" else "on-request");
+  obj (["cwd",List.hd dirs;"historyMode",string "legacy";"approvalPolicy",string (if codex_yolo then "never" else "on-request");
     "sandbox",string (if codex_yolo then "danger-full-access" else "workspace-write");
     "developerInstructions",field "instructions" context;"config",config]
     @ (List.filter_map (fun k -> if field k request=`Null then None else Some(k,field k request)) ["model";"modelProvider"]))
@@ -493,7 +492,8 @@ let capabilities t = obj ["api_version",`Int 1;"epoch",string t.epoch;"cursor",s
   "storage_scope",string (sha t.home);
   "profiles",`List (List.map (fun p -> obj ["id",field "id" p;"harness",field "harness" p;
     "scope",field "scope" p;"roots",field "roots" p]) (xs "profiles" t.config));
-  "codex_version",string "0.160.0";"pi_version",string "1.0.2";"pi_native_terminal_attach",`Bool false;"exclusive_handoff",`Bool false;
+  "codex_version",string "0.160.0";"codex_tested_versions",`List [string "0.160.0";string "0.160.1"];
+  "pi_version",string "1.0.2";"pi_native_terminal_attach",`Bool false;"exclusive_handoff",`Bool false;
   "standalone_release_verification",`Bool false;"switch_modes",`List [string "branch"];
   "history_mode",string "legacy exposed snapshots";"event_retention",`Int 256;
   "request_limit",`Int 262144;"real_adapters",`List [string "codex";string "pi"]]

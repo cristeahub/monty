@@ -10,6 +10,7 @@ import pty
 import select
 import signal
 import termios
+import tty
 import fcntl
 from pathlib import Path
 import socket
@@ -414,8 +415,9 @@ def fake_suite(home):
     native_home=home/'codex';native_home.mkdir()
     server=Native(home/'codex.sock');second=Native(home/'second.sock')
     codex=home/'fake-codex'
+    # An untested version must still connect; compatibility is established by RPC.
     codex.write_text('#!/usr/bin/env python3\nimport json,sys\nfrom pathlib import Path\n'
-      + 'if sys.argv[1:4]==["app-server","daemon","start"]:print(json.dumps('+repr({'socketPath':str(home/'codex.sock'),'appServerVersion':'0.160.0'})+'))\n'
+      + 'if sys.argv[1:4]==["app-server","daemon","start"]:print(json.dumps('+repr({'socketPath':str(home/'codex.sock'),'appServerVersion':'0.999.0'})+'))\n'
       + 'else:Path('+repr(str(home/'terminal.json'))+').write_text(json.dumps(sys.argv[1:]))\n')
     codex.chmod(0o700)
     config=home/'profiles.json';config.write_text(json.dumps({'allow_fixture':True,'profiles':[
@@ -429,12 +431,14 @@ def fake_suite(home):
         assert c.req('inventory')['tasks']==[]
         assert not (home/'.monty/tasks.json').exists()
         request={'op':'start','profile':'default','context':{'workspaces':[str(repo)],'instructions':'trusted current instructions','environment':{'MONTY_JOB_TITLE':'isolated'}}}
+        assert c.req('health')['codex_tested_versions']==['0.160.0','0.160.1']
         with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
             receipts=list(pool.map(lambda _:c.cmd('start-once',request),range(8)))
         cid=receipts[0]['id'];native=receipts[0]['sessions'][0]['native_id']
         assert len({r['id'] for r in receipts})==1 and len(server.threads)==1
         http_error(409,lambda:c.req('commands/start-once',{**request,'title':'different'}))
         params=next(params for method,params in server.calls if method=='thread/start')
+        assert params['historyMode']=='legacy'
         assert params['config']['shell_environment_policy.set']['MONTY_JOB_TITLE']=='isolated'
         assert (params['approvalPolicy'],params['sandbox'])==('on-request','workspace-write')
         assert c.history(cid)['sessions'][0]['records']
@@ -881,15 +885,16 @@ def real_spike(home):
     service=Service(home,config);c=service.client;peers=[];tui=None;master=None
     try:
         result=c.cmd('real-start',{'op':'start','profile':'default','codex_yolo':True,'context':{'workspaces':[str(repo)]}})
+        version=json.loads(subprocess.check_output(['codex','app-server','daemon','version'],env=service.env,text=True))['appServerVersion']
         cid=result['id'];sess=result['sessions'][0];nid=sess['native_id'];endpoint=sess['endpoint'][7:]
-        first=Peer(endpoint);peers.append(first)
-        joined=first.call('thread/resume',{'threadId':nid})
-        assert joined['thread']['id']==nid
-        assert joined['approvalPolicy']=='never' and joined['sandbox']['type']=='dangerFullAccess',joined
+        started_thread=c.history(cid)['sessions'][0]['records'][0]['raw']['thread']
+        assert started_thread['historyMode']=='legacy',started_thread['historyMode']
+        # Bootstrap the fresh thread without a test client warming it first.
         master,slave=pty.openpty()
+        tty.setraw(slave)
         fcntl.ioctl(slave,termios.TIOCSWINSZ,struct.pack('HHHH',40,120,0,0))
-        tui=subprocess.Popen([BIN,'terminal','--home',str(home),'--mode','exact','--session',nid,'--codex-yolo','--prompt',
-          'Reply with the fixture text. Do not run tools.'],cwd=repo,env={**service.env,'TERM':'xterm-256color'},
+        tui=subprocess.Popen([BIN,'terminal','--home',str(home),'--mode','exact','--session',nid,'--codex-yolo'],
+          cwd=repo,env={**service.env,'TERM':'xterm-256color'},
           stdin=slave,stdout=slave,stderr=slave,start_new_session=True)
         os.close(slave);terminal_output=[]
         def drain():
@@ -900,12 +905,22 @@ def real_spike(home):
                     if sum(map(len,terminal_output))<1000000:terminal_output.append(data)
             except OSError:pass
         threading.Thread(target=drain,daemon=True).start()
+        # Bare startup must reach Normal mode before any user input or model turn.
+        until(lambda:b''.join(terminal_output),lambda output:b'Vim: Normal' in output)
+        assert not model.started.is_set()
+        offset=sum(map(len,terminal_output))
+        os.write(master,b'i')
+        until(lambda:b''.join(terminal_output)[offset:],lambda output:b'Vim: Insert' in output)
+        os.write(master,b'Hi')
+        until(lambda:b''.join(terminal_output)[offset:],lambda output:b'Hi' in output)
+        os.write(master,b'\r')
         assert model.started.wait(15),b''.join(terminal_output).decode(errors='replace')
 
+        first=Peer(endpoint);peers.append(first)
+        joined=first.call('thread/resume',{'threadId':nid})
+        assert joined['thread']['id']==nid
+        assert joined['approvalPolicy']=='never' and joined['sandbox']['type']=='dangerFullAccess',joined
         assert first.call('config/read',{})['config']['tui']['vim_mode_default'] is True
-        # Startup itself must select Normal mode, without a user keypress.
-        until(lambda:b''.join(terminal_output),lambda output:b'Vim: Normal' in output)
-
         second=Peer(endpoint);peers.append(second)
         joined=second.call('thread/resume',{'threadId':nid})
         assert joined['thread']['id']==nid,joined
@@ -923,7 +938,7 @@ def real_spike(home):
         # therefore cannot truthfully promise exclusive input ownership.
         second.call('turn/start',{'threadId':nid,'input':[{'type':'text','text':'Second fixture reply.'}]})
         until(lambda:c.history(cid),lambda h:len(h['sessions'][0]['effective'])>=4)
-        print('real Codex 0.160.0: same active thread rejoined; terminal-originated activity mirrored; native TUI SIGHUP preserved execution; old client can still send. All inference served by local fixture.')
+        print(f'real Codex {version}: same active thread rejoined; terminal-originated activity mirrored; native TUI SIGHUP preserved execution; old client can still send. All inference served by local fixture.')
     finally:
         model.release.set()
         if tui and tui.poll() is None:tui.kill();tui.wait(timeout=5)

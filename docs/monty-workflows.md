@@ -492,10 +492,19 @@ checks that JSON parsing leaves the dashboard responsive.
 
 The version 1 client API coordinates conversations independently of tasks. It
 uses Cohttp/Lwt, upstream Codex app-server daemon management and a persistent
-Unix WebSocket subscription. Tested real adapters are Codex 0.160.0 and Pi 1.0.2;
-other runtime versions fail closed. Pi also supports read-only native JSONL
+Unix WebSocket subscription. Tested real adapters are Codex 0.160.0, 0.160.1 and Pi 1.0.2.
+Codex versions are informational: Monty attempts the native connection regardless
+of version and reports connection or protocol failures. Other Pi runtime versions
+fail closed. Pi also supports read-only native JSONL
 history mirroring without starting its runtime. This service is separate from optional external
 context collection and never enables it. MCP remains documentation-only.
+
+The managed Codex daemon can differ from the CLI version. Check the selected
+account with `CODEX_HOME=/selected/home codex app-server daemon version`;
+`appServerVersion` identifies the running daemon. `/health` lists tested versions in
+`codex_tested_versions`; `codex_version` retains the original compatibility baseline.
+New threads explicitly request `historyMode: "legacy"`, matching Monty's existing
+full-history adapter instead of inheriting Codex's changing storage default.
 
 ### Startup, authentication and rollout
 
@@ -904,7 +913,7 @@ python3 test/test_pi_api.py _build/default/bin/main.exe --real
 ```
 
 The default suite uses isolated homes, temporary Git repositories and fake native
-servers. `--real` additionally requires installed Codex 0.160.0 and a PTY; it starts
+servers. `--real` additionally requires installed Codex and a PTY; it starts
 and stops only its isolated daemon, and serves all inference from a local fixture.
 The Pi `--real` suite requires Pi 1.0.2, fresh native/system homes and a local
 model fixture; it verifies RPC send/interrupt, shared API observation, native
