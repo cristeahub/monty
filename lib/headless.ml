@@ -840,7 +840,6 @@ let run_codex_phase (options : Launcher.options) (dispatch : dispatch)
   let command =
     "umask 077 && " ^ options.harness_command ^ " exec"
     ^ Harness_command.codex_effort_arg
-    ^ Mcp_config.codex_args ~monty_command:options.monty_command
     ^ Codex_trust.arguments
         (match
            dispatch.workspaces
@@ -865,6 +864,7 @@ let run_codex_phase (options : Launcher.options) (dispatch : dispatch)
         ~worktree:dispatch.worktree ~codex_yolo:options.codex_yolo ~writable
         ~prompt:prompt_contents ~output ~events ~progress
   | None -> (
+  let* () = Skill.ensure ~home:dispatch.home ~harness:Harness.Codex ~monty_command:options.monty_command in
   match Process.run_capture command with
   | Error message ->
       Error
@@ -946,11 +946,10 @@ let run_pi_phase (options : Launcher.options) (dispatch : dispatch)
           ~worktree:dispatch.worktree ~codex_yolo:false ~writable
           ~prompt:(Shell.read_file prompt) ~output ~events ~progress
     | None ->
-        let* () = Mcp_config.ensure_pi ~home:dispatch.home ~monty_command:options.monty_command in
+        let* () = Skill.ensure ~home:dispatch.home ~harness:Harness.Pi ~monty_command:options.monty_command in
         let command =
           "umask 077 && " ^ options.harness_command
           ^ Harness.pi_headless_args ~writable
-          ^ ",mcp__monty__monty_help,mcp__monty__monty_command_help"
           ^ " < " ^ Shell.quote prompt ^ " > " ^ Shell.quote events
           ^ " 2> " ^ Shell.quote progress
         in

@@ -428,9 +428,9 @@ let script_has_owner_marker (options : options) (prepared : prepared)
     (* Decode only the fixed preamble, including multiline quoted values, then
        authenticate the entire template using its historical environment.
        Resume replaces it with a fresh script before requesting execution. *)
-    let expected ?(pin_policy = true) ?(managed = true) ?(mcp = true) ?(codex_hook = true) ?(job = prepared.job) codex_mode
+    let expected ?(pin_policy = true) ?(managed = true) ?(legacy_mcp = true) ?(skills = false) ?(codex_hook = true) ?(job = prepared.job) codex_mode
         codex_trusted_paths =
-      Harness_command.launch_script_contents ~pin_policy ~managed ~mcp ~environment_path ~profile_environment
+      Harness_command.launch_script_contents ~pin_policy ~managed ~legacy_mcp ~skills ~environment_path ~profile_environment
         ~options:(harness_options options)
         ~codex_hook ~codex_mode ~codex_trusted_paths ~job ~id:prepared.id
         ~branch:prepared.branch
@@ -482,18 +482,15 @@ let script_has_owner_marker (options : options) (prepared : prepared)
       | Ok None | Error _ ->
           [ Codex_session.Fresh; Codex_session.Picker ]
     in
-    let accepted =
-      modes
-      |> List.concat_map (fun mode ->
-             variants (expected ~managed:false mode trusted_paths)
-             @ variants (expected ~managed:false mode [])
-             @ variants (expected mode trusted_paths)
-             @ variants (expected mode [])
-             @ variants (expected ~pin_policy:false mode trusted_paths)
-             @ variants (expected ~pin_policy:false mode [])
-             @ variants (expected ~mcp:false mode trusted_paths)
-             @ variants (expected ~mcp:false mode []))
+    let templates mode =
+      [trusted_paths; []] |> List.concat_map (fun paths ->
+        variants (expected ~skills:true ~legacy_mcp:false mode paths)
+        @ variants (expected ~managed:false mode paths)
+        @ variants (expected mode paths)
+        @ variants (expected ~pin_policy:false mode paths)
+        @ variants (expected ~legacy_mcp:false mode paths))
     in
+    let accepted = List.concat_map templates modes in
     let legacy_worker_dirs =
       [ None; Some prepared.worker_dir ]
       @
@@ -515,22 +512,13 @@ let script_has_owner_marker (options : options) (prepared : prepared)
       |> List.concat_map (fun worker_dir ->
              let job = { prepared.job with Job.worker_dir = worker_dir } in
              variants
-               (expected ~mcp:false ~codex_hook:false ~job Codex_session.Fresh
+               (expected ~legacy_mcp:false ~codex_hook:false ~job Codex_session.Fresh
                   trusted_paths)
              @ variants
-                 (expected ~mcp:false ~codex_hook:false ~job Codex_session.Fresh []))
+                 (expected ~legacy_mcp:false ~codex_hook:false ~job Codex_session.Fresh []))
     in
     let sentinel = "monty-codex-session-id-sentinel" in
-    let exact_templates =
-      variants (expected ~managed:false (Codex_session.Exact sentinel) trusted_paths)
-      @ variants (expected ~managed:false (Codex_session.Exact sentinel) [])
-      @ variants (expected (Codex_session.Exact sentinel) trusted_paths)
-      @ variants (expected (Codex_session.Exact sentinel) [])
-      @ variants (expected ~pin_policy:false (Codex_session.Exact sentinel) trusted_paths)
-      @ variants (expected ~pin_policy:false (Codex_session.Exact sentinel) [])
-      @ variants (expected ~mcp:false (Codex_session.Exact sentinel) trusted_paths)
-      @ variants (expected ~mcp:false (Codex_session.Exact sentinel) [])
-    in
+    let exact_templates = templates (Codex_session.Exact sentinel) in
     List.exists (String.equal contents) (accepted @ legacy)
     || List.exists (exact_template_matches contents) exact_templates
   with Sys_error _ -> false
@@ -1303,7 +1291,7 @@ let dry_run ?(codex_mode = Codex_session.Fresh) options
         | Codex_session.Exact session_id -> " " ^ session_id
         | _ -> ""));
   Fmt.pr "[dry-run] command: %s\n"
-    (Harness_command.build_command ~mcp:true ~codex_hook:true ~codex_mode
+    (Harness_command.build_command ~codex_hook:true ~codex_mode
        ~options:(harness_options options)
        ~codex_trusted_paths:[]
        ~home:options.home ~instructions:(Some prepared.instructions)

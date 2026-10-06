@@ -38,7 +38,7 @@ let run ~monty_command ~home ~harness ~harness_command command =
   else
     let* _ = Process.command_exists_with_arguments harness_command in
     let* () = match harness with
-      | Harness.Pi -> Mcp_config.ensure_pi ~home ~monty_command
+      | Harness.Pi -> Skill.ensure ~home ~harness ~monty_command
       | Harness.Codex -> Ok () in
     match Unix.execv "/bin/sh" [| "/bin/sh"; "-c"; command home |] with
     | () -> assert false

@@ -60,7 +60,7 @@ let worktree_default getenv =
 
 let mantle_profile = List_jobs.mantle_profile
 
-let rec make_cmd ?(getenv = Sys.getenv_opt) () =
+let make_cmd ?(getenv = Sys.getenv_opt) () =
 let home_arg =
   let doc = "Monty control-room directory. Defaults to MONTY_HOME or the nearest parent dune-project named monty." in
   Cmdliner.Arg.(value & opt string (Home.default_with_getenv getenv) & info [ "home" ] ~docv:"DIR" ~doc)
@@ -1529,17 +1529,9 @@ let main_cmd =
       handoff_cmd;
       ensure_worktree_cmd;
       doctor_cmd;
-      Mcp_cli.command ~home_arg ~monty_command:(monty_command ())
-        ~command_help:(fun words ->
-          let buffer = Buffer.create 2048 in
-          let formatter = Format.formatter_of_buffer buffer in
-          let argv = Array.of_list ("monty" :: words @ ["--help=plain"]) in
-          let result = Cmdliner.Cmd.eval_value ~help:formatter ~err:formatter
-              ~argv (make_cmd ~getenv ()) in
-          Format.pp_print_flush formatter ();
-          match result with
-          | Ok `Help -> Ok (Buffer.contents buffer)
-          | _ -> Error (Buffer.contents buffer));
+      Guide.command;
+      Cmdliner.Cmd.group (Cmdliner.Cmd.info "mcp" ~doc:"Legacy CLI guide alias; the MCP server has been removed.") [Guide.command];
+      Skill.command ~home_arg ~harness_arg ~getenv ~monty_command:(monty_command ());
     ] @ Context_cli.commands ~home_arg ~harness_arg ~pi_command_arg ~codex_command_arg ~getenv)
  in
 main_cmd

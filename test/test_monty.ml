@@ -1041,7 +1041,7 @@ let test_codex_harness_command () =
         monty_command = "monty" }
   in
   let command =
-    Harness_command.build_command ~mcp:true ~codex_hook:true
+    Harness_command.build_command ~codex_hook:true
       ~codex_mode:Codex_session.Fresh
       ~codex_trusted_paths:[ "/repo" ] ~options ~home:"/monty"
       ~instructions:(Some "/monty/MONTY.md") ~job ~context:job.context
@@ -1058,7 +1058,7 @@ let test_codex_harness_command () =
   assert_not_contains "Codex YOLO defaults off" command
     "--dangerously-bypass-approvals-and-sandbox";
   let picker_command =
-    Harness_command.build_command ~mcp:true ~codex_hook:true
+    Harness_command.build_command ~codex_hook:true
       ~codex_mode:Codex_session.Picker
       ~codex_trusted_paths:[] ~options ~home:"/monty"
       ~instructions:(Some "/monty/MONTY.md") ~job ~context:job.context
@@ -1068,7 +1068,7 @@ let test_codex_harness_command () =
     "Read the files below before acting";
   assert_not_contains "Codex picker never uses last" picker_command "--last";
   let exact_command =
-    Harness_command.build_command ~mcp:true ~codex_hook:true
+    Harness_command.build_command ~codex_hook:true
       ~codex_mode:(Codex_session.Exact "thread's exact id")
       ~codex_trusted_paths:[] ~options ~home:"/monty"
       ~instructions:(Some "/monty/MONTY.md") ~job ~context:job.context
@@ -1102,7 +1102,7 @@ let test_codex_harness_command () =
       ~context:"/monty/context.md" ~task_key:"local:local-005" ()
   in
   let multi_command =
-    Harness_command.build_command ~mcp:true ~codex_hook:true
+    Harness_command.build_command ~codex_hook:true
       ~codex_mode:Codex_session.Fresh
       ~codex_trusted_paths:[] ~options ~home:"/monty"
       ~instructions:(Some "/monty/MONTY.md") ~job:multi_job
@@ -1159,7 +1159,7 @@ let test_codex_harness_command () =
     unlinked_always_script
     "ensure-worktree --repo '/admin' --branch 'cto/admin-task-1' --home";
   let yolo_command =
-    Harness_command.build_command ~mcp:true ~codex_hook:true
+    Harness_command.build_command ~codex_hook:true
       ~codex_mode:Codex_session.Fresh
       ~codex_trusted_paths:[]
       ~options:{ options with codex_yolo = true }

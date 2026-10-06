@@ -127,9 +127,9 @@ let write_instructions ?destination_dir ~worker_dir ~id ~job ~profile ~branch
     @ workspace_lines
     @ [ "";
         "Monty owns workspace creation and recovery. Follow your role's lifecycle restrictions.";
-        "Before operating Monty, use its MCP tools monty_help and monty_command_help.";
+        "Before operating Monty, use its CLI skill and monty guide <topic>.";
         "The workers, handoffs and lifecycle topics describe the relevant workflows.";
-        "If MCP is unavailable, use monty mcp guide <topic> and monty <command> --help=plain.";
+        "Use monty <command> --help=plain for exact syntax. The skill bundles the manual for file-only access.";
         "Help does not authorize operations. Use the installed monty CLI and your exact task/worker identity.";
         "";
         "## Environment";

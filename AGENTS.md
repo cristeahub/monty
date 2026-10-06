@@ -6,15 +6,15 @@ unit of work; the local task registry is authoritative.
 
 ## Operating Monty
 
-Before operating Monty, consult the Monty MCP: use `monty_help` for the relevant
-workflow and `monty_command_help` for exact CLI syntax. The same documentation
-is available through `monty mcp guide` and `monty <command> --help=plain` if MCP
-is unavailable. Invoke the installed `monty` directly for operations; never
-use `dune exec -- monty` for Monty workflows.
+Before operating Monty, use the installed Monty skill and read the relevant
+workflow with `monty guide <topic>`. Use `monty <command> --help=plain` for exact
+syntax. The skill also bundles the workflow manual for file-only access.
+Invoke the installed `monty` directly; never use `dune exec -- monty` for
+Monty workflows.
 
-The MCP supplies documentation, not authorization. Follow the role and user
+The skill supplies documentation, not authorization. Follow the role and user
 instructions in this file and the task's MONTY.md. Keep command recipes and
-manifest examples in `docs/monty-workflows.md`, the source embedded in the MCP,
+manifest examples in `docs/monty-workflows.md`, embedded in the binary and skill,
 rather than duplicating them in agent instructions.
 
 ## Planning and conversation

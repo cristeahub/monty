@@ -73,6 +73,11 @@ let connection t pid =
       (fun () -> Hashtbl.remove t.connecting pid; Lwt.return_unit) in
     Hashtbl.add t.connecting pid promise; promise)
 let session_connection t sess = connection t (s "id" (session_profile t sess))
+let prepare_codex_skill t p rpc workspaces =
+  if s "harness" p<>"codex" then Lwt.return_unit else (
+    get(Skill.ensure_at ~home:t.home ~harness:Harness.Codex ~directory:(s "codex_home" p)
+      ~monty_command:(Unix.realpath Sys.executable_name));
+    Codex_rpc.call rpc "skills/list" (obj ["cwds",workspaces;"forceReload",`Bool true]) >|= ignore)
 let pi_find t sess =
   ignore(session_profile t sess);
   match Hashtbl.find_opt t.pi_clients (s "id" sess) with Some rpc when rpc.Pi_rpc.alive->Some rpc|_->None
@@ -121,7 +126,7 @@ let pi_start t cid sess request ~fresh =
       if field "partial_tail" raw=`Bool true then fail 409 "Pi source has an incomplete trailing record; wait for a complete write before resuming";
       if Unix.realpath (required "cwd" (field "header" raw))<>cwd then fail 409 "Pi resume workspace must match the native session cwd; use a branch for a new workspace";
       ["--session";required "source_file" sess]) in
-  get(Mcp_config.ensure_pi_at ~directory:(s "pi_home" p) ~home:t.home ~monty_command:(Unix.realpath Sys.executable_name));
+  get(Skill.ensure_at ~harness:Harness.Pi ~directory:(s "pi_home" p) ~home:t.home ~monty_command:(Unix.realpath Sys.executable_name));
   let worker_env=match field "environment" context with `Assoc fields ->
     List.filter_map (fun (k,v) -> if k="MONTY_HOME" then None else Some(k ^ "=" ^ str v)) fields|_->[] in
   let env=native_environment (["PI_CODING_AGENT_DIR=" ^ s "pi_home" p;"MONTY_HOME=" ^ t.home;"PI_TELEMETRY=0"] @ worker_env) in
@@ -171,6 +176,7 @@ let sync t cid sid =
       if changed () then event t (obj ["conversation",string cid;"type",string "history_changed"]);
       Lwt.return_unit)
 let subscribe t sess = session_connection t sess >>= fun rpc ->
+  prepare_codex_skill t (session_profile t sess) rpc (field "workspaces" (field "context" sess)) >>= fun () ->
   if s "harness" sess="fixture" then Codex_rpc.call rpc "join" (obj ["session",field "native_id" sess]) >|= ignore
   else Codex_rpc.call rpc "thread/resume" (native_params sess) >|= ignore
 let ensure_revision c request = match field "revision" request with
@@ -198,14 +204,12 @@ let validate_context t pid request =
     ignore (bounded_string 8192 v)) env;
   obj ["workspaces",`List (List.map string workspaces);"instructions",string instructions;
     "environment",`Assoc env;"objective",field "objective" context]
-let start_params t context request =
+let start_params context request =
   let codex_yolo=match field "codex_yolo" request with
     | `Null -> false | `Bool value -> value | _ -> fail 400 "codex_yolo must be a boolean" in
   let dirs=xs "workspaces" context in
   let config = obj ["model_reasoning_effort",string "xhigh";"shell_environment_policy.set",field "environment" context;
-    "sandbox_workspace_write.writable_roots",`List dirs;
-    "mcp_servers.monty",obj ["command",string (Unix.realpath Sys.executable_name);
-      "args",`List [string "mcp";string "serve";string "--home";string t.home];"env",field "environment" context]] in
+    "sandbox_workspace_write.writable_roots",`List dirs] in
   obj (["cwd",List.hd dirs;"historyMode",string "legacy";"approvalPolicy",string (if codex_yolo then "never" else "on-request");
     "sandbox",string (if codex_yolo then "danger-full-access" else "workspace-write");
     "developerInstructions",field "instructions" context;"config",config]
@@ -236,10 +240,11 @@ let register t request ~mode =
   let native = if mode="start" then None else Some(required "native_id" request) in
   Option.iter (ensure_not_purged t.home ~harness:(s "harness" p) ~scope:(s "scope" p)) native;
   connection t pid >>= fun rpc ->
+  (if mode="import" then Lwt.return_unit else prepare_codex_skill t p rpc (field "workspaces" context)) >>= fun () ->
   (if s "harness" p="fixture" then
     Codex_rpc.call rpc (if mode="start" then "open" else "history")
       (if mode="start" then obj ["context",context] else obj ["session",string (Option.get native)])
-  else if mode="start" then Codex_rpc.call rpc "thread/start" (start_params t context request)
+  else if mode="start" then Codex_rpc.call rpc "thread/start" (start_params context request)
   else if mode="attach" then
     Codex_rpc.call rpc "thread/loaded/list" (obj []) >>= fun loaded ->
     if not (List.mem (string (Option.get native)) (array "data" loaded)) then
@@ -308,8 +313,9 @@ let transfer t request =
     locked t.home (fun () -> let c=load t.home cid in save t.home (put "sessions" (`List (xs "sessions" c @ [dest])) c));
     pi_start t cid dest request ~fresh:true >|= fun () -> session (load t.home cid) (s "id" dest))
    else connection t pid >>= fun rpc ->
+    prepare_codex_skill t p rpc (field "workspaces" context) >>= fun () ->
     (if s "harness" p="fixture" then Codex_rpc.call rpc "open" (obj ["context",context;"package",package])
-     else Codex_rpc.call rpc "thread/start" (start_params t context request)) >|= fun accepted ->
+     else Codex_rpc.call rpc "thread/start" (start_params context request)) >|= fun accepted ->
     let nid=if s "harness" p="fixture" then s "session" accepted else s "id" (field "thread" accepted) in
     new_session ~profile:pid ~harness:(s "harness" p) ~scope:(s "scope" p) ~native_id:nid ~context |>
       puts ["endpoint",string (Hashtbl.find t.endpoints pid);"observed",`Bool true;"transfer",string tid;"transfer_prompt",string transfer_prompt]) >>= fun dest ->

@@ -36,8 +36,8 @@
 
 (rule
  (alias runtest)
- (deps test_mcp.py ../bin/main.exe)
- (action (run python3 %{dep:test_mcp.py} %{dep:../bin/main.exe})))
+ (deps test_skills.py ../bin/main.exe)
+ (action (run python3 %{dep:test_skills.py} %{dep:../bin/main.exe})))
 
 (rule
  (alias runtest)
