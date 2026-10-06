@@ -1,0 +1,29 @@
+(version v0.17.0)
+
+(build
+ (all_platforms ((action (run dune build -p %{pkg-self:name} -j %{jobs})))))
+
+(depends
+ (all_platforms
+  (ocaml
+   base
+   core
+   core_kernel
+   js_of_ocaml_patches
+   ppx_jane
+   stdio
+   base64
+   dune
+   gen_js_api
+   js_of_ocaml
+   js_of_ocaml-ppx
+   lambdasoup
+   tyxml
+   uri)))
+
+(source
+ (fetch
+  (url
+   https://github.com/janestreet/virtual_dom/archive/refs/tags/v0.17.0.tar.gz)
+  (checksum
+   sha256=812711b4d5ce634a413580cd7096482de8d71abec9ae37bb01f7c0dcec2968ec)))

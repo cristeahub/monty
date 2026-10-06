@@ -1,0 +1,15 @@
+(version v0.17.0)
+
+(build
+ (all_platforms ((action (run dune build -p %{pkg-self:name} -j %{jobs})))))
+
+(depends
+ (all_platforms
+  (ocaml base ppx_jane dune)))
+
+(source
+ (fetch
+  (url
+   https://github.com/janestreet/abstract_algebra/archive/refs/tags/v0.17.0.tar.gz)
+  (checksum
+   sha256=f7cc273be50f9212454342e3c69e85b98a83d1487857ce9f9952c21db309258b)))

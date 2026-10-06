@@ -30,7 +30,7 @@ let ensure_service ?config_path ?port ~home () =
   let ready result =
     let state=saved () in
     if Option.fold ~none:false ~some:(fun path -> path<>s "config_path" state) config_path ||
-       Option.fold ~none:false ~some:(fun port -> port<>i "port" state) port then
+       Option.fold ~none:false ~some:(fun port -> port<>0 && port<>i "port" state) port then
       fail 409 "service is running with different startup settings; run monty service stop first";
     Lwt.return result in
   health ~home >>= function

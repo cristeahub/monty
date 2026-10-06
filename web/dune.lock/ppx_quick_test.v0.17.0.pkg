@@ -1,0 +1,29 @@
+(version v0.17.0)
+
+(build
+ (all_platforms ((action (run dune build -p %{pkg-self:name} -j %{jobs})))))
+
+(depends
+ (all_platforms
+  (ocaml
+   async
+   async_kernel
+   base
+   base_quickcheck
+   core
+   core_kernel
+   expect_test_helpers_core
+   ppx_expect
+   ppx_here
+   ppx_jane
+   ppx_sexp_conv
+   ppx_sexp_message
+   dune
+   ppxlib)))
+
+(source
+ (fetch
+  (url
+   https://github.com/janestreet/ppx_quick_test/archive/refs/tags/v0.17.0.tar.gz)
+  (checksum
+   sha256=d9556f991f7a75fb534a4a808fed3a18d0fd7ed55ecaa9a9bfefe9867d73b0d8)))

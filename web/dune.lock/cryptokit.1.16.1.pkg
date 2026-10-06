@@ -1,0 +1,18 @@
+(version 1.16.1)
+
+(build
+ (all_platforms
+  ((action
+    (progn
+     (when %{pkg-self:dev} (run dune subst))
+     (run dune build -p %{pkg-self:name} -j %{jobs} @install))))))
+
+(depends
+ (all_platforms
+  (ocaml dune dune-configurator zarith conf-zlib conf-gmp-powm-sec)))
+
+(source
+ (fetch
+  (url https://github.com/xavierleroy/cryptokit/archive/release1161.tar.gz)
+  (checksum
+   sha512=28913a7c35ae951a4c464287acc511ee1bdc9d03b5928e2243c5ae5cbb8b10afe8e84d7a73ba6478ed62657d01fdb6f02472739255c33de3671c4130b659da52)))

@@ -1046,7 +1046,7 @@ let test_codex_harness_command () =
       ~codex_trusted_paths:[ "/repo" ] ~options ~home:"/monty"
       ~instructions:(Some "/monty/MONTY.md") ~job ~context:job.context
   in
-  assert_contains "managed terminal" command "exec 'monty' terminal";
+  assert_contains "managed terminal pins its approval policy" command "exec env MONTY_CODEX_YOLO=false 'monty' terminal";
   assert_contains "explicit worker identity" command " --worker ";
   assert_contains "codex executable and fixed args" command "--codex-command 'codex --model fixed'";
   assert_contains "explicit Monty home" command "--home '/monty'";

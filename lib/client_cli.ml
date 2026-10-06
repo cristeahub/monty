@@ -20,6 +20,27 @@ let command ~home_arg =
       Printf.printf "Monty service %s.\n" (if stopped then "stopped" else "is already stopped"))) $ home_arg) in
   Cmd.group (Cmd.info "service" ~doc:"Monty's local conversations and inventory API.") [start;stop;serve]
 
+let web ~home_arg =
+  let open Cmdliner in
+  let assets=Arg.(value & opt (some string) None & info ["assets"] ~docv:"DIR"
+    ~doc:"Directory containing the built Bonsai client (index.html, style.css, main.bc.js).") in
+  let config=Arg.(value & opt (some string) None & info ["config"] ~docv:"FILE"
+    ~doc:"Service configuration; defaults to the saved configuration.") in
+  Cmd.v (Cmd.info "web" ~doc:"Connect a local browser to Monty with a one-use pairing code.")
+    Term.(const (fun home assets config_path -> exit (fun () ->
+      let home=Unix.realpath home in
+      let assets=match assets with Some path->Unix.realpath path|None->
+        let candidates=[Filename.concat (Sys.getcwd ()) "web/_build/default";Filename.concat home "web/dist"] in
+        match List.find_opt (fun path -> Sys.file_exists (Filename.concat path "main.bc.js")) candidates with
+        | Some path->Unix.realpath path
+        | None->fail 404 "web assets not built; run python3 web/build.py, then monty web --assets web/_build/default" in
+      let paired=Lwt_main.run (let open Lwt.Infix in
+        Client_terminal.ensure_service ?config_path ~home () >>= fun _ ->
+        Client_terminal.request ~home `POST "/v1/browser/pair" (obj ["assets",string assets])) in
+      let url=Context_store.s "url" (read (file home ["client-service.json"])) in
+      Printf.printf "Open %s\n\nPairing code (one use, expires in five minutes):\n%s\n%!" url (Context_store.s "code" paired)))
+      $ home_arg $ assets $ config)
+
 let terminal ~home_arg =
   let open Cmdliner in
   let opt name doc = Arg.(value & opt (some string) None & info [name] ~doc) in

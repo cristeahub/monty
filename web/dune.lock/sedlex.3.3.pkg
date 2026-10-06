@@ -1,0 +1,19 @@
+(version 3.3)
+
+(build
+ (all_platforms
+  ((action
+    (progn
+     (when %{pkg-self:dev} (run dune subst))
+     (run dune build -p %{pkg-self:name} -j %{jobs} @install))))))
+
+(depends
+ (all_platforms
+  (ocaml dune ppxlib gen)))
+
+(source
+ (fetch
+  (url
+   https://github.com/ocaml-community/sedlex/archive/refs/tags/v3.3.tar.gz)
+  (checksum
+   sha512=791b172b59256cb77df1bbd9e3136aa79e65bcb3df1f64bbe10933d624bad59a7d8b358c35abd07c267b89a3feb01f935e927ffc4fe9c6eb2ac6637cfa9b42cd)))

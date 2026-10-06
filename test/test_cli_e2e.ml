@@ -2929,7 +2929,7 @@ let test_codex_launch_preserves_mantle_environment () =
         ^ " > " ^ Shell.quote (Filename.concat observed "projects") ^ "\n"
       in
       Shell.write_file codex
-        ("#!/bin/sh\nset -eu\n" ^ observe);
+        ("#!/bin/sh\nset -eu\ntest \"${MONTY_CODEX_YOLO-}\" = false\n" ^ observe);
       Shell.chmod_executable codex;
       let injection_marker = Filename.concat root "SHOULD_NOT_EXIST" in
       let attack = "touch " ^ Shell.quote injection_marker in
@@ -2988,17 +2988,17 @@ let test_codex_launch_preserves_mantle_environment () =
            which has its own checkout-binary E2E test. The original authenticated
            launch script is never edited by this fixture. *)
         let fixture = script ^ ".environment-test" in
-        let prefix = "exec " ^ Shell.quote executable ^ " terminal" in
+        let prefix = "exec env MONTY_CODEX_YOLO=false " ^ Shell.quote executable ^ " terminal" in
         Shell.write_file fixture (Shell.read_file script |> String.split_on_char '\n'
           |> List.map (fun line -> if String.starts_with ~prefix line then
-            "exec " ^ Shell.quote codex ^ String.sub line (String.length prefix) (String.length line-String.length prefix)
+            "exec env MONTY_CODEX_YOLO=false " ^ Shell.quote codex ^ String.sub line (String.length prefix) (String.length line-String.length prefix)
             else line) |> String.concat "\n");
         let script = fixture in
         List.iter (fun conflicting ->
             (* Exercise Ghostty's actual login-shell command with an isolated
                startup file, not the developer's shell configuration. *)
             let terminal_bindings =
-              if conflicting then profile "stale" "export" "/stale/codex" else []
+              if conflicting then ("MONTY_CODEX_YOLO", "true") :: profile "stale" "export" "/stale/codex" else []
             in
             Shell.write_file (Filename.concat terminal_home ".zprofile")
               (terminal_bindings

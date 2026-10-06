@@ -1,0 +1,25 @@
+(version v0.17.0)
+
+(build
+ (all_platforms ((action (run dune build -p %{pkg-self:name} -j %{jobs})))))
+
+(depends
+ (all_platforms
+  (ocaml
+   abstract_algebra
+   bignum
+   core
+   incremental
+   legacy_diffable
+   ppx_diff
+   ppx_jane
+   ppx_pattern_bind
+   streamable
+   dune)))
+
+(source
+ (fetch
+  (url
+   https://github.com/janestreet/incr_map/archive/refs/tags/v0.17.0.tar.gz)
+  (checksum
+   sha256=91acc784e4760af8544c4504bee1a9f6d7385eb0620f8e56392cd193a250b7d2)))

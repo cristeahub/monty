@@ -50,9 +50,9 @@ def append(kind, **data):
     with path.open('a') as out:out.write(json.dumps(entry)+'\n')
     return entry
 
-def finish():
+def finish(text='Pi fixture answer'):
     global busy
-    entry=append('message',message={'role':'assistant','content':[{'type':'text','text':'Pi fixture answer'}],
+    entry=append('message',message={'role':'assistant','content':[{'type':'text','text':text}],
                                  'provider':model['provider'],'model':model['id']})
     emit({'type':'message_end','message':entry['message']})
     busy=False
@@ -86,7 +86,16 @@ for line in sys.stdin:
                   'title':'Confirm fixture action','timeout':100 if command['message']=='expiring dialog' else 10000})
         else:
             respond(command,{'disposition':'started'})
-            if command['message']!='hold':finish()
+            if command['message']=='stream':
+                emit({'type':'message_start','message':{'role':'assistant','content':[]}})
+                emit({'type':'message_update','assistantMessageEvent':{'type':'text_start','contentIndex':0}})
+                for delta in ['Live Pi ', 'answer']:
+                    time.sleep(.6)
+                    emit({'type':'message_update','assistantMessageEvent':{'type':'text_delta','contentIndex':0,'delta':delta}})
+                time.sleep(1.5)
+                emit({'type':'message_update','assistantMessageEvent':{'type':'text_end','contentIndex':0,'content':'Live Pi answer'}})
+                finish('Live Pi answer')
+            elif command['message']!='hold':finish()
     elif kind=='extension_ui_response':
         assert command['id']=='native-dialog'
         respond(dialog,{'disposition':'started'})

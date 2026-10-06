@@ -331,6 +331,73 @@ let same_record prepared (record : Job_store.record) =
       | Some path -> canonical_path_equal path prepared.script_path
       | None -> false)
 
+let decode_generated_shell_quote_at value start =
+  let length = String.length value in
+  if start >= length || value.[start] <> '\'' then
+    None
+  else
+    let decoded = Buffer.create length in
+    let rec loop index =
+      if index >= length then None
+      else if value.[index] <> '\'' then (
+        Buffer.add_char decoded value.[index];
+        loop (index + 1))
+      else if
+        index + 3 < length
+        && value.[index + 1] = '\\'
+        && value.[index + 2] = '\''
+        && value.[index + 3] = '\''
+      then (
+        Buffer.add_char decoded '\'';
+        loop (index + 4))
+      else Some (Buffer.contents decoded, index + 1)
+    in
+    loop (start + 1)
+
+let script_environment contents =
+  let ( let* ) = Option.bind in
+  let consume prefix index =
+    let length = String.length prefix in
+    if index + length <= String.length contents
+       && String.sub contents index length = prefix
+    then Some (index + length) else None
+  in
+  let export name index =
+    let* start = consume ("export " ^ name ^ "=") index in
+    let* value, finish = decode_generated_shell_quote_at contents start in
+    let* next = consume "\n" finish in
+    Some (value, next)
+  in
+  let* start = consume "#!/bin/sh\n" 0 in
+  let start =
+    Option.value ~default:start (consume "# monty-launch-script-v1\n" start)
+  in
+  let* start = consume "set -eu\n" start in
+  let* environment_path, start = export "PATH" start in
+  let rec profiles index = function
+    | [] -> Some []
+    | name :: rest ->
+        let* value, next =
+          match consume ("unset " ^ name ^ "\n") index with
+          | Some next -> Some (None, next)
+          | None ->
+              let* value, next = export name index in
+              Some (Some value, next)
+        in
+        let* rest = profiles next rest in
+        Some ((name, value) :: rest)
+  in
+  let* profile_environment =
+    (* Pre-profile scripts go straight from PATH to the title. *)
+    match consume "printf " start with
+    | Some _ -> Some []
+    | None ->
+        (match profiles start Harness_command.profile_environment_names with
+         | Some _ as current -> current
+         | None -> profiles start (List.filter ((<>) "PI_CODING_AGENT_DIR") Harness_command.profile_environment_names))
+  in
+  Some (environment_path, profile_environment)
+
 let script_has_owner_marker (options : options) (prepared : prepared)
     (record : Job_store.record) path =
   try
@@ -348,88 +415,22 @@ let script_has_owner_marker (options : options) (prepared : prepared)
         without_lines [ job_file ] expected;
         without_lines [ marker; job_file ] expected ]
     in
-    let decode_generated_shell_quote_at value start =
-      let length = String.length value in
-      if start >= length || value.[start] <> '\'' then
-        None
-      else
-        let decoded = Buffer.create length in
-        let rec loop index =
-          if index >= length then None
-          else if value.[index] <> '\'' then (
-            Buffer.add_char decoded value.[index];
-            loop (index + 1))
-          else if
-            index + 3 < length
-            && value.[index + 1] = '\\'
-            && value.[index + 2] = '\''
-            && value.[index + 3] = '\''
-          then (
-            Buffer.add_char decoded '\'';
-            loop (index + 4))
-          else Some (Buffer.contents decoded, index + 1)
-        in
-        loop (start + 1)
-    in
     let decode_generated_shell_quote value =
       match decode_generated_shell_quote_at value 0 with
       | Some (decoded, finish) when finish = String.length value -> Some decoded
       | _ -> None
     in
     let contents = Shell.read_file path in
-    let environment =
-      let ( let* ) = Option.bind in
-      let consume prefix index =
-        let length = String.length prefix in
-        if index + length <= String.length contents
-           && String.sub contents index length = prefix
-        then Some (index + length) else None
-      in
-      let export name index =
-        let* start = consume ("export " ^ name ^ "=") index in
-        let* value, finish = decode_generated_shell_quote_at contents start in
-        let* next = consume "\n" finish in
-        Some (value, next)
-      in
-      let* start = consume "#!/bin/sh\n" 0 in
-      let start =
-        Option.value ~default:start (consume "# monty-launch-script-v1\n" start)
-      in
-      let* start = consume "set -eu\n" start in
-      let* environment_path, start = export "PATH" start in
-      let rec profiles index = function
-        | [] -> Some []
-        | name :: rest ->
-            let* value, next =
-              match consume ("unset " ^ name ^ "\n") index with
-              | Some next -> Some (None, next)
-              | None ->
-                  let* value, next = export name index in
-                  Some (Some value, next)
-            in
-            let* rest = profiles next rest in
-            Some ((name, value) :: rest)
-      in
-      let* profile_environment =
-        (* Pre-profile scripts go straight from PATH to the title. *)
-        match consume "printf " start with
-        | Some _ -> Some []
-        | None ->
-            (match profiles start Harness_command.profile_environment_names with
-             | Some _ as current -> current
-             | None -> profiles start (List.filter ((<>) "PI_CODING_AGENT_DIR") Harness_command.profile_environment_names))
-      in
-      Some (environment_path, profile_environment)
-    in
+    let environment = script_environment contents in
     match environment with
     | None -> false
     | Some (environment_path, profile_environment) ->
     (* Decode only the fixed preamble, including multiline quoted values, then
        authenticate the entire template using its historical environment.
        Resume replaces it with a fresh script before requesting execution. *)
-    let expected ?(managed = true) ?(mcp = true) ?(codex_hook = true) ?(job = prepared.job) codex_mode
+    let expected ?(pin_policy = true) ?(managed = true) ?(mcp = true) ?(codex_hook = true) ?(job = prepared.job) codex_mode
         codex_trusted_paths =
-      Harness_command.launch_script_contents ~managed ~mcp ~environment_path ~profile_environment
+      Harness_command.launch_script_contents ~pin_policy ~managed ~mcp ~environment_path ~profile_environment
         ~options:(harness_options options)
         ~codex_hook ~codex_mode ~codex_trusted_paths ~job ~id:prepared.id
         ~branch:prepared.branch
@@ -488,6 +489,8 @@ let script_has_owner_marker (options : options) (prepared : prepared)
              @ variants (expected ~managed:false mode [])
              @ variants (expected mode trusted_paths)
              @ variants (expected mode [])
+             @ variants (expected ~pin_policy:false mode trusted_paths)
+             @ variants (expected ~pin_policy:false mode [])
              @ variants (expected ~mcp:false mode trusted_paths)
              @ variants (expected ~mcp:false mode []))
     in
@@ -523,6 +526,8 @@ let script_has_owner_marker (options : options) (prepared : prepared)
       @ variants (expected ~managed:false (Codex_session.Exact sentinel) [])
       @ variants (expected (Codex_session.Exact sentinel) trusted_paths)
       @ variants (expected (Codex_session.Exact sentinel) [])
+      @ variants (expected ~pin_policy:false (Codex_session.Exact sentinel) trusted_paths)
+      @ variants (expected ~pin_policy:false (Codex_session.Exact sentinel) [])
       @ variants (expected ~mcp:false (Codex_session.Exact sentinel) trusted_paths)
       @ variants (expected ~mcp:false (Codex_session.Exact sentinel) [])
     in

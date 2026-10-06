@@ -3,14 +3,17 @@ open Context_store
 open Conversation_store
 
 type t = {home:string; config:Yojson.Safe.t; clients:(string,Codex_rpc.t) Hashtbl.t;
+  browser:Client_browser.t;
   pi_clients:(string,Pi_rpc.t) Hashtbl.t;
   connecting:(string,Codex_rpc.t Lwt.t) Hashtbl.t; commands:Lwt_mutex.t;
+  changed:unit Lwt_condition.t;
   mutable sequence:int; epoch:string; mutable events:(int * Yojson.Safe.t) list; endpoints:(string,string) Hashtbl.t}
 let event t data =
   let data = if String.length (Yojson.Safe.to_string data)>4096 then
     obj ["type",string "resync";"reason",string "event payload exceeds 4 KiB; read owned history"] else data in
   t.sequence <- t.sequence+1;
-  t.events <- (t.sequence,data) :: take 255 t.events
+  t.events <- (t.sequence,data) :: take 255 t.events;
+  Lwt_condition.broadcast t.changed ()
 let profile t id = match List.find_opt (fun p -> s "id" p=id) (xs "profiles" t.config) with
   | Some p -> p | None -> fail 400 "unknown configured profile"
 let matches_profile p sess = field "harness" sess=field "harness" p && field "scope" sess=field "scope" p
@@ -28,7 +31,7 @@ let notify t pid connection_id j =
   sessions t pid |> List.iter (fun (cid,sid,nid) ->
     if native=nid || meth="monty/disconnected" then (
       if meth<>"monty/disconnected" && not (String.ends_with ~suffix:"/delta" meth)
-         && meth<>"thread/tokenUsage/updated" then capture_event t.home cid sid j;
+         && meth<>"item/commandExecution/outputDelta" && meth<>"thread/tokenUsage/updated" then capture_event t.home cid sid j;
       if meth="monty/disconnected" then source_error t.home cid sid "Native connection lost; catch-up pending";
       if meth="monty/disconnected" || field "id" j <> `Null || meth="serverRequest/resolved" then
         locked t.home (fun () ->
@@ -161,9 +164,13 @@ let capture_snapshot t cid sess ~provenance =
   raw
 let sync t cid sid =
   let sess=session (load t.home cid) sid in
+  let signature sess = field "checkpoint" sess,field "state" (field "coverage" sess) in
+  let changed () = signature sess<>signature(session(load t.home cid) sid) in
   Lwt.catch (fun () -> capture_snapshot t cid sess ~provenance:"native history snapshot" >|= fun _ ->
-    event t (obj ["conversation",string cid;"type",string "history_changed"]))
-    (fun _ -> source_error t.home cid sid "Source history read failed; retained archive remains available";Lwt.return_unit)
+    if changed () then event t (obj ["conversation",string cid;"type",string "history_changed"]))
+    (fun _ -> source_error t.home cid sid "Source history read failed; retained archive remains available";
+      if changed () then event t (obj ["conversation",string cid;"type",string "history_changed"]);
+      Lwt.return_unit)
 let subscribe t sess = session_connection t sess >>= fun rpc ->
   if s "harness" sess="fixture" then Codex_rpc.call rpc "join" (obj ["session",field "native_id" sess]) >|= ignore
   else Codex_rpc.call rpc "thread/resume" (native_params sess) >|= ignore
@@ -333,6 +340,37 @@ let reserve_response ?(validate=(fun _ -> ())) t cid sid identity request = lock
   validate pending;
   let pending=put "state" (string "reserved") pending in
   save t.home (update_session c (put "pending" (`List (List.map (fun p -> if s "id" p=rid then pending else p) (live_pending sess))) sess));pending)
+let validate_codex_response response pending =
+  let params=field "params" pending in
+  let only keys=match response with `Assoc fields when List.for_all (fun (k,_)->List.mem k keys) fields->()
+    | _->fail 400 "response fields do not match the pending request" in
+  match s "method" pending with
+  | "item/commandExecution/requestApproval"|"item/fileChange/requestApproval" ->
+      only ["decision"];
+      let decision=field "decision" response in
+      let offered=match field "availableDecisions" params with `List values->values
+        | _ ->List.map string ["accept";"acceptForSession";"decline";"cancel"] in
+      if not(List.mem decision offered) then fail 400 "approval decision was not offered by this request"
+  | "item/tool/requestUserInput" ->
+      only ["answers"];
+      let answers=match field "answers" response with `Assoc values->values|_->fail 400 "question answers must be an object" in
+      let questions=array "questions" params in
+      if List.sort_uniq String.compare(List.map fst answers)<>List.sort_uniq String.compare(List.map (s "id") questions) then
+        fail 400 "answers must match the pending question identifiers";
+      List.iter (fun (_,answer)->match answer with
+        | `Assoc ["answers",`List values] when List.length values<=1 &&
+            List.for_all (function `String s->String.length s<=65536|_->false) values -> ()
+        | _->fail 400 "each question requires at most one text answer") answers
+  | "item/permissions/requestApproval" ->
+      only ["permissions";"scope"];
+      if field "scope" response<>`Null && field "scope" response<>string "turn" then fail 400 "permission grants are limited to this turn";
+      if field "permissions" response<>obj [] && field "permissions" response<>field "permissions" params then
+        fail 400 "grant the displayed permissions or decline them"
+  | "mcpServer/elicitation/request" ->
+      only ["action";"content"];
+      if not(List.mem (field "action" response) [string "decline";string "cancel"]) || field "content" response<>`Null then
+        fail 501 "MCP elicitation acceptance requires a native client; decline or cancel here"
+  | _ -> fail 501 "this native request type is not supported by the client"
 let pi_execute t cid sess op request =
   if op="resume" then (
     if field "detached" request<>`Bool true then fail 409 "Pi resume requires detached=true after stopping every native writer";
@@ -366,9 +404,11 @@ let pi_execute t cid sess op request =
       let delivery=match field "delivery" request with `Null->"prompt"|`String x when List.mem x ["prompt";"steer";"follow_up"]->x|_->fail 400 "invalid Pi delivery mode" in
       Pi_rpc.call rpc delivery (obj ["message",string(required "text" request)])
   | _ -> Lwt.fail(Failure(400,"unsupported Pi command"))
-let execute t request =
+let execute t ~id request =
   let op=required "op" request in
   match op with
+  | "task_create"|"task_preflight"|"task_apply"|"task_complete" ->
+      Client_tasks.execute ~home:t.home ~profiles:(xs "profiles" t.config) ~make_env:native_environment ~id request
   | "start"|"import"|"attach" -> register t request ~mode:op
   | "switch" -> transfer t request
   | "recover_switch" ->
@@ -393,7 +433,11 @@ let execute t request =
   | "send"|"interrupt"|"respond"|"resume"|"sync"|"set_model"|"detach" ->
       let cid,c,sess=current t request in
       if op="sync" then sync t cid (s "id" sess) >|= fun () -> load t.home cid else (
-      ensure_revision c request;
+      (* A pending response has its own identity/revision/connection fence.
+         Unrelated transcript updates must not invalidate the user's answer. *)
+      if List.mem op ["send";"interrupt"] && field "selected_session" request<>`Null then (
+        if field "selected_session" request<>field "id" sess then fail 409 "selected native session changed; refresh before retrying")
+      else if op<>"respond" then ensure_revision c request;
       if s "harness" sess="pi" then pi_execute t cid sess op request else (
       if op="set_model" || op="detach" then fail 501 "this operation currently requires a Pi session";
       if field "delivery" request<>`Null && field "delivery" request<>string "prompt" then fail 501 "steering/follow-up delivery currently requires Pi";
@@ -408,7 +452,7 @@ let execute t request =
         locked t.home (fun () -> let c=load t.home cid in save t.home (update_session c (put "observed" (`Bool true) (session c (s "id" sess)))));
         sync t cid (s "id" sess) >|= fun () -> load t.home cid)
       else if op="respond" then (
-        let pending=reserve_response t cid (s "id" sess) rpc.identity request in
+        let pending=reserve_response ~validate:(validate_codex_response (field "response" request)) t cid (s "id" sess) rpc.identity request in
         Codex_rpc.send rpc (obj ["id",field "native_request" pending;"result",field "response" request]) >|= fun () -> obj ["status",string "submitted";"pending_id",field "id" pending])
       else if op="interrupt" then Codex_rpc.call rpc (if fixture then "abort" else "turn/interrupt")
         (puts ["turnId",string (required "turn_id" request)] (native_params sess))
@@ -427,10 +471,11 @@ let submit t id request =
     let run f=if List.mem (s "op" request) ["respond";"interrupt"] then f () else Lwt_mutex.with_lock t.commands f in
     run (fun () ->
     ignore (finish t.home id "running" `Null);
-    Lwt.catch (fun () -> execute t request >|= fun result -> ignore(finish t.home id "finished" result))
+    Lwt.catch (fun () -> execute t ~id request >|= fun result -> ignore(finish t.home id "finished" result))
       (fun e -> let code,message=match e with Failure(c,m)->c,m|_->500,"command outcome could not be established" in
         let status=if code<500 || code=501 then "rejected" else "outcome_unknown" in
-        ignore(finish t.home id status (obj ["code",`Int code;"message",string message]));Lwt.return_unit)));
+        ignore(finish t.home id status (obj ["code",`Int code;"message",string message]));Lwt.return_unit)
+    >|= fun () -> event t (obj["type",string "command_changed";"command",string id])));
   r
 let inventory t uri =
   let param k=Uri.get_query_param uri k in
@@ -445,15 +490,17 @@ let inventory t uri =
         "status",string x.status;"title",string x.title;"branch",Option.fold ~none:`Null ~some:string x.branch;
         "workspaces",`List (List.map (fun (w:Overview_types.task_workspace)->obj ["repo",string w.repo;"branch",string w.branch]) x.workspaces)]) tasks)]
 let capabilities t = obj ["api_version",`Int 1;"epoch",string t.epoch;"cursor",string (t.epoch ^ ":" ^ string_of_int t.sequence);
+  "storage_scope",string (sha t.home);
   "profiles",`List (List.map (fun p -> obj ["id",field "id" p;"harness",field "harness" p;
-    "scope",field "scope" p]) (xs "profiles" t.config));
+    "scope",field "scope" p;"roots",field "roots" p]) (xs "profiles" t.config));
   "codex_version",string "0.160.0";"pi_version",string "1.0.2";"pi_native_terminal_attach",`Bool false;"exclusive_handoff",`Bool false;
   "standalone_release_verification",`Bool false;"switch_modes",`List [string "branch"];
   "history_mode",string "legacy exposed snapshots";"event_retention",`Int 256;
   "request_limit",`Int 262144;"real_adapters",`List [string "codex";string "pi"]]
-let response ?(status=`OK) json =
+let response ?(status=`OK) ?(headers=[]) json =
   Cohttp_lwt_unix.Server.respond_string ~status ~headers:(Cohttp.Header.of_list
-    ["content-type","application/json";"cache-control","no-store";"connection","close"])
+    (headers @ ["content-type","application/json";"cache-control","no-store";"connection","close";
+      "x-content-type-options","nosniff"]))
     ~body:(Yojson.Safe.to_string json) ()
 let error code message = response ~status:(Cohttp.Code.status_of_code code) (obj ["error",string message])
 let bounded_body body =
@@ -468,15 +515,16 @@ let cursor t value = match String.split_on_char ':' value with
       | Some n when n>=max 0 (t.sequence-256) && n<=t.sequence -> n
       | _ -> fail 409 "cursor expired; obtain authoritative snapshots")
   | _ -> fail 409 "cursor expired; service epoch changed; obtain authoritative snapshots"
-let stream t last =
+let stream t ~authorized last =
   let position=ref last in
   let ended=ref false in
   let next () =
     if !ended then Lwt.return_none else
+    if not (authorized ()) then (ended:=true;Lwt.return_some "event: session_expired\ndata: {}\n\n") else
     if !position < t.sequence-256 then (ended:=true;Lwt.return_some "event: resync\ndata: {\"reason\":\"cursor expired\"}\n\n")
     else match List.rev t.events |> List.find_opt (fun (n,_) -> n > !position) with
     | Some (n,data) -> position:=n; Lwt.return_some (Printf.sprintf "id: %s:%d\nevent: update\ndata: %s\n\n" t.epoch n (Yojson.Safe.to_string data))
-    | None -> Lwt_unix.sleep 1. >|= fun () -> Some ": keepalive\n\n" in
+    | None -> Lwt.pick [Lwt_condition.wait t.changed;Lwt_unix.sleep 1.] >|= fun () -> Some ": keepalive\n\n" in
   let body=Cohttp_lwt.Body.of_stream (Lwt_stream.from next) in
   Cohttp_lwt_unix.Server.respond ~status:`OK ~headers:(Cohttp.Header.of_list
     ["content-type","text/event-stream";"cache-control","no-store";"connection","close"])
@@ -488,18 +536,60 @@ let callback t ~token ~port ~shutdown conn req body =
     if Cohttp.Header.get headers "host"<>Some host then fail 403 "invalid Host";
     (match Cohttp.Header.get headers "origin" with None -> ()
       | Some value when value="http://" ^ host -> () | _ -> fail 403 "invalid Origin");
-    if not (Eqaf.equal (Option.value ~default:"" (Cohttp.Header.get headers "authorization")) ("Bearer " ^ token)) then fail 401 "bearer authentication required";
+    let bearer=Eqaf.equal (Option.value ~default:"" (Cohttp.Header.get headers "authorization")) ("Bearer " ^ token) in
     let uri=Cohttp.Request.uri req in
     let parts=Uri.path uri |> String.split_on_char '/' |> List.filter ((<>) "") in
+    match Cohttp.Request.meth req,Client_browser.asset t.browser (Uri.path uri) with
+    | `GET,Some asset -> Client_browser.serve_asset asset
+    | _ ->
+    let login=Cohttp.Request.meth req=`POST && parts=["v1";"browser";"session"] in
+    let authorized () = bearer || (Cohttp.Header.get headers "authorization"=None && Client_browser.authenticated t.browser ~port headers) in
+    if not login && not (authorized ()) then fail 401 "bearer authentication required; browser clients can pair with monty web";
+    if not bearer && Cohttp.Request.meth req<>`GET && Cohttp.Header.get headers "origin"<>Some ("http://" ^ host) then
+      fail 403 "same-origin browser request required";
+    let json_body () =
+      if Cohttp.Header.get headers "content-type"<>Some "application/json" then fail 415 "application/json required";
+      bounded_body body in
     match Cohttp.Request.meth req,parts with
+    | `POST,["v1";"browser";"pair"] ->
+        if not bearer then fail 403 "pairing requires the local service credential";
+        json_body () >>= fun request ->
+        (match field "assets" request with `Null->()|_->Client_browser.load_assets t.browser (required "assets" request));
+        response (Client_browser.issue t.browser)
+    | `POST,["v1";"browser";"session"] ->
+        json_body () >>= fun request ->
+        let cookie=Client_browser.login t.browser ~port (required "code" request) in
+        response ~headers:["set-cookie",cookie] (obj ["authenticated",`Bool true])
+    | `POST,["v1";"browser";"logout"] ->
+        json_body () >>= fun _ ->
+        let cookie=Client_browser.logout t.browser ~port headers in
+        response ~headers:["set-cookie",cookie] (obj ["authenticated",`Bool false])
     | `GET,["v1";"health"] -> response (capabilities t)
     | `POST,["v1";"shutdown"] ->
+        if not bearer then fail 403 "service shutdown requires the local service credential";
         if Cohttp.Header.get headers "content-type"<>Some "application/json" then fail 415 "application/json required";
         bounded_body body >>= fun request ->
         if required "epoch" request<>t.epoch then fail 409 "service epoch changed; retry stop";
         shutdown conn;
         response ~status:`Accepted (obj ["epoch",string t.epoch])
     | `GET,["v1";"inventory"] -> response (inventory t uri)
+    | `GET,["v1";"projects"] -> response (Client_tasks.catalog t.home)
+    | `GET,["v1";"tasks";key] -> response (Client_tasks.detail t.home (Uri.pct_decode key))
+    | `GET,["v1";"discovery"] ->
+        let pid=match Uri.get_query_param uri "profile" with Some id->id|None->fail 400 "profile required" in
+        let p=profile t pid in
+        if s "harness" p="pi" then
+          Lwt_preemptive.detach (fun () -> Client_discovery.pi_page ~home:t.home p (Option.value ~default:"" (Uri.get_query_param uri "cursor"))) () >>= response
+        else connection t pid >>= fun rpc ->
+          Codex_rpc.call rpc "thread/list" (Client_discovery.codex_params uri) >>= fun result ->
+          response (Client_discovery.codex_page ~home:t.home p result)
+    | `GET,["v1";"discovery";"history"] ->
+        let param key=match Uri.get_query_param uri key with Some value when value<>""->value|_->fail 400 (key ^ " required") in
+        let p=profile t (param "profile") in
+        (if s "harness" p="pi" then Lwt.return(Pi_history.read_file p (param "session_file"))
+         else connection t (s "id" p) >>= fun rpc ->
+           Codex_rpc.call rpc "thread/read" (obj ["threadId",string (param "native_id");"includeTurns",`Bool true])) >>= fun raw ->
+        response (Client_discovery.history p raw)
     | `GET,["v1";"conversations"] -> response (`List (list t.home))
     | `GET,["v1";"conversations";id] -> response (load t.home id)
     | `GET,["v1";"conversations";id;"history"] ->
@@ -511,13 +601,14 @@ let callback t ~token ~port ~shutdown conn req body =
         if Cohttp.Header.get headers "content-type"<>Some "application/json" then fail 415 "application/json required";
         bounded_body body >>= fun request -> response ~status:`Accepted (submit t id request)
     | `GET,["v1";"events"] ->
-        let last=match Cohttp.Header.get headers "last-event-id" with None->t.sequence|Some v->cursor t v in stream t last
+        let last=match Cohttp.Header.get headers "last-event-id" with None->t.sequence|Some v->cursor t v in stream t ~authorized last
     | `GET,["v1";"blobs";hash] ->
         if String.length hash<>64 || not (String.for_all (function '0'..'9'|'a'..'f'->true|_->false) hash) then fail 400 "invalid blob hash";
         let p=file t.home ["conversation-blobs";hash] in
         if not(Sys.file_exists p) then fail 404 "blob unavailable";
         Cohttp_lwt_unix.Server.respond_string ~status:`OK ~headers:(Cohttp.Header.of_list
-          ["content-type","application/octet-stream";"cache-control","no-store";"connection","close"])
+          ["content-type","application/octet-stream";"content-disposition","attachment";"x-content-type-options","nosniff";
+            "cache-control","no-store";"connection","close"])
           ~body:(Shell.read_file p) ()
     | _ -> error 404 "unknown API operation")
     (function Failure(code,message)->error code message
@@ -559,7 +650,6 @@ let serve ~home ~config_path ~port =
   let home=Unix.realpath home in
   let config_path=Unix.realpath config_path in
   let config=read config_path |> validate_config in
-  let configured_port=port in
   let state_dir=get (State_store.ensure_state_dir ~home) in
   let lock=get (State_store.open_lock_file (Filename.concat state_dir "client-service.lock")) in
   (try Unix.lockf lock Unix.F_TLOCK 0 with _ -> Unix.close lock;fail 409 "a client service is already running for this Monty home");
@@ -580,8 +670,8 @@ let serve ~home ~config_path ~port =
       let changed=List.exists (fun s -> field "harness" s=string "pi" && (field "observed" s=`Bool true || array "pending" s<>[])) (xs "sessions" c) in
       if changed then save home (puts ["revision",`Int(i "revision" c+1);"sessions",`List (xs "sessions" c |> List.map (fun sess ->
         if field "harness" sess=string "pi" then puts ["observed",`Bool false;"pending",`List [];"runtime",string "disconnected"] sess else sess))] c)));
-    let t={home;config;clients=Hashtbl.create 8;connecting=Hashtbl.create 8;
-      pi_clients=Hashtbl.create 8;commands=Lwt_mutex.create ();endpoints=Hashtbl.create 8;sequence=0;epoch=random_id ();events=[]} in
+    let t={home;config;browser=Client_browser.create ();clients=Hashtbl.create 8;connecting=Hashtbl.create 8;
+      pi_clients=Hashtbl.create 8;commands=Lwt_mutex.create ();changed=Lwt_condition.create ();endpoints=Hashtbl.create 8;sequence=0;epoch=random_id ();events=[]} in
     let run () =
       let socket=Lwt_unix.socket Unix.PF_INET Unix.SOCK_STREAM 0 in
       Lwt_unix.setsockopt socket Unix.SO_REUSEADDR true;
@@ -590,7 +680,7 @@ let serve ~home ~config_path ~port =
       let port=match Lwt_unix.getsockname socket with Unix.ADDR_INET(_,p)->p|_->assert false in
       locked home (fun () -> write (file home ["client-service.json"])
         (obj ["url",string (Printf.sprintf "http://127.0.0.1:%d" port);"pid",`Int (Unix.getpid ());"epoch",string t.epoch;
-          "config_path",string config_path;"port",`Int configured_port]));
+          "config_path",string config_path;"port",`Int port]));
       Printf.printf "Monty client API http://127.0.0.1:%d (token: %s)\n%!" port (file home ["client-service-token"]);
       let observed=Hashtbl.create 32 in
       let previous_inventory=ref "" in
@@ -605,7 +695,7 @@ let serve ~home ~config_path ~port =
               subscribe t sess >|= fun () -> Hashtbl.replace observed k rpc) >>= fun () ->
             sync t (s "id" c) k)
             (fun _ -> source_error home (s "id" c) (s "id" sess) "subscription unavailable";Lwt.return_unit)) (xs "sessions" c)) (list home) >>= fun () ->
-        (try let current=Yojson.Safe.to_string (inventory t (Uri.of_string "/v1/inventory")) in
+        (try let current=Yojson.Safe.to_string (inventory t (Uri.of_string "/v1/inventory?all_groups=true&scope=all")) in
           if current <> !previous_inventory then (previous_inventory:=current;event t (obj ["type",string "inventory_changed"])) with _ -> ());
         Lwt_unix.sleep 1. >>= poll in
       Lwt.async poll;

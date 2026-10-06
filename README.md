@@ -49,6 +49,12 @@ mirroring of explicitly selected native Pi session logs. See
 and the native-terminal ownership boundary. Existing native Pi launches and
 headless execution retain their transports.
 
+The local OCaml/Bonsai web client supports tasks and Codex/Pi conversations. Build it separately with
+`python3 web/build.py`, then run `monty web --assets web/_build/default` with the
+service configuration above. The command prints a local URL and a one-use pairing
+code. Paste the code into the page to connect; the service bearer token stays out
+of the browser. See the [web client workflow](docs/monty-workflows.md#web-client).
+
 ## Install
 
 Install the `monty` CLI without opam:

@@ -48,3 +48,13 @@
  (alias runtest)
  (deps test_pi_api.py fake_pi.py test_client_api.py ../bin/main.exe)
  (action (run python3 %{dep:test_pi_api.py} %{dep:../bin/main.exe})))
+
+(rule
+ (alias runtest)
+ (deps test_browser_api.py test_client_api.py ../bin/main.exe)
+ (action (run python3 %{dep:test_browser_api.py} %{dep:../bin/main.exe})))
+
+(rule
+ (alias runtest)
+ (deps test_tasks_api.py test_client_api.py ../bin/main.exe (source_tree ../agent-profiles))
+ (action (run python3 %{dep:test_tasks_api.py} %{dep:../bin/main.exe})))

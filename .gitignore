@@ -1,4 +1,5 @@
 _build/
+web/.toolchain/
 .monty/*
 !.monty/version
 .pi-subagents/

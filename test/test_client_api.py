@@ -126,7 +126,12 @@ class Handler(socketserver.StreamRequestHandler):
             while True:
                 req = receive(self.rfile)
                 if 'method' not in req:
-                    server.answers.append(req);continue
+                    server.answers.append(req)
+                    if req['id'] in server.ui_requests:
+                        native, turn = server.ui_requests.pop(req['id'])
+                        turn['status'] = 'completed'
+                        server.emit({'method': 'serverRequest/resolved', 'params': {'threadId': native, 'requestId': req['id']}})
+                    continue
                 method = req['method']; params = req.get('params', {})
                 server.calls.append((method, params))
                 if method == 'initialized':
@@ -145,6 +150,13 @@ class Handler(socketserver.StreamRequestHandler):
                     result = {'status': 'ok'}
                 elif method == 'thread/loaded/list':
                     result = {'data': sorted(server.loaded), 'nextCursor': None}
+                elif method == 'thread/list':
+                    assert params['modelProviders'] == [] and 'exec' in params['sourceKinds']
+                    threads = [t for t in server.threads.values() if bool(t.get('archived')) == params['archived']]
+                    offset = int(params.get('cursor') or 0)
+                    limit = params['limit']
+                    result = {'data': threads[offset:offset + limit],
+                              'nextCursor': str(offset + limit) if offset + limit < len(threads) else None}
                 elif method in ('thread/read', 'thread/resume', 'history', 'join'):
                     native = params.get('threadId', params.get('session'))
                     if native not in server.threads:
@@ -163,6 +175,50 @@ class Handler(socketserver.StreamRequestHandler):
                         {'id': 'u-' + str(server.sends), 'type': 'userMessage', 'content': params.get('input', [])},
                         {'id': 'a-' + str(server.sends), 'type': 'agentMessage', 'text': 'hello'}]}
                     server.threads[native]['turns'].append(turn)
+                    prompt = params.get('input', [{}])[0].get('text', '')
+                    if server.ui_scenarios and prompt == 'Fixture: stream':
+                        turn['status'] = 'inProgress'
+                        answer = turn['items'].pop()
+                        answer['text'] = ''
+                        server.emit({'method': 'item/started', 'params': {'threadId': native, 'turnId': turn['id'], 'item': answer}})
+                        def stream(native=native, turn=turn, answer=answer):
+                            for delta in ['Live Codex ', 'answer']:
+                                time.sleep(.6)
+                                answer['text'] += delta
+                                server.emit({'method': 'item/agentMessage/delta', 'params': {
+                                    'threadId': native, 'turnId': turn['id'], 'itemId': answer['id'], 'delta': delta}})
+                            time.sleep(1.5)
+                            turn['items'].append(answer)
+                            turn['status'] = 'completed'
+                            server.emit({'method': 'item/completed', 'params': {'threadId': native, 'turnId': turn['id'], 'item': answer}})
+                            server.emit({'method': 'turn/completed', 'params': {'threadId': native, 'turn': turn}})
+                        threading.Thread(target=stream, daemon=True).start()
+                    if server.ui_scenarios and prompt.startswith('Fixture: '):
+                        turn['status'] = 'inProgress'
+                        title = prompt.removeprefix('Fixture: ')
+                        approval = {'threadId': native, 'turnId': turn['id'], 'itemId': 'request-item', 'startedAtMs': 1}
+                        method = None
+                        if title == 'approval':
+                            method = 'item/commandExecution/requestApproval'
+                            approval.update(command='printf approved', cwd='/fixture/workspace', reason='A harmless fixture command')
+                        elif title == 'files':
+                            method = 'item/fileChange/requestApproval'
+                            server.emit({'method': 'item/started', 'params': {'threadId': native, 'turnId': turn['id'],
+                                'item': {'id': 'request-item', 'type': 'fileChange', 'changes': [
+                                    {'path': '/fixture/workspace/example.txt', 'diff': '+fixture change'}]}}})
+                        elif title == 'questions':
+                            method = 'item/tool/requestUserInput'
+                            approval.update(isBlocking=True, questions=[
+                                {'id': 'style', 'header': 'Style', 'question': 'Choose a style', 'isOther': True,
+                                 'options': [{'label': 'Calm', 'description': 'Use a quiet palette'}, {'label': 'Bold', 'description': 'Use strong colors'}]},
+                                {'id': 'phrase', 'header': 'Phrase', 'question': 'Access phrase', 'isSecret': True}])
+                        elif title == 'permissions':
+                            method = 'item/permissions/requestApproval'
+                            approval.update(cwd='/fixture/workspace', reason='Fetch a fixture resource', permissions={'network': {'enabled': True}})
+                        if method:
+                            approval_id = 1000 + server.sends
+                            server.ui_requests[approval_id] = (native, turn)
+                            server.emit({'id': approval_id, 'method': method, 'params': approval})
                     for item in turn['items']:
                         server.emit({'method': 'item/completed', 'params': {'threadId': native, 'turnId': turn['id'], 'item': item}})
                     result = {'turn': turn}
@@ -171,6 +227,12 @@ class Handler(socketserver.StreamRequestHandler):
                         self.request.shutdown(socket.SHUT_RDWR)
                         return
                 elif method in ('turn/interrupt', 'abort'):
+                    if server.ui_scenarios:
+                        native = params['threadId']
+                        for turn in server.threads[native]['turns']:
+                            if turn['id'] == params['turnId']:
+                                turn['status'] = 'interrupted'
+                                server.emit({'method': 'turn/completed', 'params': {'threadId': native, 'turn': turn}})
                     result = {}
                 else:
                     raise AssertionError(method)
@@ -184,7 +246,9 @@ class Handler(socketserver.StreamRequestHandler):
 
 class Native(socketserver.ThreadingUnixStreamServer):
     daemon_threads = True
+    ui_scenarios = False
     def __init__(self, path):
+        self.ui_requests = {}
         self.clients = set();self.calls = [];self.threads = {};self.loaded = set()
         self.sends = 0;self.answers = [];self.drop_next = False;self.drop_open = False
         super().__init__(str(path), Handler)
@@ -206,10 +270,10 @@ class Service:
                   'MANTLE_CONTEXT':'', **(extra or {})}
         self.log=open(home/'service.log','a+')
         self.process=None;self.start()
-    def start(self):
+    def start(self, port=None):
         state=self.home/'.monty/client-service.json'
         if state.exists():state.unlink()
-        self.process=subprocess.Popen([BIN,'service','serve','--home',str(self.home),'--config',str(self.config)],env=self.env,stdout=self.log,stderr=self.log)
+        self.process=subprocess.Popen([BIN,'service','serve','--home',str(self.home),'--config',str(self.config)]+([] if port is None else ['--port',str(port)]),env=self.env,stdout=self.log,stderr=self.log)
         for _ in range(100):
             if state.exists():break
             if self.process.poll() is not None:
@@ -280,7 +344,7 @@ def autostart_suite(home):
         for key,value in [('harness','codex'),('codex-yolo','true')]:
             subprocess.run([BIN,'settings','set',key,value,'--home',str(home)],env=service.env,check=True,capture_output=True)
         configured=json.loads(metadata.read_text())
-        assert configured['config_path']==str(config) and configured['port']==0
+        assert configured['config_path']==str(config) and configured['port']>0
         run=lifecycle('stop');assert run.returncode==0,run.stderr
         service.process.wait(timeout=5)
         # Dead service metadata is expected after shutdown. Concurrent plain
@@ -290,6 +354,7 @@ def autostart_suite(home):
         assert all(run.returncode==0 for run in runs),[run.stderr for run in runs]
         started=json.loads(metadata.read_text())
         assert started['epoch']!=configured['epoch']
+        assert started['url']==configured['url'] and started['port']==configured['port']
         assert len(server.threads)==4 and log.read_text().count('Monty client API ')==1
         assert all(p['approvalPolicy']=='never' and p['sandbox']=='danger-full-access'
                    for method,p in server.calls if method=='thread/start')
@@ -373,9 +438,12 @@ def fake_suite(home):
         assert params['config']['shell_environment_policy.set']['MONTY_JOB_TITLE']=='isolated'
         assert (params['approvalPolicy'],params['sandbox'])==('on-request','workspace-write')
         assert c.history(cid)['sessions'][0]['records']
-        send={'op':'send','conversation':cid,'revision':c.revision(cid),'text':'one turn'}
+        send={'op':'send','conversation':cid,'revision':0,'selected_session':receipts[0]['selected_session'],'text':'one turn'}
         with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
             list(pool.map(lambda _:c.cmd('send-once',send),range(8)))
+        assert server.sends==1
+        c.cmd('wrong-selected-session',{**send,'selected_session':'another-session'},status='rejected')
+        c.cmd('legacy-stale-send',{k:v for k,v in send.items() if k!='selected_session'},status='rejected')
         assert server.sends==1
         # Replay is bounded independently of connected observers; expired cursors resync.
         cursor=c.req('health')['cursor']
@@ -433,6 +501,14 @@ def fake_suite(home):
         current=until(lambda:c.req('conversations/'+cid),lambda x:bool(x['sessions'][0].get('pending')))
         pending=current['sessions'][0]['pending'][0]
         answer={'op':'respond','conversation':cid,'revision':current['revision'],'pending_id':pending['id'],'pending_revision':1,'response':{'decision':'decline'}}
+        c.cmd('invalid-approval', {**answer, 'response': {'decision': 'allow-everything'}}, status='rejected')
+        assert c.req('conversations/' + cid)['sessions'][0]['pending'][0]['state'] == 'pending'
+        assert server.answers == [], 'invalid response must not reserve or answer the native request'
+        # A transcript refresh changes the conversation revision, not the exact
+        # pending prompt that the user has already reviewed.
+        server.emit({'method':'item/completed','params':{'threadId':native,'turnId':'turn-1',
+            'item':{'id':'while-pending','type':'agentMessage','text':'waiting for approval'}}})
+        until(lambda:c.revision(cid),lambda revision:revision>current['revision'])
         c.req('commands/answer-a',answer);c.req('commands/answer-b',answer)
         until(lambda:len(server.answers),lambda n:n==1)
         until(lambda:c.req('commands/answer-b'),lambda r:r['status']=='rejected')

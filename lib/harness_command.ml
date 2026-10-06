@@ -57,7 +57,7 @@ let codex_hook_args ~home options =
   " --enable " ^ Shell.quote "hooks" ^ " --dangerously-bypass-hook-trust -c "
   ^ Shell.quote hook_config
 
-let build_command_with_transport ~managed ~mcp ~codex_hook ~codex_mode ~codex_trusted_paths ~options ~home
+let build_command_with_transport ~pin_policy ~managed ~mcp ~codex_hook ~codex_mode ~codex_trusted_paths ~options ~home
     ~instructions ~job ~context =
   match options.harness with
   | Harness.Pi ->
@@ -77,7 +77,11 @@ let build_command_with_transport ~managed ~mcp ~codex_hook ~codex_mode ~codex_tr
       (if mcp then Mcp_config.pi_setup_command ~home ~monty_command:options.monty_command ^ " && " else "") ^ Printf.sprintf "exec %s --name %s%s%s %s %s" options.command name fork
         instruction_arg context_arg prompt
   | Harness.Codex when codex_hook && managed ->
-      let base = "exec " ^ Shell.quote options.monty_command ^ " terminal --home " ^ Shell.quote home
+      (* The terminal wrapper must keep this launch's choice even if its login
+         shell or saved settings enable bypass later. Explicit --codex-yolo
+         still overrides this safe default. *)
+      let base = (if pin_policy then "exec env MONTY_CODEX_YOLO=false " else "exec ")
+        ^ Shell.quote options.monty_command ^ " terminal --home " ^ Shell.quote home
         ^ " --worker --codex-command " ^ Shell.quote options.command
         ^ " --mode " ^ codex_mode_name codex_mode
         ^ (if options.codex_yolo then " --codex-yolo" else "") in
@@ -118,7 +122,7 @@ let build_command_with_transport ~managed ~mcp ~codex_hook ~codex_mode ~codex_tr
           Printf.sprintf "%s resume -C .%s -- %s" base add_dirs
             (Shell.quote session_id))
 
-let build_command = build_command_with_transport ~managed:true
+let build_command = build_command_with_transport ~pin_policy:true ~managed:true
 
 let rehydrate_lines ~monty_command ~wt_command ~branch ~source_repo =
   [ "MONTY_JOB_WORKTREE=$("
@@ -180,14 +184,14 @@ let profile_environment_names =
   [ "PI_CODING_AGENT_DIR"; "CODEX_HOME"; "MANTLE_CONTEXT"; "_MANTLE_SELECTED_HOME";
     "_MANTLE_PREV_STATE"; "_MANTLE_PREV_HOME" ]
 
-let launch_script_contents ?(managed = true) ?(mcp = true) ?environment_path
+let launch_script_contents ?(pin_policy = true) ?(managed = true) ?(mcp = true) ?environment_path
     ?(profile_environment =
       List.map (fun name -> (name, Sys.getenv_opt name)) profile_environment_names)
     ~codex_hook ~codex_mode ~codex_trusted_paths ~options
     ~job ~id ~branch ~source_repo ~initial_workdir ~home ~context ~instructions
     ~worker_dir ~worktree_mode ~wt_command () =
   let command =
-    build_command_with_transport ~managed ~mcp ~codex_hook ~codex_mode ~codex_trusted_paths ~options ~home
+    build_command_with_transport ~pin_policy ~managed ~mcp ~codex_hook ~codex_mode ~codex_trusted_paths ~options ~home
       ~instructions:(Some instructions) ~job ~context
   in
   let setup_lines =

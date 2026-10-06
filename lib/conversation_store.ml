@@ -233,7 +233,8 @@ let reserve home id request = locked home (fun () ->
     if s "fingerprint" r <> fingerprint then fail 409 "request ID already used for a different command";
     false,r)
   else let r = obj ["id",string id;"fingerprint",string fingerprint;"status",string "accepted";
-      "created_at",now ();"request",redact request] in write path r;true,r)
+      "created_at",now ();"request",redact (if field "op" request=string "respond" then
+        put "response" (string "[response omitted]") request else request)] in write path r;true,r)
 let finish home id status result = locked home (fun () ->
   let r = receipt home id |> puts ["status",string status;"result",redact result;"updated_at",now ()] in
   write (receipt_path home id) r; r)

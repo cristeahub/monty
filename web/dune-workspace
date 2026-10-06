@@ -1,0 +1,8 @@
+(lang dune 3.20)
+(repository (name bonsai-release)
+ (url git+https://github.com/ocaml/opam-repository.git#7f48d41d8d3fa64a65d38d25f560c26b4c25f536))
+(repository (name compiler)
+ (url git+https://github.com/ocaml-dune/opam-repository-relocatable.git#d64df82c7e16de819a770cabf4066a06243ed80b))
+(repository (name overlays)
+ (url git+https://github.com/ocaml-dune/opam-overlays.git#99fc2e18c45b4761ed5f6d282910c03c97e32bce))
+(lock_dir (repositories overlays compiler bonsai-release))

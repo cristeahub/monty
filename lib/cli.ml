@@ -1505,6 +1505,7 @@ let main_cmd =
     (Cmdliner.Cmd.info "monty" ~version:"dev" ~doc ~man)
     ([
       Client_cli.command ~home_arg;
+      Client_cli.web ~home_arg;
       Client_cli.terminal ~home_arg;
       start_cmd;
       continue_cmd;

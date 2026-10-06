@@ -206,6 +206,10 @@ let set_local_task_status ~home id status =
       match List.find_opt (fun task -> String.equal task.id id) tasks with
       | None -> Error (Printf.sprintf "no local Monty task matching %S" id)
       | Some task when String.equal (String.lowercase_ascii task.status) status -> Ok ()
+      | Some task when task.worker_id <> None || task.worker_key <> None ->
+          Error (Printf.sprintf
+            "local Monty task %s owns a worker; use monty done local:%s so its worker and task complete together"
+            task.id task.id)
       | Some _ ->
           let now = now_utc () in
           let tasks =

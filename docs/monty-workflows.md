@@ -365,6 +365,129 @@ directory (`PI_CODING_AGENT_DIR`, otherwise `~/.pi/agent`). Other entries are
 preserved. An existing conflicting or disabled Monty entry is reported rather
 than silently overwritten. See `docs/mcp.md` for connection and recovery steps.
 
+## Web client
+
+The web client is a local OCaml/Bonsai application, served by the existing client
+service. Configure that service first as described below, then build the client:
+
+```sh
+python3 web/build.py
+monty web --assets web/_build/default
+```
+
+Open the printed loopback URL and paste the pairing code. Codes last five minutes
+and work once. Browser sessions last twelve hours; signing out or restarting the
+service invalidates them. The service token is never embedded in web assets or
+URLs. `monty web --config /absolute/profiles.json --assets web/_build/default`
+can start the service when it is not already running.
+
+Bonsai v0.17 uses OCaml 5.1, js_of_ocaml 5.6 and Dune 3.23. The frontend has its own
+`dune-project` and committed lock; Monty retains its OCaml 5.2 / Dune 3.24 build.
+The helper downloads a checksum-verified Dune 3.23 release and bootstraps it once
+using the development environment's OCaml compiler. It stores this tool only in
+`web/.toolchain`. Use `python3 web/build.py pkg lock` to refresh the frontend lock
+against the repositories pinned in `web/dune-workspace`.
+
+The browser API adds these endpoints to the service:
+
+- `POST /v1/browser/pair`: service bearer credential required. Optional `assets`
+  selects a local directory with `index.html`, `style.css` and `main.bc.js`.
+- `POST /v1/browser/session`: exchange a `code` for an HttpOnly SameSite cookie.
+- `POST /v1/browser/logout`: revoke the current browser session.
+- `GET /v1/projects`: registered projects for task creation.
+- `GET /v1/tasks/KEY`: exact task details, worker identity and a revision for
+  actions. Unlinked diagnostic worker rows are readable and require explicit
+  reconciliation before management.
+- `GET /v1/discovery?profile=ID`: page native account conversations. Follow
+  `next_cursor` using `cursor`; Codex also accepts `archived=true` and `search`.
+  Pi reports unreadable or skipped sources in `errors` with partial coverage.
+- `GET /v1/discovery/history?profile=ID&native_id=ID` reads Codex history;
+  use `session_file` instead of `native_id` for Pi. Discovery and history viewing
+  do not import, attach, resume or create tasks. Explicit import uses the existing
+  command-receipt API; native runtime ownership rules still apply afterward.
+
+Browser mutations require the exact service Origin. The API retains its exact
+loopback Host restriction. Cookie sessions cannot pair another browser or stop
+the service. Static serving is restricted to the three selected build files.
+
+Task actions use `POST /v1/commands/ID` and its existing durable receipts:
+
+- `task_create`: `project`, `title`, optional `notes`. Creation saves a task;
+  it does not start a worker.
+- `task_preflight`: canonical `task`, its `revision`, account `profile`, and
+  `action` (`launch` or `resume`). Launch also requires standalone Markdown
+  `context`. Monty adds the title, task identity and ordered workspace map, saves
+  the plan in its run directory, and runs doctor plus the complete dry-run.
+- `task_apply`: successful `preflight` command ID and `confirm:true`. Monty checks
+  the task, account, role, settings and context again, repeats the dry-run, and
+  requests Ghostty once. Resume uses the exact saved worker and original native
+  account. A consumed plan cannot be submitted again under a different ID.
+- `task_complete`: canonical `task`, its `revision` and `confirm:true`. Linked
+  workers go through `monty done`; dirty worktrees are refused. There is no
+  force-discard web action.
+
+Task process results retain `exit_code`, `stdout` and `stderr`, including partial
+failure and recovery commands. A finished command receipt means the adapter
+finished: inspect the process result. A launch request does not establish that
+implementation succeeded or that the task is complete. Web worker launches use
+host worktrees and Ghostty; container workers keep their existing headless flow.
+Codex web launches keep approvals and sandboxing enabled even when saved settings
+or the terminal's login environment enable bypass.
+
+Chats show pending Codex approvals, questions and permission requests, and Pi
+confirmation, selection and text dialogs. Answers preserve the pending request
+identity and revision; stale or duplicate responses are refused before dispatch.
+Question answers are omitted from command receipts. Codex permissions granted in
+the browser last for the current turn. MCP elicitation forms can be declined;
+accepting them requires a native client. Unsupported requests remain visible.
+
+Task and chat links preserve the selected item across reloads and browser Back
+navigation. Tasks retain native order and every workspace branch when filtered
+by project, status or search. Native histories are browsed by account; Codex's
+archived histories have a separate filter. Listings show page coverage and source
+errors. Viewing any of these pages remains read-only.
+
+Live output uses the service's event stream. After reconnecting, the browser
+reloads saved history and checks pending receipts; it never repeats a write.
+Drafts, task contexts and pending receipt identities are saved in browser local
+storage, scoped to the Monty home. Answer fields, pairing codes and credentials
+are not saved there. Uncertain or missing receipts require inspecting the outcome
+before another action. Draft edits are saved as they are entered; a command is
+not submitted if its receipt ID cannot be saved. Storage failures are shown explicitly. Signing out keeps
+drafts; clearing this origin's browser data removes them. Restarting the service
+requires a new pairing code and does not automatically resume detached Pi sessions.
+
+Browser regression checks use the checkout binary, a temporary Monty home and
+fake native tools. They never connect to a personal account or launch real workers.
+After building Monty and the client, provision a disposable test browser:
+
+```sh
+monty_browser_tools=$(mktemp -d)
+npm install --prefix "$monty_browser_tools" --no-audit --no-fund playwright
+PLAYWRIGHT_BROWSERS_PATH="$monty_browser_tools/browsers" \
+  "$monty_browser_tools/node_modules/.bin/playwright" install chromium --only-shell
+PLAYWRIGHT_BROWSERS_PATH="$monty_browser_tools/browsers" \
+  python3 test/test_web_ui.py _build/default/bin/main.exe web/_build/default \
+  "$monty_browser_tools/node_modules/playwright" .monty/runs/client-v1/preview
+PLAYWRIGHT_BROWSERS_PATH="$monty_browser_tools/browsers" \
+  "$monty_browser_tools/node_modules/.bin/playwright" install webkit
+MONTY_TEST_BROWSER=webkit PLAYWRIGHT_BROWSERS_PATH="$monty_browser_tools/browsers" \
+  python3 test/test_web_ui.py _build/default/bin/main.exe web/_build/default \
+  "$monty_browser_tools/node_modules/playwright" .monty/runs/client-v1/preview-webkit
+```
+
+The test closes its browser and service and removes the temporary home. Chromium
+screenshots remain in the indicated run directory for review. WebKit runs the same
+interaction checks without screenshots: Playwright's WebKit screenshot helper
+injects an inline stylesheet blocked by the production CSP. The regular `dune runtest` also
+covers browser authentication, native discovery and the task lifecycle without a
+browser installation. The compiled browser check additionally covers both runners'
+interruptions, approval/question replies, a Pi dialog that holds its prompt open,
+task controls, live output, lost responses, offline/reload recovery, restart,
+native paging/archives, navigation, secret-answer redaction and a narrow viewport.
+Run both Chromium and WebKit (Safari's engine). A large conversation manifest
+checks that JSON parsing leaves the dashboard responsive.
+
 ## Client service
 
 The version 1 client API coordinates conversations independently of tasks. It
@@ -420,7 +543,7 @@ monty service start --home /absolute/monty-home --config /absolute/profiles.json
 ```
 
 Run this once to select the trusted configuration and start in the background. Monty remembers its absolute
-path and requested port in `.monty/client-service.json`. Later Codex launches,
+path and bound port in `.monty/client-service.json`. Later Codex launches,
 including plain `monty`, automatically start the service in the background if
 needed and wait for authenticated health before opening the terminal. A healthy
 service is reused; concurrent launches share the existing service lock. Logs go
@@ -528,8 +651,8 @@ a new ID. Repeating an identical accepted command uses its original ID.
 | `import` | `profile`, `context`, optional `task_keys`; Codex uses `native_id`, Pi uses absolute `session_file`. Pi continues mirroring the selected file without starting a runtime |
 | `attach` | Codex only: same fields; verifies the thread is loaded in the selected server, rejoins it and mirrors live activity |
 | `resume` | `conversation`, `revision`, `detached:true`; explicit operator confirmation that prior runtimes were detached, with an idle source check |
-| `send` | `conversation`, `revision`, `text` (at most 8192 bytes); Pi additionally accepts `delivery:"prompt"`, `"steer"` or `"follow_up"` |
-| `interrupt` | `conversation`, `revision`; Codex requires exact `turn_id`; Pi clears queued inputs and aborts active work |
+| `send` | `conversation`, `revision` or exact `selected_session`, `text` (at most 8192 bytes); Pi additionally accepts `delivery:"prompt"`, `"steer"` or `"follow_up"` |
+| `interrupt` | `conversation`, `revision` or exact `selected_session`; Codex requires exact `turn_id`; Pi clears queued inputs and aborts active work |
 | `set_model` | Pi only: `conversation`, `revision`, `provider`, `model`; requires idle state and no pending dialogs |
 | `detach` | Pi only: `conversation`, `revision`; closes an idle owned RPC runtime, retains file mirroring |
 | `respond` | `conversation`, `revision`, `pending_id`, `pending_revision`, native `response` object; reserves exactly one response on that connection |
@@ -545,6 +668,13 @@ Monty does not translate an approval into arbitrary command execution. Pending
 requests identify the exact native connection generation and revision. A second
 or stale response conflicts. A lost response is never retried against a newer
 connection's reused numeric request ID.
+
+The browser's sends and interruptions fence the selected native session, so
+unrelated transcript updates do not invalidate the action. A changed session is
+rejected. Clients omitting `selected_session` retain the conversation revision
+check. `/health` includes a stable, opaque `storage_scope` for local browser state;
+the service epoch still changes at every restart. Service startup reuses its last
+bound port unless explicitly overridden, keeping browser links and drafts reachable.
 
 Receipts distinguish `accepted`, `running`, `finished`, `rejected` and
 `outcome_unknown`. `finished` means the command/RPC finished, not that the model
