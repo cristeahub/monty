@@ -405,6 +405,17 @@ def autostart_suite(home):
         run=launch();assert run.returncode==0,run.stderr
         assert json.loads(metadata.read_text())['epoch']!=started['epoch']
         assert log.read_text().count('Monty client API ')==2
+        lifecycle('stop')
+        # Cohttp wraps an ECONNRESET while checking stale service metadata.
+        with socket.socket() as reset:
+            reset.bind(('127.0.0.1',0));reset.listen()
+            saved=json.loads(metadata.read_text());saved['port']=0
+            saved['url']='http://127.0.0.1:'+str(reset.getsockname()[1]);metadata.write_text(json.dumps(saved))
+            def reset_health():
+                connection,_=reset.accept()
+                connection.setsockopt(socket.SOL_SOCKET,socket.SO_LINGER,struct.pack('ii',1,0));connection.close()
+            threading.Thread(target=reset_health,daemon=True).start()
+            run=launch();assert run.returncode==0,run.stderr
         print('client service start/stop, automatic startup, reuse, concurrency and recovery passed')
     finally:
         lifecycle('stop',target=fresh)
@@ -732,6 +743,51 @@ def recovery_suite(home):
     finally:
         service.close();source.close();dest.close()
 
+def warm_archive_suite(home):
+    repo=home/'repo';repo.mkdir();subprocess.run(['git','init','-q',str(repo)],check=True)
+    native=home/'codex';native.mkdir();server=Native(home/'native.sock')
+    codex=home/'fake-codex'
+    codex.write_text('#!/usr/bin/env python3\nimport json,sys\n'
+      +'if sys.argv[1:4]==["app-server","daemon","start"]:print('
+      +repr(json.dumps({'socketPath':str(home/'native.sock')}))+')\n'
+      +'else:assert sys.argv[1:3]==["resume","--remote"]\n')
+    codex.chmod(0o700)
+    config=home/'profiles.json';config.write_text(json.dumps({'profiles':[
+        {'id':'default','harness':'codex','command':str(codex),'codex_home':str(native),'roots':[str(repo)]}]}))
+    service=Service(home,config)
+    try:
+        result=service.client.cmd('start',{'op':'start','profile':'default','context':{'workspaces':[str(repo)]}})
+        cid=result['id'];sess=result['sessions'][0];service.stop()
+        path=home/'.monty/conversations'/cid/'conversation.json';manifest=json.loads(path.read_text())
+        sess=manifest['sessions'][0];directory=path.parent/'sessions'/sess['id']/'batches'
+        # Old raw payloads must not be reparsed on every poll or notification.
+        batch=json.dumps({'schema':1,'normalizer':1,'raw':{'padding':'x'*1024*1024},'items':[]})
+        for index in range(192):
+            bid='archive-'+str(index);(directory/(bid+'.json')).write_text(batch);sess['batches'].append(bid)
+        sess['checkpoint']=len(sess['batches']);path.write_text(json.dumps(manifest))
+        item={'id':'message','type':'agentMessage','text':'first'}
+        server.threads[sess['native_id']]['turns']=[{'id':'turn-1','status':'completed','items':[item]}]
+        start=time.monotonic();service.start();c=service.client;c.cmd('cold',{'op':'sync','conversation':cid})
+        cold=time.monotonic()-start;warm=[]
+        for index in range(3):
+            start=time.monotonic();c.cmd('warm-'+str(index),{'op':'sync','conversation':cid})
+            run=subprocess.run([BIN,'terminal','--home',str(home),'--codex-command',str(codex)],
+                               cwd=repo,env=service.env,capture_output=True,text=True,timeout=15)
+            assert run.returncode==0,run.stderr
+            warm.append(time.monotonic()-start)
+        assert max(warm)<max(.7,cold/3), (cold,warm)
+        def latest_revision():
+            current=json.loads(path.read_text())['sessions'][0]
+            return json.loads((directory/(current['batches'][-1]+'.json')).read_text())['items'][0]['revision']
+        assert latest_revision()==1
+        item['text']='second';c.cmd('changed',{'op':'sync','conversation':cid});assert latest_revision()==2
+        service.stop();item['text']='third';service.start();c=service.client
+        c.cmd('restarted',{'op':'sync','conversation':cid});assert latest_revision()==3
+        print('large archive warm launches and revision recovery passed: cold %.3fs, warm %s' %
+              (cold,', '.join('%.3fs' % duration for duration in warm)))
+    finally:
+        service.close();server.close()
+
 def terminal_profiles_suite(home):
     repo=home/'repo';repo.mkdir();subprocess.run(['git','init','-q',str(repo)],check=True)
     personal=home/'codex';personal.mkdir()
@@ -875,6 +931,8 @@ class Model(http.server.BaseHTTPRequestHandler):
 
 def real_spike(home):
     repo=home/'repo';repo.mkdir();subprocess.run(['git','init','-q',str(repo)],check=True)
+    skill=repo/'.agents/skills/visible-fixture';skill.mkdir(parents=True)
+    (skill/'SKILL.md').write_text('---\nname: visible-fixture\ndescription: Isolated skill visibility check.\n---\nOnly act if requested.\n')
     native=home/'codex';native.mkdir()
     model=http.server.ThreadingHTTPServer(('127.0.0.1',0),Model)
     model.started=threading.Event();model.release=threading.Event()
@@ -911,6 +969,13 @@ def real_spike(home):
         offset=sum(map(len,terminal_output))
         os.write(master,b'i')
         until(lambda:b''.join(terminal_output)[offset:],lambda output:b'Vim: Insert' in output)
+        os.write(master,b'/skills')
+        until(lambda:b''.join(terminal_output)[offset:],lambda output:b'/skills' in output)
+        time.sleep(.2);os.write(master,b'\r')
+        until(lambda:b''.join(terminal_output)[offset:],lambda output:b'Choose an action' in output)
+        os.write(master,b'\r')
+        until(lambda:b''.join(terminal_output)[offset:],lambda output:b'visible-fixture' in output)
+        os.write(master,b'\x1b');time.sleep(.2);os.write(master,b'\x15')
         os.write(master,b'Hi')
         until(lambda:b''.join(terminal_output)[offset:],lambda output:b'Hi' in output)
         os.write(master,b'\r')
@@ -962,3 +1027,5 @@ if __name__=='__main__':
                 autostart_suite(Path(startup).resolve())
             with tempfile.TemporaryDirectory(prefix='mcap-',dir='/tmp') as profiles:
                 terminal_profiles_suite(Path(profiles).resolve())
+            with tempfile.TemporaryDirectory(prefix='mcaw-',dir='/tmp') as warm:
+                warm_archive_suite(Path(warm).resolve())

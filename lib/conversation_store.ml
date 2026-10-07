@@ -165,9 +165,29 @@ let effective_keys sess snapshot incoming =
     | Some item -> walk (field "parent" item) (string(key item)::acc)) in
   walk (field "leafId" snapshot) []
 let fault name = if Sys.getenv_opt "MONTY_FAULT_INJECT" = Some name then fail 500 ("fault injected: " ^ name)
+(* Batches are immutable once referenced by the manifest. Keep only the latest
+   digest/revision in memory, and read appended batches once, including after a
+   failed write or an externally replaced manifest.
+   ponytail: retain indexes until purge/restart; evict idle sessions if catalog
+   size makes these compact indexes expensive. *)
+let revision_cache : (string * string * string,
+  Yojson.Safe.t list * (string,Yojson.Safe.t) Hashtbl.t) Hashtbl.t = Hashtbl.create 32
+let previous_revisions home cid sess =
+  let identity=home,cid,s "id" sess in
+  let ids=xs "batches" sess in
+  let cached,previous=match Hashtbl.find_opt revision_cache identity with
+    | Some (cached,previous) when take (List.length cached) ids=cached -> cached,previous
+    | _ -> [],Hashtbl.create 64 in
+  let count=List.length cached in
+  ids |> List.iteri (fun index bid -> if index>=count then
+    read (batch_path home cid (s "id" sess) (str bid)) |> array "items" |> List.iter (fun item ->
+      Hashtbl.replace previous (key item)
+        (obj ["digest",field "digest" item;"revision",field "revision" item])));
+  Hashtbl.replace revision_cache identity (ids,previous);
+  previous
 let revisions home cid sess incoming =
-  let previous = Hashtbl.create 64 in
-  items home cid sess |> List.iter (fun item -> Hashtbl.replace previous (key item) item);
+  if incoming=[] then [] else
+  let previous = previous_revisions home cid sess in
   let roots = array "workspaces" (field "context" sess) |> List.map str in
   incoming |> List.filter_map (fun item ->
     if field "source_id" item = `Null then fail 502 "native item has no stable identity";
@@ -258,6 +278,7 @@ let purge home cid = locked home (fun () ->
   (* Publish all source tombstones before deleting any archive data. Retry is safe. *)
   xs "sessions" c |> List.iter (fun sess -> write (tombstone home ~harness:(s "harness" sess) ~scope:(s "scope" sess) (s "native_id" sess))
     (obj ["conversation",string cid;"purged_at",now ()]));
+  xs "sessions" c |> List.iter (fun sess -> Hashtbl.remove revision_cache (home,cid,s "id" sess));
   let receipts=file home ["conversation-commands"] in
   if Sys.file_exists receipts then Sys.readdir receipts |> Array.iter (fun name ->
     let path=safe (Filename.concat receipts name) in let r=read path in

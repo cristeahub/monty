@@ -18,7 +18,10 @@ let request ~home meth path body =
     let code=Cohttp.Code.code_of_status (Cohttp.Response.status response) in
     if code>=400 then fail code (Yojson.Safe.to_string json);json)
 let health ~home = Lwt.catch (fun () ->
-    Lwt_unix.with_timeout 1. (fun () -> request ~home `GET "/v1/health" `Null) >|= Option.some)
+    Cohttp_lwt_unix.Private.IO.catch (fun () ->
+      Lwt_unix.with_timeout 1. (fun () -> request ~home `GET "/v1/health" `Null)) >>= function
+    | Ok result -> Lwt.return_some result
+    | Error error -> Lwt.fail error)
     (function
       | Failure(503,_) | Lwt_unix.Timeout
       | Unix.Unix_error((Unix.ECONNREFUSED|Unix.ECONNRESET|Unix.ETIMEDOUT),_,_) -> Lwt.return_none
