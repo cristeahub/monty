@@ -120,6 +120,7 @@ let launch ~home ~profile ~codex_command ~codex_yolo ~mode ~session_id ~prompt ~
           | [] -> fail 409 ("No Codex service profile matches CODEX_HOME " ^ native_home ^
               "; add this account home to the service's profile configuration, then run monty service stop and monty service start")
           | _ -> fail 409 "Multiple Codex service profiles match CODEX_HOME; select one with --profile or MONTY_API_PROFILE") in
+    get(Skill.ensure_at ~home ~harness:Harness.Codex ~directory:native_home ~monty_command:(Unix.realpath Sys.executable_name));
     let profile=s "id" p in
     (if mode="fresh" then
       command ~home id (obj ["op",string "start";"profile",string profile;"context",context;"codex_yolo",`Bool codex_yolo;
@@ -153,6 +154,7 @@ let launch ~home ~profile ~codex_command ~codex_yolo ~mode ~session_id ~prompt ~
     (* Remote Codex also reads the account defaults when opening another session.
        Keep Vim enabled there as well as in this terminal's CLI overrides. *)
     Codex_rpc.connect (String.sub endpoint 7 (String.length endpoint-7)) >>= fun rpc ->
+    Codex_rpc.call rpc "skills/list" (obj ["cwds",`List workspaces;"forceReload",`Bool true]) >>= fun _ ->
     Codex_rpc.call rpc "config/value/write" (obj ["keyPath",string "tui.vim_mode_default";
       "value",`Bool true;"mergeStrategy",string "replace"]) >>= fun _ ->
     Lwt_io.close rpc.oc >>= fun () ->

@@ -245,6 +245,14 @@ case "$1" in
             cat > "$container_dir/secrets/pi/auth.json"
             shasum -a 256 "$container_dir/secrets/pi/auth.json" | awk '{print $1}' >> "$state/auth-hashes"
             ;;
+          *'for dir in /monty/home '*)
+            translated=$(printf '%s' "$script" | sed "s#/monty/home#$volume_dir/home#g")
+            sh -c "$translated"
+            ;;
+          *'tmp=$(mktemp "$1.XXXXXX")'*)
+            target="$volume_dir/${2#/monty/}"
+            sh -c "$script" "$1" "$target" "$3" "$4"
+            ;;
           *'cat > '*'/monty/context/task.md'*)
             mkdir -p "$volume_dir/context"; cat > "$volume_dir/context/task.md"
             ;;

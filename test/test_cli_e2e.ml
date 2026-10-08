@@ -2229,7 +2229,7 @@ let test_codex_session_capture_and_resume_modes () =
           (fun () ->
             Unix.putenv "PATH"
               (Filename.concat root "fake-bin" ^ ":/usr/bin:/bin");
-            Harness_command.launch_script_contents ~mcp:false ~profile_environment:[] ~codex_hook:false
+            Harness_command.launch_script_contents ~legacy_mcp:false ~skills:false ~profile_environment:[] ~codex_hook:false
               ~codex_mode:Codex_session.Fresh ~codex_trusted_paths:[]
               ~options:harness_options ~job:legacy_job ~id:legacy_id
               ~branch:legacy_branch ~source_repo:repo ~initial_workdir:repo ~home
@@ -5103,7 +5103,25 @@ printf '%s %s\n' "$phase" "$worktree" >> |} ^ Shell.quote log ^ "\n");
       Shell.write_file osascript "#!/bin/sh\nexit 0\n";
       Shell.chmod_executable osascript;
       ignore (ok [ "resume"; "--archived"; "simple-pi"; "--harness"; "pi" ]);
-      assert_pinned (worker_dir "simple-pi"))
+      assert_pinned (worker_dir "simple-pi");
+      (* An MCP-era Pi launch script is accepted only as a complete known
+         template, then replaced before any terminal request. *)
+      let script = Yojson.Safe.Util.(Yojson.Safe.from_file (job_file "simple-pi")
+        |> member "launch_script" |> to_string) in
+      let contents = read_file script in
+      let setup = Skill.setup_command ~home ~harness:Harness.Pi ~monty_command:executable in
+      let legacy = Shell.quote executable ^ " mcp setup-pi --home " ^ Shell.quote home in
+      let replace_setup replacement = contents |> String.split_on_char '\n' |> List.map (fun line ->
+          if String.starts_with ~prefix:setup line then
+            replacement ^ String.sub line (String.length setup) (String.length line - String.length setup)
+          else line) |> String.concat "\n" in
+      Shell.write_file script (replace_setup legacy);
+      ignore (ok [ "resume"; "simple-pi"; "--harness"; "pi" ]);
+      require_contains "resume installs CLI skill" (read_file script) setup;
+      if string_contains (read_file script) "mcp setup-pi" then failwith "resume retained MCP setup";
+      Shell.write_file script (replace_setup (legacy ^ "; touch /tmp/forged-monty-skill"));
+      let rejected = cli [ "resume"; "simple-pi"; "--harness"; "pi" ] in
+      require_code 1 rejected)
 
 let test_standalone_background_harnesses () =
   with_temp_root "background-harnesses" (fun root ->
@@ -5156,7 +5174,7 @@ test -z "${MONTY_WORKSPACE_3:-}"
 case "$prompt" in
   *'Independently review Monty worker'*)
     case "$prompt" in *'Review correctness.'*) phase=correctness ;; *) phase=quality ;; esac
-    test "$tools" = read,grep,find,ls,mcp__monty__monty_help,mcp__monty__monty_command_help
+    test "$tools" = read,grep,find,ls
     case "$prompt" in *'HANDOFF-correctness'*|*'HANDOFF-quality'*) exit 82 ;; esac
     touch "$root/$MONTY_JOB_ID-$phase"
     count=0
@@ -5189,12 +5207,15 @@ case "$prompt" in
 esac
 printf '%s %s %s\n' "$MONTY_JOB_ID" "$phase" "$args" >> "$root/phases.log"
 if [ -n "$output" ]; then
+  test -f "$CODEX_HOME/skills/monty/SKILL.md"
   printf 'HANDOFF-%s\n' "$phase" > "$output"
   printf '%s\n' '{"type":"turn.completed"}'
 else
+  test -f "$PI_CODING_AGENT_DIR/skills/monty/SKILL.md"
+  test -f "$PI_CODING_AGENT_DIR/skills/monty/references/workflows.md"
   case "$args" in *'--print --mode json --no-session --tools '*) ;; *) exit 87 ;; esac
   if [ "$phase" != correctness ] && [ "$phase" != quality ]; then
-    test "$tools" = read,bash,edit,write,grep,find,ls,mcp__monty__monty_help,mcp__monty__monty_command_help
+    test "$tools" = read,bash,edit,write,grep,find,ls
   fi
   reason=stop
   if [ "${FAIL_PI:-}" = yes ]; then reason=error; fi
@@ -6228,6 +6249,8 @@ let test_containerized_codex_worker_lifecycle () =
              "cat >/dev/null";
              "test -n \"$output\"";
              "test -n \"$worktree\"";
+             "test -f \"$HOME/.agents/skills/monty/SKILL.md\"";
+             "test -f \"$HOME/.agents/skills/monty/references/workflows.md\"";
              "test \"${MONTY_TEST_NESTED_AGENT:-}\" != true";
              "if [ -n \"${MONTY_TEST_CODEX_BLOCK:-}\" ]; then";
              "  : > \"$MONTY_TEST_CODEX_BLOCK.started\"";
@@ -6746,6 +6769,8 @@ let test_containerized_pi_worker_lifecycle () =
         [ "#!/bin/sh"; "set -eu";
           "printf '%s\\n' \"$0 $*\" >> " ^ Shell.quote log;
           "test -f tracked.txt";
+          "test -f \"$HOME/.agents/skills/monty/SKILL.md\"";
+          "test -f \"$HOME/.agents/skills/monty/references/workflows.md\"";
           "test -f \"$PI_CODING_AGENT_DIR/auth.json\"";
           "case \"$PI_CODING_AGENT_DIR\" in */secrets/pi) ;; *) exit 91;; esac";
           "case \"$*\" in *'--provider openai-codex --model fake'*) ;; *) exit 92;; esac";

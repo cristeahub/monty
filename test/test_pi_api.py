@@ -96,6 +96,9 @@ def suite(home):
         with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
             chats=list(pool.map(lambda _:c.cmd('rpc-start',start),range(4)))
         chat=chats[0];cid=chat['id'];sess=chat['sessions'][0]
+        assert (pi/'skills/monty/SKILL.md').is_file()
+        assert (pi/'skills/monty/references/workflows.md').is_file()
+        assert not (second/'skills/monty').exists()
         assert len({chat['id'] for chat in chats})==1
         def calls():return [json.loads(line) for line in (pi/'calls.jsonl').read_text().splitlines()]
         assert len([x for x in calls() if 'start' in x])==1

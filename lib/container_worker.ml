@@ -706,6 +706,22 @@ let write_guest_file value path contents =
     contents
   |> Result.map (fun _ -> ())
 
+let install_guest_skill value =
+  let root = "/monty/home/.agents/skills/monty" in
+  let* _ = run ["exec"; "--user"; "monty"; value.container; "sh"; "-c";
+    "set -eu; for dir in /monty/home /monty/home/.agents /monty/home/.agents/skills /monty/home/.agents/skills/monty /monty/home/.agents/skills/monty/references; do test ! -L \"$dir\"; mkdir -p \"$dir\"; done"] in
+  List.fold_left (fun result (name, marker, contents) ->
+    let* () = result in
+    let path = Filename.concat root name in
+    let script =
+      "set -eu; umask 077; test ! -L \"$1\"; "
+      ^ "if [ -e \"$1\" ]; then test -f \"$1\"; test \"$(head -c \"$3\" \"$1\")\" = \"$2\"; fi; "
+      ^ "tmp=$(mktemp \"$1.XXXXXX\"); trap 'rm -f \"$tmp\"' EXIT; cat > \"$tmp\"; "
+      ^ "if ! cmp -s \"$tmp\" \"$1\"; then mv \"$tmp\" \"$1\"; fi" in
+    run_stdin ["exec"; "--interactive"; "--user"; "monty"; value.container;
+      "sh"; "-c"; script; "monty-skill"; path; marker; string_of_int (String.length marker)] contents
+    |> Result.map (fun _ -> ())) (Ok ()) Skill.files
+
 let guest_instructions ~id ~title =
   String.concat "\n"
     [ "# Monty container worker instructions"; "";
@@ -714,6 +730,8 @@ let guest_instructions ~id ~title =
       "The authoritative workspace map is /monty/context/job.json.";
       "MONTY_JOB_FILE=/monty/context/job.json";
       "The task context is /monty/context/task.md.";
+      "Monty's CLI skill and workflow reference are in /monty/home/.agents/skills/monty/.";
+      "Read the reference with file tools; the host Monty CLI is unavailable here.";
       "Modify only the worktree recorded in that workspace map.";
       "Do not write Monty host state, stage or commit, push, or start another agent.";
       "Return discoveries, validation, risks, and the final handoff in your response."; "" ]
@@ -820,6 +838,7 @@ let ensure_prepared ~harness value ~id ~title ~repo ~branch ~context =
   let result =
     let* expected_head, branch_ref = seed_revision repo branch in
     let* worktree = seed value ~repo ~branch ~branch_ref ~expected_head in
+    let* () = install_guest_skill value in
     let* context_contents =
       try Ok (Shell.read_file context) with Sys_error message -> Error message
     in

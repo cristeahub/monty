@@ -57,7 +57,7 @@ let codex_hook_args ~home options =
   " --enable " ^ Shell.quote "hooks" ^ " --dangerously-bypass-hook-trust -c "
   ^ Shell.quote hook_config
 
-let build_command_with_transport ~pin_policy ~managed ~mcp ~codex_hook ~codex_mode ~codex_trusted_paths ~options ~home
+let build_command_with_transport ~pin_policy ~managed ~legacy_mcp ~skills ~codex_hook ~codex_mode ~codex_trusted_paths ~options ~home
     ~instructions ~job ~context =
   match options.harness with
   | Harness.Pi ->
@@ -74,7 +74,8 @@ let build_command_with_transport ~pin_policy ~managed ~mcp ~codex_hook ~codex_mo
         | None -> ""
         | Some id -> " --fork " ^ Shell.quote id
       in
-      (if mcp then Mcp_config.pi_setup_command ~home ~monty_command:options.monty_command ^ " && " else "") ^ Printf.sprintf "exec %s --name %s%s%s %s %s" options.command name fork
+      (if legacy_mcp then Shell.quote options.monty_command ^ " mcp setup-pi --home " ^ Shell.quote home ^ " && "
+       else if skills then Skill.setup_command ~home ~harness:Harness.Pi ~monty_command:options.monty_command ^ " && " else "") ^ Printf.sprintf "exec %s --name %s%s%s %s %s" options.command name fork
         instruction_arg context_arg prompt
   | Harness.Codex when codex_hook && managed ->
       (* The terminal wrapper must keep this launch's choice even if its login
@@ -109,7 +110,9 @@ let build_command_with_transport ~pin_policy ~managed ~mcp ~codex_hook ~codex_mo
       in
       let base =
         Printf.sprintf "exec %s%s%s%s%s%s" options.command codex_effort_arg
-          (codex_vim_arg ^ (if mcp then Mcp_config.codex_args ~monty_command:options.monty_command else ""))
+          (codex_vim_arg ^ (if legacy_mcp then " -c " ^ Shell.quote
+            ("mcp_servers.monty={command=" ^ Codex_trust.toml_basic_string options.monty_command
+             ^ ",args=[\"mcp\",\"serve\"],enabled=true}") else ""))
           (Codex_trust.arguments codex_trusted_paths)
           (if codex_hook then codex_hook_args ~home options else "") yolo
       in
@@ -122,7 +125,9 @@ let build_command_with_transport ~pin_policy ~managed ~mcp ~codex_hook ~codex_mo
           Printf.sprintf "%s resume -C .%s -- %s" base add_dirs
             (Shell.quote session_id))
 
-let build_command = build_command_with_transport ~pin_policy:true ~managed:true
+(* Historical MCP strings only authenticate old generated scripts before resume
+   replaces them; new launches never start an MCP server. *)
+let build_command = build_command_with_transport ~pin_policy:true ~managed:true ~legacy_mcp:false ~skills:true
 
 let rehydrate_lines ~monty_command ~wt_command ~branch ~source_repo =
   [ "MONTY_JOB_WORKTREE=$("
@@ -184,14 +189,14 @@ let profile_environment_names =
   [ "PI_CODING_AGENT_DIR"; "CODEX_HOME"; "MANTLE_CONTEXT"; "_MANTLE_SELECTED_HOME";
     "_MANTLE_PREV_STATE"; "_MANTLE_PREV_HOME" ]
 
-let launch_script_contents ?(pin_policy = true) ?(managed = true) ?(mcp = true) ?environment_path
+let launch_script_contents ?(pin_policy = true) ?(managed = true) ?(legacy_mcp = false) ?(skills = true) ?environment_path
     ?(profile_environment =
       List.map (fun name -> (name, Sys.getenv_opt name)) profile_environment_names)
     ~codex_hook ~codex_mode ~codex_trusted_paths ~options
     ~job ~id ~branch ~source_repo ~initial_workdir ~home ~context ~instructions
     ~worker_dir ~worktree_mode ~wt_command () =
   let command =
-    build_command_with_transport ~pin_policy ~managed ~mcp ~codex_hook ~codex_mode ~codex_trusted_paths ~options ~home
+    build_command_with_transport ~pin_policy ~managed ~legacy_mcp ~skills ~codex_hook ~codex_mode ~codex_trusted_paths ~options ~home
       ~instructions:(Some instructions) ~job ~context
   in
   let setup_lines =

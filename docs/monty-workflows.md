@@ -1,8 +1,8 @@
 # Monty CLI workflows
 
-This manual ships inside the Monty binary and is served by its read-only MCP.
-Use `monty mcp guide <topic>` for the same text without an MCP client.
-Use `monty_command_help` or `monty <command> --help=plain` for current syntax.
+This manual ships inside the Monty binary and its automatically installed CLI skill.
+Use `monty guide <topic>` for a workflow or read the skill’s bundled reference.
+Use `monty <command> --help=plain` for current syntax.
 Documentation describes operations; your role and user authorization determine
 which operations you may perform.
 
@@ -346,24 +346,41 @@ monty handoff publish "$MONTY_JOB_ID" --summary 'Implemented and validated the c
 Publication leaves the task open and its worktrees intact. Headless children
 return their handoff to the supervisor instead; the supervisor publishes.
 
-## MCP
+## Skills
 
-`monty mcp serve` starts the portable documentation server over standard input
-and output. It serves `monty_help` and `monty_command_help`. It never executes
-workflow commands, reads task/account data, or changes Monty state.
+Monty automatically installs or refreshes its `monty` CLI skill before starting
+Codex or Pi sessions. This covers head-butler start/continue, worker launch/resume,
+headless phases, and service-managed Codex/Pi sessions. Installation uses the
+selected native profile: `$CODEX_HOME/skills/monty` (default `~/.codex`) or
+`$PI_CODING_AGENT_DIR/skills/monty` (default `~/.pi/agent`). Service sessions use
+their configured native profile rather than the service process's ambient account.
+Container workers receive the same skill in `/monty/home/.agents/skills/monty`.
+Read-only reviewers can read `references/workflows.md` without a shell or host CLI.
+Background source triage remains isolated with skills disabled.
 
-`monty mcp config --format json` prints the standard mcpServers object for
-Claude Code, Pi, and other compatible clients. `--format toml` prints Codex
-configuration. Both use the absolute current Monty binary.
+`monty guide` lists topics; `monty guide workers` reads a topic without needing
+an initialized Monty home. To install explicitly without starting an agent:
 
-`monty mcp guide` lists workflow topics; `monty mcp guide workers` reads a topic.
-These commands work from any directory without an initialized Monty home.
+```sh
+monty skills install --harness codex
+monty skills install --harness pi
+```
 
-Codex sessions launched by Monty get per-invocation MCP configuration. Pi
-launches ensure a native user-level entry named `monty` in its active agent
-directory (`PI_CODING_AGENT_DIR`, otherwise `~/.pi/agent`). Other entries are
-preserved. An existing conflicting or disabled Monty entry is reported rather
-than silently overwritten. See `docs/mcp.md` for connection and recovery steps.
+The skill and manual are embedded in the executable. Identical files are left
+untouched, generated files are refreshed atomically, and unmanaged files or
+unsafe symlinks are rejected instead of overwritten. Read-only inventory, help,
+and dry-run commands do not install skills. Skills do not grant new permissions
+or override role instructions. Native settings that disable skills remain in effect.
+
+Monty's documentation MCP has been removed. Existing generated worker scripts
+are recognized and replaced on explicit resume. The old `monty mcp guide`
+spelling remains a CLI alias for saved instructions; it starts no MCP server.
+Pi setup removes only a legacy
+`monty` server entry matching this executable and `mcp serve`, preserving other
+servers/settings. Manually registered MCP entries using another executable path
+must be removed from that client's configuration by its owner. Existing running
+native sessions may retain loaded MCP tools until they are restarted; installing
+skills does not interrupt a live session. See `docs/skills.md` for details.
 
 ## Web client
 
@@ -497,7 +514,7 @@ Codex versions are informational: Monty attempts the native connection regardles
 of version and reports connection or protocol failures. Other Pi runtime versions
 fail closed. Pi also supports read-only native JSONL
 history mirroring without starting its runtime. This service is separate from optional external
-context collection and never enables it. MCP remains documentation-only.
+context collection and never enables it. CLI guidance comes from the Monty skill.
 
 The managed Codex daemon can differ from the CLI version. Check the selected
 account with `CODEX_HOME=/selected/home codex app-server daemon version`;
@@ -532,7 +549,8 @@ started or reused in that scope. Do not point test configurations at personal
 accounts. Native daemon processes inherit a minimal system environment, not
 Monty worker variables or ambient API keys. Use account configuration in the
 selected native home. Per-thread workspace roots, instructions, shell Monty
-variables and the Monty MCP environment are supplied in `thread/start` config.
+variables are supplied in `thread/start` config. The Monty CLI skill is installed
+in the selected native profile before connecting.
 Approvals default to `on-request` and sandboxing to `workspace-write`. Managed
 terminals honor the existing `--codex-yolo`, `MONTY_CODEX_YOLO` and persisted
 `codex-yolo` setting, in that order. When explicitly enabled, new threads use

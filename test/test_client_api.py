@@ -144,6 +144,9 @@ class Handler(socketserver.StreamRequestHandler):
                     server.threads[native] = {'id': native, 'turns': []}
                     server.loaded.add(native)
                     result = {'thread': server.threads[native]} if method == 'thread/start' else {'session': native, 'entries': []}
+                elif method == 'skills/list':
+                    assert params['forceReload'] is True and params['cwds']
+                    result = {'data': []}
                 elif method == 'thread/name/set':
                     result = {}
                 elif method == 'config/value/write':
@@ -450,6 +453,9 @@ def fake_suite(home):
         http_error(409,lambda:c.req('commands/start-once',{**request,'title':'different'}))
         params=next(params for method,params in server.calls if method=='thread/start')
         assert params['historyMode']=='legacy'
+        assert (native_home/'skills/monty/SKILL.md').is_file()
+        assert any(method=='skills/list' for method,_ in server.calls)
+        assert not any(key.startswith('mcp_servers.monty') for key in params['config'])
         assert params['config']['shell_environment_policy.set']['MONTY_JOB_TITLE']=='isolated'
         assert (params['approvalPolicy'],params['sandbox'])==('on-request','workspace-write')
         assert c.history(cid)['sessions'][0]['records']
@@ -597,9 +603,12 @@ def fake_suite(home):
             assert args[:3]==['resume','--remote','unix://'+str(home/'codex.sock')],args
             assert '--dangerously-bypass-approvals-and-sandbox' not in args,args
         resumed=args[-1];count=len(server.threads)
+        (native_home/'skills/monty/SKILL.md').unlink()
         run=subprocess.run([BIN,'continue',resumed,'--home',str(home)],env=launch_env,capture_output=True,text=True)
         assert run.returncode==0,run.stderr
         assert len(server.threads)==count
+        assert (native_home/'skills/monty/SKILL.md').is_file()
+        assert any(method=='skills/list' for method,_ in server.calls)
         args=json.loads((home/'terminal.json').read_text())
         assert args[-1]==resumed and '--dangerously-bypass-approvals-and-sandbox' not in args
         assert args[args.index('-c')+1]=='tui.vim_mode_default=true'
@@ -814,6 +823,7 @@ def terminal_profiles_suite(home):
         assert run.returncode==0,run.stderr
         args=json.loads((home/'terminal.json').read_text())
         assert args[:3]==['resume','--remote','unix://'+sockets[str(account)]],args
+        assert (account/'skills/monty/SKILL.md').is_file()
         return args[-1]
     def rejected(args,environment,message):
         before=[len(server.threads) for server in servers]
