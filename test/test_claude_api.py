@@ -167,6 +167,18 @@ for line in sys.stdin:
         retained=c.req('terminals/'+sid)
         assert not retained['running'] and retained['code']==0
         assert ('NATIVE CLAUDE '+native).encode() in base64.b64decode(retained['data'])
+        # Claude's --add-dir is variadic: a second workspace must precede the
+        # session flags so the initial prompt stays a positional argument.
+        multi=c.cmd('multi-start',{'op':'start','profile':'claude','terminal':True,'context':context})
+        mcid=multi['id'];msid=multi['sessions'][0]['id'];mnative=multi['sessions'][0]['native_id']
+        c.cmd('multi-open',{'op':'terminal_open','conversation':mcid,'selected_session':msid,
+                            'revision':c.revision(mcid),'fresh':True,'prompt':'initial worker prompt','rows':40,'cols':120})
+        margs=until(lambda:json.loads((account/'terminal.json').read_text()),lambda r:r['native']==mnative)['args']
+        assert margs[-1]=='initial worker prompt',margs
+        assert margs[margs.index('--add-dir')+1]==str(second_repo),margs
+        assert margs.index('--add-dir')<margs.index('--session-id')<margs.index('--append-system-prompt'),margs
+        c.cmd('multi-exit',{'op':'terminal_input','conversation':mcid,'selected_session':msid,'data':base64.b64encode(b'/exit\n').decode()})
+        until(lambda:c.req('terminals/'+msid)['running'],lambda x:not x)
         # Abrupt owner death cannot create a second native writer. Byte history
         # survives, while the unfinished terminal has an explicitly unknown result.
         run=subprocess.run([BIN,'terminal','--harness','claude','--home',str(root)],cwd=repo,env=env,capture_output=True,text=True,timeout=15)

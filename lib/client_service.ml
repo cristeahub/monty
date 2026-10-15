@@ -651,9 +651,12 @@ let terminal_start t cid sess request =
     | Harness.Codex -> [s "command" p;"resume";"--remote";Hashtbl.find t.endpoints (s "id" p);"-C";cwd;
         "-c";"tui.vim_mode_default=true";"--";native] @
         (match field "prompt" request with `String text when text<>""->[text]|_->[])
-    | Harness.Claude -> [s "command" p] @ (if fresh then ["--session-id";native] else ["--resume";native]) @
-        ["--append-system-prompt";s "instructions" context] @
+    | Harness.Claude -> [s "command" p] @
+        (* Claude's --add-dir is variadic and would swallow a trailing positional
+           prompt, so extra workspaces precede the single-value flags. *)
         List.concat_map (fun path->["--add-dir";str path]) (List.tl(xs "workspaces" context)) @
+        (if fresh then ["--session-id";native] else ["--resume";native]) @
+        ["--append-system-prompt";s "instructions" context] @
         (match field "prompt" request with `String text when text<>""->[text]|_->[])
     | Harness.Pi -> [s "command" p;"--name";s "title" (load t.home cid)] @ fork @
         (if fresh then ["--session-id";native;"--session-dir";Filename.concat (str(List.hd(xs "session_roots" p))) "monty"]
