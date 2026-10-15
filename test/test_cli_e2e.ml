@@ -55,17 +55,58 @@ let wait_for_path path =
   in
   loop 250
 
-let with_temp_root name f =
-  let marker = Filename.temp_file ("monty-cli-" ^ name ^ "-") ".tmp" in
-  Sys.remove marker;
-  Unix.mkdir marker 0o700;
-  Fun.protect ~finally:(fun () -> remove_tree marker) (fun () -> f marker)
-
 let executable =
   let test_dir = Shell.abs_path Sys.executable_name |> Filename.dirname in
   let candidate = Filename.concat test_dir "../bin/main.exe" |> Shell.normalize in
   if not (Sys.file_exists candidate) then failf "built Monty binary is missing: %s" candidate;
   Unix.realpath candidate
+
+let test_servers : (string * string array) list ref = ref []
+let env_value env name = Array.to_list env |> List.find_map(fun value ->
+  let prefix=name ^ "=" in if String.starts_with ~prefix value then Some(String.sub value (String.length prefix)(String.length value-String.length prefix)) else None)
+let prepare_test_server ~root ~env args =
+  if List.exists(fun command->List.mem command ["run";"resume";"run-many";"begin"]) args && List.hd args="headless" then (
+    let home=Option.value ~default:(Filename.concat root "home")(env_value env "MONTY_HOME") in
+    let account harness variable fallback =
+      let directory=Option.value ~default:(Filename.concat root fallback)(env_value env variable) in
+      Shell.ensure_dir directory;
+      let directory=Unix.realpath directory in
+      let command=Option.value ~default:harness(env_value env ("MONTY_" ^ String.uppercase_ascii harness ^ "_COMMAND")) in
+      let wrapper=Filename.concat root ("server-" ^ harness) in
+      Shell.write_file wrapper ("#!/bin/sh\nexec " ^ command ^ " \"$@\"\n");Shell.chmod_executable wrapper;
+      `Assoc["id",`String harness;"harness",`String harness;"command",`String((if String.starts_with ~prefix:(harness ^ " ") command || command=harness then Shell.quote(Filename.concat root ("fake-bin/" ^ harness)) ^ String.sub command (String.length harness)(String.length command-String.length harness) else command));
+        (if harness="pi" then "pi_home" else "codex_home"),`String directory;"roots",`List[`String(Unix.realpath root)]] in
+    let profiles=List.map(fun (h,v,f)->account h v f) ["pi","PI_CODING_AGENT_DIR","pi-agent";"codex","CODEX_HOME","codex-home"] in
+    let config=Filename.concat root "server-profiles.json" in
+    Yojson.Safe.to_file config (`Assoc["profiles",`List profiles]);
+    let metadata=Filename.concat home ".monty/client-service.json" in
+    if not(Sys.file_exists metadata) then (
+      let env=match env_value env "MONTY_FAKE_CONTAINER_STATE",env_value env "MONTY_FAKE_CONTAINER_LOG" with
+        | Some state,Some log ->
+            let wrapper=Filename.concat root "server-container" in
+            let command=Option.value ~default:"container" (env_value env "MONTY_CONTAINER_COMMAND") in
+            Shell.write_file wrapper ("#!/bin/sh\nexport MONTY_FAKE_CONTAINER_STATE=" ^ Shell.quote state
+              ^ "\nexport MONTY_FAKE_CONTAINER_LOG=" ^ Shell.quote log ^ "\nexec " ^ command ^ " \"$@\"\n");
+            Shell.chmod_executable wrapper;
+            Array.append (Array.of_list(Array.to_list env |> List.filter(fun value->not(String.starts_with ~prefix:"MONTY_CONTAINER_COMMAND=" value))))
+              [|"MONTY_CONTAINER_COMMAND=" ^ wrapper|]
+        | _ -> env in
+      let log=Unix.openfile(Filename.concat root "test-service.log")[Unix.O_CREAT;Unix.O_APPEND;Unix.O_WRONLY] 0o600 in
+      let child=Unix.create_process_env executable [|executable;"service";"start";"--home";home;"--config";config|] env Unix.stdin log log in
+      Unix.close log;ignore(Unix.waitpid [] child);
+      test_servers:=(home,env)::!test_servers))
+
+let with_temp_root name f =
+  let marker = Filename.temp_file ("monty-cli-" ^ name ^ "-") ".tmp" in
+  Sys.remove marker;
+  Unix.mkdir marker 0o700;
+  Fun.protect ~finally:(fun () ->
+    List.iter(fun (home,env) -> if String.starts_with ~prefix:(Unix.realpath marker) (Unix.realpath home) then (
+      let null=Unix.openfile "/dev/null" [Unix.O_RDWR] 0 in
+      let pid=Unix.create_process_env executable [|executable;"service";"stop";"--home";home|] env null null null in
+      Unix.close null;ignore(Unix.waitpid [] pid))) !test_servers;
+    test_servers:=List.filter(fun (home,_)->not(String.starts_with ~prefix:(Unix.realpath marker) (Unix.realpath home))) !test_servers;
+    remove_tree marker) (fun () -> f marker)
 
 let read_file path = if Sys.file_exists path then Shell.read_file path else ""
 
@@ -139,7 +180,7 @@ let replace_env base overrides =
   (base @ List.map (fun (name, value) -> name ^ "=" ^ value) overrides)
   |> Array.of_list
 
-let env_with overrides = replace_env (Unix.environment ()) overrides
+let env_with overrides = replace_env (Unix.environment () |> Array.to_list |> List.filter(fun value->not(String.starts_with ~prefix:"MONTY_" value)) |> Array.of_list) overrides
 
 type child = {
   pid : int;
@@ -156,6 +197,7 @@ type result = {
 }
 
 let spawn ?cwd ?(program = executable) ?(stdin_path = "/dev/null") ?(new_session = false) ~root ~env index args =
+  if program=executable && args<>[] then prepare_test_server ~root ~env args;
   let stdout_path = Filename.concat root (Printf.sprintf "stdout-%d" index) in
   let stderr_path = Filename.concat root (Printf.sprintf "stderr-%d" index) in
   let stdout_fd =
@@ -200,6 +242,37 @@ let await child =
   }
 
 let run ?cwd ?program ~root ~env index args = spawn ?cwd ?program ~root ~env index args |> await
+
+(* Historical Pi dispatch artifacts still need finish/recovery coverage. This
+   fixture cannot execute agents; the public CLI uses the server-owned runner. *)
+let legacy_dispatch_fixture ~root ~env index args =
+  run ~program:(Shell.abs_path Sys.executable_name) ~root ~env index ("--legacy-dispatch-fixture" :: args)
+
+let legacy_dispatch_main args =
+  let option name =
+    let rec find = function key::value::_ when key=name->Some value|_::rest->find rest|[]->None in
+    find args in
+  let get = function Ok value->value|Error message->failwith message in
+  let home=Option.value ~default:(Sys.getenv "MONTY_HOME") (option "--home") in
+  let harness=Settings.effective_harness ~getenv:Sys.getenv_opt ~home
+    (Option.map (fun value -> get(Harness.of_string value |> Result.map_error(fun (`Msg message)->message))) (option "--harness")) |> get in
+  let rec worker = function
+    | "headless"::"begin"::rest->worker rest
+    | "--resume"::rest->worker rest
+    | key::_ when not(String.starts_with ~prefix:"--" key)->key
+    | _->failwith "invalid historical dispatch fixture" in
+  let settings=get(Settings.load ~home) in
+  let options=Launcher.{backend=Terminal.Dry_run;target=Terminal.Tab;harness;
+    harness_command=Option.value ~default:(Harness.to_string harness)
+      (Sys.getenv_opt ("MONTY_" ^ String.uppercase_ascii(Harness.to_string harness) ^ "_COMMAND"));
+    codex_yolo=false;container_workers=settings.container_workers;
+    wt_command=Option.value ~default:"wt" (Sys.getenv_opt "MONTY_WT_COMMAND");
+    worktree_mode=Always;branch_prefix=get(Settings.effective_branch_prefix ~getenv:Sys.getenv_opt ~home None);
+    agent_profile=get(Settings.effective_agent_profile ~home None);fork=None;home;
+    script_dir=Home.runtime_script_dir ~home ();monty_command=executable} in
+  match Headless.begin_worker ~explicit_resume:(List.mem "--resume" args) options (worker args) with
+  | Ok json->print_endline(Yojson.Safe.to_string json);exit 0
+  | Error message->prerr_endline message;exit 1
 
 let run_with_stdin ~root ~env index input args =
   let stdin_path = Filename.concat root (Printf.sprintf "stdin-%d" index) in
@@ -2893,7 +2966,7 @@ let test_codex_launch_preserves_mantle_environment () =
   with_temp_root "codex-mantle-environment" (fun root ->
       let home, log, base_env = setup_environment root in
       let names =
-        [ "PI_CODING_AGENT_DIR"; "CODEX_HOME"; "MANTLE_CONTEXT"; "_MANTLE_SELECTED_HOME";
+        [ "PI_CODING_AGENT_DIR"; "CODEX_HOME"; "CLAUDE_CONFIG_DIR"; "MANTLE_CONTEXT"; "_MANTLE_SELECTED_HOME";
           "_MANTLE_PREV_STATE"; "_MANTLE_PREV_HOME" ]
       in
       let clean_env =
@@ -2962,7 +3035,8 @@ let test_codex_launch_preserves_mantle_environment () =
               | Some value -> "x\n" ^ value
             in
             if Shell.read_file (Filename.concat observed name) <> expected then
-              failf "Codex received the wrong %s (including set/unset state)" name) names;
+              failf "Codex received the wrong %s: expected %S, received %S" name expected
+                (Shell.read_file (Filename.concat observed name))) names;
         let projects = Shell.read_file (Filename.concat observed "projects") in
         match selected with
         | Some profile ->
@@ -2984,6 +3058,10 @@ let test_codex_launch_preserves_mantle_environment () =
       let terminal_home = Filename.concat root "terminal-home" in
       Shell.ensure_dir terminal_home;
       let execute script bindings selected =
+        (match List.assoc_opt "CODEX_HOME" bindings with
+        | Some path -> require_contains "launch script preserves selected account" (Shell.read_file script)
+            ("export CODEX_HOME=" ^ Shell.quote path ^ "\n")
+        | None -> require_line "launch script preserves unset account" (Shell.read_file script) "unset CODEX_HOME");
         (* Isolate the Ghostty environment preamble from the service protocol,
            which has its own checkout-binary E2E test. The original authenticated
            launch script is never edited by this fixture. *)
@@ -3017,8 +3095,8 @@ let test_codex_launch_preserves_mantle_environment () =
               else ("/bin/sh", [ script ])
             in
             incr counter;
-            require_code 0
-              (run ~program ~root ~env:terminal_env !counter args);
+            let result=run ~program ~root ~env:terminal_env !counter args in
+            require_code 0 result;
             check_received bindings selected) [ false; true ]
       in
       let script_for id =
@@ -3115,8 +3193,8 @@ let test_codex_launch_preserves_mantle_environment () =
                 failwith "tampered script rejection mutated script or tasks") [ "dry-run"; "ghostty" ]) forged;
       if Sys.file_exists injection_marker then failwith "quoted environment executed shell code";
       require_empty_log log;
-      (* Host headless phases inherit the current caller, even when preparation
-         happened under a different profile. Use the existing fake Codex runner. *)
+      (* Headless uses the configured server account, even when preparation
+         happened under a different profile. Client account drift is rejected. *)
       install_create_wt ~root ~log;
       install_codex_exec ~root ~log;
       Shell.write_file codex ("#!/bin/sh\n" ^ observe ^ Shell.read_file codex);
@@ -3132,10 +3210,12 @@ let test_codex_launch_preserves_mantle_environment () =
         (cli work ([ "headless"; "prepare-many"; "--manifest"; manifest ] @ headless_options));
       require_code 0
         (cli private_profile ([ "headless"; "run"; "--wait"; "headless-profile" ] @ headless_options));
-      check_received private_profile (Some "private");
-      require_code 0
-        (cli [] ([ "headless"; "resume"; "--wait"; "headless-profile" ] @ headless_options));
-      check_received [] None)
+      let server_bindings=["CODEX_HOME",Unix.realpath(List.assoc "CODEX_HOME" private_profile)] in
+      check_received server_bindings None;
+      let rejected=cli [] ([ "headless"; "resume"; "--wait"; "headless-profile" ] @ headless_options) in
+      require_code 1 rejected;
+      require_contains "unconfigured account rejected" rejected.stderr "profile matching the native account directory";
+      check_received server_bindings None)
 
 let test_retry_uses_recorded_script_and_absolute_commands () =
   with_temp_root "launch-script-owner" (fun root ->
@@ -3257,13 +3337,14 @@ let test_ghostty_launch_script_matches_ensure_worktree_cli () =
       then
         failf "Ghostty script passed unsupported --home to ensure-worktree:\n%s"
           script_contents;
-      match Process.run_capture (Shell.quote launch_script) with
-      | Error message ->
-          failf "generated Ghostty launch script could not run: %s" message
-      | Ok { status = `Exited 0; _ } -> ()
-      | Ok { stdout; status } ->
-          failf "generated Ghostty launch script failed with %s:\n%s"
-            (Process.status_to_string status) stdout)
+      let server_env=replace_env env ["MONTY_PI_COMMAND","/bin/sh -c true"] in
+      prepare_test_server ~root ~env:server_env ["headless";"run"];
+      let result=run ~program:"/bin/sh" ~root ~env:server_env 1323 [launch_script] in
+      require_code 0 result;
+      match Native_session.read ~harness:Harness.Pi (Filename.dirname job_file) with
+      | Error message->failwith message
+      | Ok None->failwith "server did not capture the Ghostty worker's native session"
+      | Ok(Some _)->())
 
 let test_lifecycle_rejects_cross_project_and_owned_task_links () =
   with_temp_root "lifecycle-task-ownership" (fun root ->
@@ -3929,9 +4010,9 @@ let test_legacy_multi_workspace_branches () =
       assert_identity job_file;
       require_code 0 (cli [ "task"; "workspace"; "ensure"; task_id ]);
       assert_identity job_file;
-      require_code 0 (cli [ "headless"; "begin"; "legacy"; "--harness"; "pi" ]);
+      require_code 0 (legacy_dispatch_fixture ~root ~env 2211 [ "headless"; "begin"; "legacy"; "--harness"; "pi"; "--home"; home ]);
       assert_identity job_file;
-      require_code 0 (cli [ "headless"; "begin"; "--resume"; "legacy"; "--harness"; "pi" ]);
+      require_code 0 (legacy_dispatch_fixture ~root ~env 2212 [ "headless"; "begin"; "--resume"; "legacy"; "--harness"; "pi"; "--home"; home ]);
       require_code 0 (cli [ "resume"; "legacy"; "--terminal"; "ghostty" ]);
       require_code 0 (cli [ "tasks"; "sync" ]);
       assert_identity job_file;
@@ -4423,7 +4504,7 @@ let test_headless_prepare_begin_and_resume () =
          || string_contains (read_file log) "/pi "
       then failwith "headless prepare invoked Pi or Ghostty";
       let premature_resume =
-        run ~root ~env 1952
+        legacy_dispatch_fixture ~root ~env 1952
           [ "headless"; "begin"; "--resume"; "headless-two"; "--home"; home ]
       in
       if premature_resume.code = 0 then
@@ -4434,14 +4515,14 @@ let test_headless_prepare_begin_and_resume () =
         replace_env env [ ("MONTY_FAULT_INJECT", "launch-before-request-state") ]
       in
       let faulted =
-        run ~root ~env:fault_env 1953
+        legacy_dispatch_fixture ~root ~env:fault_env 1953
           [ "headless"; "begin"; "headless-two"; "--home"; home ]
       in
       if faulted.code = 0 then failwith "headless begin ignored its injected fault";
       if job_status (job_file "headless-two") <> "prepared" then
         failwith "a pre-dispatch headless failure was not retryable as prepared";
       let begun =
-        run ~root ~env 1954
+        legacy_dispatch_fixture ~root ~env 1954
           [ "headless"; "begin"; "headless-one"; "--home"; home ]
       in
       require_code 0 begun;
@@ -4514,14 +4595,14 @@ let test_headless_prepare_begin_and_resume () =
       if job_status (job_file "headless-two") <> "prepared" then
         failwith "stale headless reservation mutated another worker";
       let duplicate =
-        run ~root ~env 1955
+        legacy_dispatch_fixture ~root ~env 1955
           [ "headless"; "begin"; "headless-one"; "--home"; home ]
       in
       if duplicate.code = 0 then failwith "headless begin replayed a requested worker";
       require_contains "headless begin replay recovery" duplicate.stderr
         "headless resume";
       let resumed =
-        run ~root ~env 1956
+        legacy_dispatch_fixture ~root ~env 1956
           [ "headless"; "begin"; "--resume"; "headless-one"; "--home"; home ]
       in
       require_code 0 resumed;
@@ -4604,7 +4685,7 @@ let test_headless_prepare_begin_and_resume () =
         <> 2
       then failwith "Pi finished-run notices were not durably recoverable";
       let missed_callback =
-        run ~root ~env 19564
+        legacy_dispatch_fixture ~root ~env 19564
           [ "headless"; "begin"; "--resume"; "headless-one"; "--home"; home ]
       in
       require_code 0 missed_callback;
@@ -4676,7 +4757,7 @@ let test_headless_prepare_begin_and_resume () =
       if Yojson.Safe.Util.(Yojson.Safe.from_string pending_after_finish.stdout
           |> member "pending" |> to_list |> List.length) <> 2 then
         failwith "late callback reopened an acknowledged notice";
-      let failed_attempt = run ~root ~env 19569
+      let failed_attempt = legacy_dispatch_fixture ~root ~env 19569
           [ "headless"; "begin"; "--resume"; "headless-one"; "--home"; home ] in
       require_code 0 failed_attempt;
       let attempt_id = Yojson.Safe.Util.(Yojson.Safe.from_string failed_attempt.stdout
@@ -4828,7 +4909,7 @@ let test_agent_profiles_selection_snapshot_and_solo () =
       in
       require_code 0 set_solo;
       let reviewed_begin =
-        run ~root ~env 1976
+        legacy_dispatch_fixture ~root ~env 1976
           [ "headless"; "begin"; "profile-reviewed"; "--home"; home ]
       in
       require_code 0 reviewed_begin;
@@ -4840,7 +4921,7 @@ let test_agent_profiles_selection_snapshot_and_solo () =
       if List.length reviewed_chain <> 3 then
         failwith "reviewed worker did not resume with its pinned 1-2-1 profile";
       let legacy_begin =
-        run ~root ~env 19765
+        legacy_dispatch_fixture ~root ~env 19765
           [ "headless"; "begin"; "profile-legacy"; "--home"; home ]
       in
       require_code 0 legacy_begin;
@@ -4875,7 +4956,7 @@ let test_agent_profiles_selection_snapshot_and_solo () =
       in
       require_code 0 set_reviewed;
       let solo_begin =
-        run ~root ~env 1978
+        legacy_dispatch_fixture ~root ~env 1978
           [ "headless"; "begin"; "profile-solo"; "--home"; home ]
       in
       require_code 0 solo_begin;
@@ -4974,7 +5055,7 @@ let test_simplified_default_and_headless_writers () =
           let instructions = read_file (Filename.concat (worker_dir id) "MONTY.md") in
           require_contains "interactive separate agent" instructions "one separate simplifier";
           require_contains "interactive editing access" instructions "with write access";
-          require_contains "interactive supports both harnesses" instructions "interactive Pi or Codex";
+          require_contains "interactive supports all harnesses" instructions "interactive Pi, Codex or Claude";
           require_contains "read-only envelope scoped to reviewers" instructions
             "not implementers, simplifiers, or fixers")
         [ "simple-pi"; "simple-codex" ];
@@ -4983,7 +5064,9 @@ let test_simplified_default_and_headless_writers () =
       install_profile home { simplified with interactive = "CHANGED PROFILE";
         fix_role = Agent_profile.Fixer; fix = Some "CHANGED FINAL WRITER" };
       ignore (ok [ "headless"; "prepare-many"; "--manifest"; manifest ]);
-      let dispatch = ok [ "headless"; "begin"; "simple-pi" ] |> Yojson.Safe.from_string in
+      let legacy = legacy_dispatch_fixture ~root ~env 19831 [ "headless"; "begin"; "simple-pi"; "--home"; home ] in
+      require_code 0 legacy;
+      let dispatch = Yojson.Safe.from_string legacy.stdout in
       let chain = Yojson.Safe.Util.(dispatch |> member "harness_call"
         |> member "arguments" |> member "chain" |> to_list) in
       if List.length chain <> 2 then failwith "Pi default did not have two sequential writers";
@@ -5109,17 +5192,22 @@ printf '%s %s\n' "$phase" "$worktree" >> |} ^ Shell.quote log ^ "\n");
       let script = Yojson.Safe.Util.(Yojson.Safe.from_file (job_file "simple-pi")
         |> member "launch_script" |> to_string) in
       let contents = read_file script in
-      let setup = Skill.setup_command ~home ~harness:Harness.Pi ~monty_command:executable in
-      let legacy = Shell.quote executable ^ " mcp setup-pi --home " ^ Shell.quote home in
-      let replace_setup replacement = contents |> String.split_on_char '\n' |> List.map (fun line ->
-          if String.starts_with ~prefix:setup line then
-            replacement ^ String.sub line (String.length setup) (String.length line - String.length setup)
+      let record = match Job_store.find ~home ~scope:Job_store.Active "simple-pi" with
+        | Ok record->record|Error message->failwith message in
+      let legacy = Harness_command.build_command_with_transport ~pin_policy:true ~managed:false
+        ~legacy_mcp:true ~skills:false ~codex_hook:true ~codex_mode:Codex_session.Picker
+        ~codex_trusted_paths:[] ~options:Harness_command.{harness=Harness.Pi;command="pi";
+          codex_yolo=false;fork=None;script_dir=Home.runtime_script_dir ~home ();branch_prefix="monty";monty_command=executable}
+        ~home ~instructions:(Some(Filename.concat record.worker_dir "MONTY.md")) ~context:record.job.context ~job:record.job in
+      let replace_command replacement = contents |> String.split_on_char '\n' |> List.map (fun line ->
+          if String.starts_with ~prefix:"exec " line then replacement
           else line) |> String.concat "\n" in
-      Shell.write_file script (replace_setup legacy);
+      Shell.write_file script (replace_command legacy);
       ignore (ok [ "resume"; "simple-pi"; "--harness"; "pi" ]);
-      require_contains "resume installs CLI skill" (read_file script) setup;
+      require_contains "resume routes skill installation through server" (read_file script)
+        (Shell.quote executable ^ " terminal --home ");
       if string_contains (read_file script) "mcp setup-pi" then failwith "resume retained MCP setup";
-      Shell.write_file script (replace_setup (legacy ^ "; touch /tmp/forged-monty-skill"));
+      Shell.write_file script (replace_command (legacy ^ "; touch /tmp/forged-monty-skill"));
       let rejected = cli [ "resume"; "simple-pi"; "--harness"; "pi" ] in
       require_code 1 rejected)
 
@@ -5132,7 +5220,9 @@ let test_standalone_background_harnesses () =
       install_profile home simplified;
       let env = replace_env env
           [ "MONTY_JOB_ID", "parent-must-not-leak";
-            "MONTY_WORKSPACE_3", "parent-workspace-must-not-leak" ] in
+            "MONTY_WORKSPACE_3", "parent-workspace-must-not-leak";
+            "MONTY_PI_COMMAND", "pi --test-argument 'two words'";
+            "MONTY_CODEX_COMMAND", "codex --test-argument 'two words'" ] in
       let repos = List.map (Filename.concat root) [ "backend"; "frontend" ] in
       List.iter (fun repo -> init_git_repo repo; add_project ~root ~home ~env repo) repos;
       install_repo_scoped_wt ~root ~log;
@@ -5195,7 +5285,7 @@ case "$prompt" in
   *)
     phase=implementation
     touch "$root/$MONTY_JOB_ID-started"
-    if [ "${BLOCK_RUN:-}" = yes ]; then
+    if [ "${MONTY_TEST_BLOCK_RUN:-}" = yes ]; then
       count=0
       while [ ! -f "$root/release" ]; do
         count=$((count + 1)); [ "$count" -lt 1000 ] || exit 86
@@ -5218,7 +5308,7 @@ else
     test "$tools" = read,bash,edit,write,grep,find,ls
   fi
   reason=stop
-  if [ "${FAIL_PI:-}" = yes ]; then reason=error; fi
+  if [ "${MONTY_TEST_FAIL_PI:-}" = yes ]; then reason=error; fi
   printf '{"type":"message_end","message":{"role":"assistant","stopReason":"%s","content":[{"type":"text","text":"HANDOFF-%s"}]}}\n' "$reason" "$phase"
   printf '%s\n' '{"type":"agent_end","messages":[]}'
 fi
@@ -5255,16 +5345,16 @@ fi
         json
       in
       let finished json =
-        let log = Filename.concat (json_string "artifact_dir" json) "logs/supervisor.log" in
-        string_contains (read_file log) "\"run_status\": \"finished\""
-        || string_contains (read_file log) "Run handoff:"
+        let path=Filename.concat home (".monty/conversation-commands/" ^ json_string "command" json ^ ".json") in
+        if not(Sys.file_exists path) then false else
+        List.mem (json_string "status" (Yojson.Safe.from_file path)) ["finished";"failed";"outcome_unknown"]
       in
       Fun.protect ~finally:(fun () ->
           Shell.write_file release "release\n";
           List.iter (fun json -> wait_until "background cleanup" (fun () -> finished json)) !started)
         (fun () ->
           List.iteri (fun index (harness, id) ->
-              let blocked = replace_env env [ "BLOCK_RUN", "yes" ] in
+              let blocked = replace_env env [ "MONTY_TEST_BLOCK_RUN", "yes" ] in
               let program = Filename.concat root "launch" in
               Shell.write_file program ("#!/bin/sh\ncd " ^ Shell.quote root
                 ^ "\nexec " ^ Shell.quote executable ^ " \"$@\"\n");
@@ -5298,7 +5388,7 @@ fi
           let batch = ok [ "headless"; "run-many"; "--manifest"; manifest; "--harness"; "pi" ] in
           Yojson.Safe.Util.(batch |> member "results" |> to_list)
           |> List.iter (fun result -> ignore (track (Yojson.Safe.Util.member "result" result)));
-          let error_env = replace_env env [ "FAIL_PI", "yes" ] in
+          let error_env = replace_env env [ "MONTY_TEST_FAIL_PI", "yes" ] in
           let error = track (ok ~env:error_env [ "headless"; "run"; "pi-error"; "--harness"; "pi" ]) in
           Shell.write_file release "release\n";
           List.iter (fun json -> wait_until "durable run result" (fun () -> finished json)) !started;
@@ -5382,7 +5472,7 @@ let test_codex_headless_uses_effective_settings_without_ghostty () =
           (Printf.sprintf ".monty/runs/%s/workers/%s/job.json" run id)
       in
       let rejected_begin =
-        run ~root ~env 1963
+        legacy_dispatch_fixture ~root ~env 1963
           [ "headless"; "begin"; "codex-one"; "--home"; home ]
       in
       if rejected_begin.code = 0 then
@@ -5609,8 +5699,10 @@ let test_codex_headless_uses_effective_settings_without_ghostty () =
       if
         count_lines_containing log
           "--dangerously-bypass-approvals-and-sandbox"
-        <> 17
+        <> 9
       then failwith "Codex headless execution did not honor persisted YOLO";
+      if count_lines_containing log "--sandbox read-only" <> 10 then
+        failwith "Codex YOLO changed reviewer permissions";
       if string_contains (read_file log) "osascript"
          || string_contains (read_file log) "/ghostty "
       then failwith "Codex headless execution opened Ghostty";
@@ -6159,21 +6251,21 @@ let test_head_butler_continue_uses_native_sessions_without_monty_state () =
         run ~root ~env 1955
           [ "continue"; "--home"; home; "--harness"; "pi" ]
       in
-      require_code 97 picker;
-      require_contains "Pi native session picker" (read_file log) "pi --resume";
+      require_code 1 picker;
+      require_contains "managed Pi picker requires service" picker.stderr "Monty client service is not running";
       let last =
         run ~root ~env 1956
           [ "continue"; "--last"; "--home"; home; "--harness"; "pi" ]
       in
-      require_code 97 last;
-      require_contains "Pi native last session" (read_file log) "pi --continue";
+      require_code 1 last;
+      require_contains "managed Pi last requires service" last.stderr "Monty client service is not running";
       let exact =
         run ~root ~env 1957
           [ "continue"; "design-notes"; "--home"; home; "--harness"; "pi" ]
       in
-      require_code 97 exact;
-      require_contains "Pi native exact session" (read_file log)
-        "pi --session design-notes";
+      require_code 1 exact;
+      require_contains "managed Pi exact requires service" exact.stderr "Monty client service is not running";
+      require_empty_log log;
       let codex =
         run ~root ~env 1958
           [ "continue"; "saved-chat"; "--home"; home; "--harness"; "codex";
@@ -6663,6 +6755,24 @@ let test_containerized_codex_worker_lifecycle () =
         failwith "headless resume automatically stopped the container";
       if status () <> before_inspect then
         failwith "stop and wake did not preserve private workspace state";
+      let crash_block=Filename.concat root "server-crash-block" in
+      let crashed=spawn ~root ~env:(replace_env env [("MONTY_TEST_CODEX_BLOCK",crash_block)])
+          60133 ["headless";"resume";"--wait";"container-worker";"--home";home] in
+      wait_for_path (crash_block ^ ".started");
+      let metadata=Yojson.Safe.from_file(Filename.concat home ".monty/client-service.json") in
+      let service_pid=Yojson.Safe.Util.(metadata |> member "pid" |> to_int) in
+      Unix.kill service_pid Sys.sigkill;
+      let executions=Filename.concat home ".monty/conversation-executions" in
+      let rec cleaned remaining =
+        let evidence=Sys.readdir executions |> Array.exists(fun name ->
+          Filename.check_suffix name ".cleanup" && string_contains(read_file(Filename.concat executions name)) "Cleanup exit code: 0") in
+        if evidence && not(Sys.file_exists(Filename.concat container_dir "running")) then ()
+        else if remaining=0 then failwith "server crash left its container execution running"
+        else (Unix.sleepf 0.05;cleaned(remaining-1)) in
+      cleaned 400;
+      if (await crashed).code=0 then failwith "server crash reported successful model execution";
+      if status () <> before_inspect then failwith "server crash cleanup changed private workspace data";
+      if job_status job_file <> "launch-requested" then failwith "server crash completed the task";
       let stop_after_result =
         run ~root ~env 6014 [ "stop"; "container-worker"; "--home"; home ]
       in
@@ -6810,7 +6920,7 @@ let test_containerized_pi_worker_lifecycle () =
       if Sys.file_exists worker_dir then failwith "invalid Pi auth reserved worker state";
       Unix.chmod auth 0o600;
       require_code 0 (call 6106 prepare);
-      let legacy = call 6107 [ "headless"; "begin"; "pi-worker" ] in
+      let legacy = legacy_dispatch_fixture ~root ~env 6107 [ "headless"; "begin"; "pi-worker"; "--home"; home ] in
       require_code 1 legacy;
       require_contains "Pi container legacy rejection" legacy.stderr "require monty headless run";
       if job_status job_file <> "prepared" then failwith "legacy begin claimed container Pi";
@@ -7125,7 +7235,7 @@ let test_live_codex_excludes_resume_and_completion () =
       let original = read_file codex in
       let block =
         String.concat "\n"
-          [ "if [ \"$BLOCK_CODEX\" = yes ]; then";
+          [ "if [ \"$MONTY_TEST_BLOCK_CODEX\" = yes ]; then";
             "  trap " ^ Shell.quote ("touch " ^ Shell.quote finished) ^ " EXIT";
             "  echo $$ > " ^ Shell.quote started;
             "  count=0";
@@ -7136,7 +7246,7 @@ let test_live_codex_excludes_resume_and_completion () =
             "fi"; "" ]
       in
       Shell.write_file codex ("#!/bin/sh\n" ^ block ^ original);
-      let blocked_env = replace_env env [ ("BLOCK_CODEX", "yes") ] in
+      let blocked_env = replace_env env [ ("MONTY_TEST_BLOCK_CODEX", "yes") ] in
       let supervisor = spawn ~root ~env:blocked_env 3001
           [ "headless"; "run"; "--wait"; "blocked"; "--home"; home ] in
       let awaited = ref false in
@@ -7552,6 +7662,9 @@ let run_named name test =
   with exn -> failwith (Printf.sprintf "%s: %s" name (Printexc.to_string exn))
 
 let () =
+  if Array.length Sys.argv>1 && Sys.argv.(1)="--legacy-dispatch-fixture" then
+    (try legacy_dispatch_main (Array.to_list Sys.argv |> List.tl |> List.tl)
+     with exn->prerr_endline(Printexc.to_string exn);exit 1);
   Unix.putenv "GIT_CONFIG_NOSYSTEM" "1";
   Unix.putenv "GIT_CONFIG_SYSTEM" "/dev/null";
   Unix.putenv "GIT_CONFIG_GLOBAL" "/dev/null";

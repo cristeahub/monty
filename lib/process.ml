@@ -3,6 +3,11 @@ type captured = {
   status : [ `Exited of int | `Signaled of int | `Stopped of int ];
 }
 
+external try_worker_lock : Unix.file_descr -> unit = "monty_worker_flock"
+
+let rec waitpid flags pid =
+  try Unix.waitpid flags pid with Unix.Unix_error(Unix.EINTR,_,_)->waitpid flags pid
+
 let status_to_string = function
   | `Exited code -> Printf.sprintf "exited with %d" code
   | `Signaled signal -> Printf.sprintf "signaled with %d" signal
@@ -166,5 +171,5 @@ let absolute_command command =
   let ( let* ) = Result.bind in
   let* _, finish = command_word command in
   let* executable = command_exists_with_arguments command in
-  Ok (Shell.quote (Shell.abs_path executable)
+  Ok (Shell.quote (Unix.realpath executable)
       ^ String.sub command finish (String.length command - finish))

@@ -73,8 +73,12 @@ let codex_command_arg =
   let doc = "Shell command used to start Codex. May include fixed arguments." in
   Cmdliner.Arg.(value & opt string (env_default getenv "MONTY_CODEX_COMMAND" "codex") & info [ "codex-command" ] ~docv:"COMMAND" ~doc)
  in
+let claude_command_arg =
+  let doc = "Shell command used to start Claude Code. May include fixed arguments." in
+  Cmdliner.Arg.(value & opt string (env_default getenv "MONTY_CLAUDE_COMMAND" "claude") & info [ "claude-command" ] ~docv:"COMMAND" ~doc)
+ in
 let harness_arg =
-  let doc = "Agent harness: pi or codex. Overrides MONTY_HARNESS and persisted Monty settings." in
+  let doc = "Agent harness: pi, codex or claude. Overrides MONTY_HARNESS and persisted Monty settings." in
   Cmdliner.Arg.(value & opt (some harness_conv) None & info [ "harness" ] ~docv:"HARNESS" ~doc)
  in
 let codex_yolo_arg =
@@ -121,7 +125,7 @@ let monty_command () =
     | None -> Shell.normalize (Shell.abs_path executable)
   else Shell.normalize (Shell.abs_path executable)
  in
-let options backend target harness_override codex_yolo_override pi_command codex_command wt_command worktree_mode branch_prefix_override agent_profile_override fork home script_dir =
+let options backend target harness_override codex_yolo_override pi_command codex_command claude_command wt_command worktree_mode branch_prefix_override agent_profile_override fork home script_dir =
   let ( let* ) = Result.bind in
   let* harness =
     Settings.effective_harness ~getenv ~home harness_override
@@ -148,7 +152,7 @@ let options backend target harness_override codex_yolo_override pi_command codex
     target;
     harness;
     harness_command =
-      (match harness with Harness.Pi -> pi_command | Harness.Codex -> codex_command);
+      (match harness with Harness.Pi -> pi_command | Harness.Codex -> codex_command | Harness.Claude -> claude_command);
     codex_yolo;
     container_workers;
     wt_command;
@@ -164,25 +168,25 @@ let options backend target harness_override codex_yolo_override pi_command codex
 let options_term =
   Cmdliner.Term.(
     const options $ backend_arg $ target_arg $ harness_arg $ codex_yolo_arg $ pi_command_arg
-    $ codex_command_arg $ wt_command_arg $ worktree_arg
+    $ codex_command_arg $ claude_command_arg $ wt_command_arg $ worktree_arg
     $ branch_prefix_arg $ agent_profile_arg $ fork_arg $ home_arg $ script_dir_arg)
  in
-let headless_options harness_override codex_yolo_override pi_command codex_command
+let headless_options harness_override codex_yolo_override pi_command codex_command claude_command
     wt_command branch_prefix_override agent_profile_override fork home script_dir =
   if Option.is_some fork then
     Error "headless profiles use fresh phases; --fork is supported only for interactive Pi workers"
   else
     options Terminal.Dry_run Terminal.Tab harness_override codex_yolo_override
-      pi_command codex_command wt_command Launcher.Always branch_prefix_override
+      pi_command codex_command claude_command wt_command Launcher.Always branch_prefix_override
       agent_profile_override fork home script_dir
  in
 let headless_options_term =
   Cmdliner.Term.(
     const headless_options $ harness_arg $ codex_yolo_arg $ pi_command_arg
-    $ codex_command_arg $ wt_command_arg $ branch_prefix_arg $ agent_profile_arg
+    $ codex_command_arg $ claude_command_arg $ wt_command_arg $ branch_prefix_arg $ agent_profile_arg
     $ fork_arg $ home_arg $ script_dir_arg)
  in
-let start name home harness_override codex_yolo_override pi_command codex_command =
+let start name home harness_override codex_yolo_override pi_command codex_command claude_command =
   match
     ( Settings.effective_harness ~getenv ~home harness_override,
       Settings.effective_codex_yolo ~getenv ~home codex_yolo_override )
@@ -190,7 +194,7 @@ let start name home harness_override codex_yolo_override pi_command codex_comman
   | Error message, _ | _, Error message -> exit_code (Error message)
   | Ok harness, Ok codex_yolo ->
       let harness_command =
-        match harness with Harness.Pi -> pi_command | Harness.Codex -> codex_command
+        match harness with Harness.Pi -> pi_command | Harness.Codex -> codex_command | Harness.Claude -> claude_command
       in
       Head_butler.start ~monty_command:(monty_command ()) ~name ~home ~harness ~harness_command ~codex_yolo
       |> exit_code
@@ -200,10 +204,10 @@ let start_term =
     let doc = "Session name for the head-butler session when supported by the harness." in
     Cmdliner.Arg.(value & opt string "Monty Head Butler" & info [ "name"; "n" ] ~docv:"NAME" ~doc)
   in
-  Cmdliner.Term.(const start $ name_arg $ home_arg $ harness_arg $ codex_yolo_arg $ pi_command_arg $ codex_command_arg)
+  Cmdliner.Term.(const start $ name_arg $ home_arg $ harness_arg $ codex_yolo_arg $ pi_command_arg $ codex_command_arg $ claude_command_arg)
  in
 let continue_head_butler session last home harness_override
-    codex_yolo_override pi_command codex_command =
+    codex_yolo_override pi_command codex_command claude_command =
   let continuation =
     match (session, last) with
     | Some _, true ->
@@ -221,7 +225,7 @@ let continue_head_butler session last home harness_override
       exit_code (Error message)
   | Ok continuation, Ok harness, Ok codex_yolo ->
       let harness_command =
-        match harness with Harness.Pi -> pi_command | Harness.Codex -> codex_command
+        match harness with Harness.Pi -> pi_command | Harness.Codex -> codex_command | Harness.Claude -> claude_command
       in
       Head_butler.continue ~monty_command:(monty_command ()) ~home ~harness ~harness_command ~codex_yolo
         continuation
@@ -240,7 +244,7 @@ let continue_term =
   in
   Cmdliner.Term.(
     const continue_head_butler $ session $ last $ home_arg $ harness_arg
-    $ codex_yolo_arg $ pi_command_arg $ codex_command_arg)
+    $ codex_yolo_arg $ pi_command_arg $ codex_command_arg $ claude_command_arg)
  in
 let launch repo title context branch options =
   match options with
@@ -325,27 +329,34 @@ let headless_begin worker explicit_resume options =
   match options with
   | Error message -> exit_code (Error message)
   | Ok options ->
-      Headless.begin_worker ~explicit_resume options worker
+      Client_terminal.headless ~wait:false ~resume:explicit_resume options worker
       |> print_headless_result
  in
 
+let server_child ~home =
+  match Sys.getenv_opt "MONTY_SERVER_EPOCH",Sys.getenv_opt "MONTY_SERVER_PARENT_PID",Sys.getenv_opt "MONTY_SERVER_EXECUTION",Sys.getenv_opt "MONTY_SERVER_NONCE" with
+  | Some epoch,Some pid,Some execution,Some nonce ->
+      (try
+        if int_of_string pid<>Unix.getppid() || Context_store.s "epoch" (Conversation_store.read (Conversation_store.file home ["client-service.json"]))<>epoch then false else
+        let result=Lwt_main.run(Client_http.request ~home `POST "/v1/supervisors/authorize"
+          (`Assoc["execution",`String execution;"nonce",`String nonce;"parent_pid",`Int(Unix.getppid())])) in
+        Unix.putenv "MONTY_SERVER_NONCE" "";
+        Context_store.field "authorized" result=`Bool true
+      with _->false)
+  | _ -> false
+ in
 let headless_run worker wait options =
-  match options with
-  | Error message -> exit_code (Error message)
-  | Ok options ->
-      Headless.run_worker ~wait ~explicit_resume:false options worker
-      |> print_headless_result
+  match options with Error message->exit_code(Error message)|Ok options->
+    (if server_child ~home:options.Launcher.home then Headless.run_worker ~locked:true ~on_started:(fun _ json -> Fmt.pr "MONTY_STARTED %s\n%!" (Yojson.Safe.to_string json)) ~wait:true ~explicit_resume:false options worker
+     else Client_terminal.headless ~wait ~resume:false options worker) |> print_headless_result
  in
-
 let headless_resume worker wait options =
-  match options with
-  | Error message -> exit_code (Error message)
-  | Ok options ->
-      Headless.run_worker ~wait ~explicit_resume:true options worker
-      |> print_headless_result
+  match options with Error message->exit_code(Error message)|Ok options->
+    (if server_child ~home:options.Launcher.home then Headless.run_worker ~locked:true ~on_started:(fun _ json -> Fmt.pr "MONTY_STARTED %s\n%!" (Yojson.Safe.to_string json)) ~wait:true ~explicit_resume:true options worker
+     else Client_terminal.headless ~wait ~resume:true options worker) |> print_headless_result
  in
 let headless_wait_arg =
-  let doc = "Wait for the final run result. By default, return once the independent background supervisor has claimed the worker and prepared its first phase." in
+  let doc = "Wait for the final run result. By default, return once the server-owned supervisor has claimed the worker and prepared its first phase." in
   Cmdliner.Arg.(value & flag & info [ "wait" ] ~doc)
  in
 let headless_worker_term ?(legacy = false) command =
@@ -356,7 +367,7 @@ let headless_worker_term ?(legacy = false) command =
   let mode =
     if legacy then
       Cmdliner.Arg.(value & flag & info [ "resume" ]
-        ~doc:"Intentionally emit a successor legacy Pi subagent dispatch.")
+        ~doc:"Intentionally start a successor server-owned execution.")
     else headless_wait_arg
   in
   Cmdliner.Term.(const command $ worker $ mode $ headless_options_term)
@@ -369,7 +380,19 @@ let headless_run_many manifest wait options =
       (match Manifest.load ~home:options.Launcher.home manifest with
       | Error msg -> exit_code (Error msg)
       | Ok jobs -> (
-          match Headless.run_many ~wait options jobs with
+          match (if server_child ~home:options.Launcher.home then Headless.run_many ~wait:true options jobs else
+            let ( let* )=Result.bind in
+            let* workers=Headless.preflight_batch options jobs in
+            let results=Lwt_main.run(Lwt_list.map_p (fun worker ->
+              let open Lwt.Infix in
+              Client_terminal.headless_async ~wait ~resume:false options worker >|= function
+              | Ok result -> `Assoc["worker_id",`String worker;"result",result]
+              | Error error -> `Assoc["worker_id",`String worker;"error",`String error]) workers) in
+            let success=List.for_all(fun result->Context_store.field "error" result=`Null) results in
+            Ok(`Assoc["schema",`String(if not wait then "monty:headless-start-many:v1" else
+               match options.harness with Harness.Codex->Headless.codex_run_many_schema|Pi->"monty:headless-pi-run-many:v1"|Claude->"monty:headless-claude-run-many:v1");
+              "harness",`String(Harness.to_string options.harness);"codex_yolo",`Bool(options.harness=Harness.Codex && options.codex_yolo);
+              "success",`Bool success;"results",`List results],success)) with
           | Error msg -> exit_code (Error msg)
           | Ok (json, success) ->
               Headless.print_json json;
@@ -654,9 +677,10 @@ let resume archived fresh worker options =
       in
       let* codex_mode =
         match options.harness with
-        | Harness.Pi -> Ok Codex_session.Fresh
+        | Harness.Pi -> Native_session.resume_mode ~harness:Harness.Pi ~fresh ~worker_dir:record.worker_dir
         | Codex ->
             Codex_session.resume_mode ~fresh ~worker_dir:record.worker_dir
+        | Claude -> Native_session.resume_mode ~harness:Harness.Claude ~fresh ~worker_dir:record.worker_dir
       in
       let* job =
         if archived then
@@ -1092,7 +1116,7 @@ let task_merge_term =
   in
   Cmdliner.Term.(const task_merge $ source $ target $ home_arg)
  in
-let doctor home harness_override pi_command codex_command wt_command backend worktree_mode =
+let doctor home harness_override pi_command codex_command claude_command wt_command backend worktree_mode =
   match
     ( Settings.effective_harness ~getenv ~home harness_override,
       Settings.load ~home )
@@ -1100,7 +1124,7 @@ let doctor home harness_override pi_command codex_command wt_command backend wor
   | Error message, _ | _, Error message -> exit_code (Error message)
   | Ok harness, Ok settings ->
       let harness_command =
-        match harness with Harness.Pi -> pi_command | Harness.Codex -> codex_command
+        match harness with Harness.Pi -> pi_command | Harness.Codex -> codex_command | Harness.Claude -> claude_command
       in
       Doctor.run ~home ~harness ~harness_command ~wt_command ~backend
         ~worktree_mode ~container_workers:settings.container_workers
@@ -1108,7 +1132,7 @@ let doctor home harness_override pi_command codex_command wt_command backend wor
  in
 let doctor_term =
   Cmdliner.Term.(
-    const doctor $ home_arg $ harness_arg $ pi_command_arg $ codex_command_arg
+    const doctor $ home_arg $ harness_arg $ pi_command_arg $ codex_command_arg $ claude_command_arg
     $ wt_command_arg $ backend_arg
     $ worktree_arg)
  in
@@ -1437,17 +1461,17 @@ let headless_cmd =
     Cmdliner.Cmd.v (Cmdliner.Cmd.info "prepare-many" ~doc) headless_prepare_many_term
   in
   let begin_cmd =
-    let doc = "Emit a legacy Pi subagent dispatch. Prefer headless run for standalone execution." in
+    let doc = "Start server-owned execution; --resume intentionally starts a successor attempt." in
     Cmdliner.Cmd.v (Cmdliner.Cmd.info "begin" ~doc)
       (headless_worker_term ~legacy:true headless_begin)
   in
   let run_cmd =
-    let doc = "Start an independent background Pi or Codex worker using its pinned agent profile." in
+    let doc = "Start a server-owned Pi, Codex or Claude worker using its pinned agent profile." in
     Cmdliner.Cmd.v (Cmdliner.Cmd.info "run" ~doc)
       (headless_worker_term headless_run)
   in
   let run_many_cmd =
-    let doc = "Start prepared manifest workers concurrently using independent background runners." in
+    let doc = "Start prepared manifest workers concurrently using server-owned runners." in
     Cmdliner.Cmd.v (Cmdliner.Cmd.info "run-many" ~doc) headless_run_many_term
   in
   let resume_cmd =
@@ -1532,7 +1556,7 @@ let main_cmd =
       Guide.command;
       Cmdliner.Cmd.group (Cmdliner.Cmd.info "mcp" ~doc:"Legacy CLI guide alias; the MCP server has been removed.") [Guide.command];
       Skill.command ~home_arg ~harness_arg ~getenv ~monty_command:(monty_command ());
-    ] @ Context_cli.commands ~home_arg ~harness_arg ~pi_command_arg ~codex_command_arg ~getenv)
+    ] @ Context_cli.commands ~home_arg ~harness_arg ~pi_command_arg ~codex_command_arg ~claude_command_arg ~getenv)
  in
 main_cmd
 

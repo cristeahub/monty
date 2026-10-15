@@ -38,30 +38,26 @@ let analysis_prompt config observations unresolved =
                                   "projects",field "projects" config;"groups",field "groups" config;
                                   "observations",`List observations;"unresolved",`List unresolved])
 
-let model ~home ~harness ~command ~cancel ~seconds prompt =
-  let* _, finish = Process.command_word command in
-  let* () = if String.trim (String.sub command finish (String.length command - finish)) <> "" then
-      Error "context triage requires a bare harness executable; coding-worker command arguments are not accepted"
-    else Ok () in
-  let* command = Process.absolute_command command in
-  let* result = match harness with
-  | Harness.Pi -> Context_process.run ~cancel ~seconds ~cwd:(root home)
-      ~command:(command ^ " --print --mode text --no-session --no-tools --no-extensions --no-skills --no-prompt-templates --no-context-files --no-themes --offline") ~input:prompt ()
-  | Harness.Codex ->
-      (* Ignore user/project integrations and coding permissions, including yolo.
-         An empty private cwd and read-only sandbox also contain built-in patching. *)
-      let disabled = ["shell_tool";"unified_exec";"apps";"plugins";"hooks";"multi_agent";
-                      "browser_use";"browser_use_external";"computer_use";"in_app_browser";
-                      "image_generation";"view_image";"code_mode";"code_mode_host";"skill_search";
-                      "skill_mcp_dependency_install";"memories";"goals";"tool_suggest";
-                      "in_app_local_automation";"workspace_dependencies"] in
-      let flags = List.map (fun name -> " -c " ^ Shell.quote ("features." ^ name ^ "=false")) disabled |> String.concat "" in
-      let* out = Context_process.run ~cancel ~seconds ~cwd:(root home)
-          ~command:(command ^ " exec --ignore-user-config --ignore-rules --ephemeral --skip-git-repo-check --sandbox read-only --color never"
-                    ^ flags ^ " -c 'approval_policy=\"never\"' -c 'web_search=\"disabled\"' -c 'mcp_servers={}' -c 'project_doc_max_bytes=0' -c 'skills.include_instructions=false' -c 'skills.bundled.enabled=false' -")
-          ~input:prompt () in
-      Ok out in
-  parse (fun () -> Yojson.Safe.from_string (String.trim result))
+let model ~home ~harness ~command:_ ~cancel ~seconds prompt =
+  try Ok(Lwt_main.run(let open Lwt.Infix in
+    Client_http.request ~home `GET "/v1/health" `Null >>= fun health ->
+    let directory=Conversation_store.get(Skill.agent_directory harness) |> Unix.realpath in
+    let candidates=xs "profiles" health |> List.filter(fun p->field "harness" p=`String(Harness.to_string harness) && field "scope" p=`String(Conversation_store.sha directory)) in
+    let profile=match candidates with [p]->s "id" p|_->Conversation_store.fail 409 "configure one server profile for the selected context classifier account" in
+    let id=Conversation_store.random_id() in
+    Client_http.request ~home `POST ("/v1/commands/" ^ id) (`Assoc["op",`String "classify";"profile",`String profile;"text",`String prompt;"seconds",`Int seconds]) >>= fun _ ->
+    let rec poll () =
+      Client_http.request ~home `GET ("/v1/commands/" ^ id) `Null >>= fun receipt ->
+      (if cancel() && s "status" receipt="running" then
+        Client_http.request ~home `POST ("/v1/commands/" ^ Conversation_store.random_id())
+          (`Assoc["op",`String "cancel_execution";"command",`String id;"updated_at",field "updated_at" receipt]) >>= fun _ ->
+        Lwt.fail(Conversation_store.Failure(409,"context classification cancelled"))
+       else Lwt.return_unit) >>= fun () ->
+      match s "status" receipt with
+      | "finished" -> Lwt.return(field "result" receipt)
+      | "accepted"|"running" -> Lwt_unix.sleep 0.1 >>= poll
+      | _ -> Conversation_store.fail 409 "context classifier failed; inspect server receipt" in poll ()))
+  with Conversation_store.Failure(_,message)->Error message|_->Error "Monty server unavailable for context classification; configure/start the local service"
 
 let publish_analysis ~home ~id ~generation ~batch answer =
   let* findings = parse (fun () ->

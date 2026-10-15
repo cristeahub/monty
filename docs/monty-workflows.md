@@ -9,7 +9,7 @@ which operations you may perform.
 ## Inventory
 
 This repo is the Monty control room.
-Use this control room to plan work, choose actionable tasks, and launch worker agent sessions through the configured Pi or Codex harness.
+Use this control room to plan work, choose actionable tasks, and launch worker agent sessions through the configured Pi, Codex or Claude harness.
 At the start of a head-butler planning session, run `monty handoff pending` before presenting the task inventory.
 Surface each pending run handoff at the next safe message boundary; never interrupt, cancel, or replace an unrelated response already in progress.
 After a handoff has actually been displayed to the user, run `monty handoff acknowledge <notice-id>`.
@@ -159,7 +159,7 @@ Ghostty remains the default execution surface.
 Use the headless harness flow only when the user explicitly requests headless or Pi-subagent execution.
 Headless commands must resolve the effective harness through the normal CLI, environment, and persisted-settings precedence.
 When `codex` is persisted as the selected harness, do not add a redundant `--harness codex` flag.
-Monty runs standalone Pi or Codex processes and owns their background supervisor lifecycle.
+The Monty server owns native Pi, Codex and Claude processes and their supervisors. Configure the local service before execution; an unavailable service never falls back to an independent native launch. See docs/server-owned-agents.md for current rollout limitations.
 For both harnesses, preflight must confirm the configured executable is available before state mutation.
 No parent subagent tool is needed for standalone execution.
 Run headless dry-run first when checking a new batch or when the user asks for a preview:
@@ -190,7 +190,7 @@ durable handoff inbox at the next safe message boundary.
 
 Each chain gets fresh minimal context and follows its pinned agent profile: one implementer, zero or more mutually isolated reviewers in parallel, then an optional final writer (simplifier or fixer).
 The default `simplified` profile runs one implementer followed by one separate editing simplifier, sequentially in the same workspaces. The explicit `reviewed` profile runs one implementer, two reviewers, and one fixer; `solo` runs only the implementer with self-validation. Legacy workers without profile metadata retain `reviewed` behavior.
-Monty captures reviewer reports outside the worktree. Pi reviewers use read-only file tools without bash; Codex reviewers retain the configured sandbox policy.
+Monty captures reviewer reports outside the worktree. Pi reviewers use read-only file tools without bash; Codex reviewers use a read-only sandbox with hooks, MCP integrations and delegation disabled; Claude reviewers expose only read/search tools with those integrations disabled.
 No child may create worktrees, stage, commit, push, open a PR, post remotely, or run `monty done`.
 A successful chain leaves the task open and its worktree intact.
 Never infer completion from Pi runtime status.
@@ -198,8 +198,7 @@ Never infer completion from Pi runtime status.
 If a process fails after its worker is claimed, leave the worker `launch-requested`.
 Run `monty headless resume <worker-id>` only when the user intentionally requests a fresh successor run.
 Resume directly starts the selected Pi or Codex profile in the background; `--wait` waits for its result.
-Legacy integrations may still use `headless begin` / `headless finish`, with `headless begin --resume` for a successor extension dispatch.
-Before any mutating legacy Pi extension command, call its actual `subagent` tool with `action: "list"` and confirm required agents exist. Pass generated arguments and callback commands unchanged.
+`headless begin` now submits server-owned execution. `headless finish` remains for recovery of already persisted legacy callback attempts; it does not authorize new direct native execution.
 Never persist a backend, Pi run ID, Codex session ID, async status, or runtime state in `job.json`.
 Interactive Codex workers record their exact conversation only in the durable
 `codex-session-id` sidecar; headless Codex chains must not claim or update it.
@@ -284,7 +283,7 @@ Any FAIL exits nonzero and must be resolved before relying on launch or lifecycl
 The implementation is OCaml built with Dune.
 Use Dune package management and dependencies in `dune-project`.
 Do not add opam files.
-Use Ghostty as the default terminal backend. Use `monty settings set harness pi|codex` to persist the default agent harness; `--harness` remains the per-command override. Use `monty settings set branch-prefix <prefix>` to persist the default generated-branch prefix; `--branch-prefix` remains the per-command override.
+Use Ghostty as the default terminal backend. Use `monty settings set harness pi|codex|claude` to persist the default agent harness; `--harness` remains the per-command override. Use `monty settings set branch-prefix <prefix>` to persist the default generated-branch prefix; `--branch-prefix` remains the per-command override.
 Use `monty settings set codex-yolo true|false` to control whether Monty-launched Codex sessions bypass approvals and sandboxing. Treat the enabled value as an explicit high-risk user choice.
 Keep headless state and payload generation in Monty.
 Pi and Codex headless execution use their configured non-interactive commands under Monty's shared background runner.
@@ -364,6 +363,7 @@ an initialized Monty home. To install explicitly without starting an agent:
 ```sh
 monty skills install --harness codex
 monty skills install --harness pi
+monty skills install --harness claude
 ```
 
 The skill and manual are embedded in the executable. Identical files are left
@@ -508,17 +508,17 @@ checks that JSON parsing leaves the dashboard responsive.
 ## Client service
 
 The version 1 client API coordinates conversations independently of tasks. It
-uses Cohttp/Lwt, upstream Codex app-server daemon management and a persistent
-Unix WebSocket subscription. Tested real adapters are Codex 0.160.0, 0.160.1 and Pi 1.0.2.
+uses Cohttp/Lwt, server-owned native processes and persistent private transports.
+The Codex protocol baseline is 0.160.0/0.160.1; the Pi RPC baseline is 1.0.2.
+Claude uses the explicitly packaged SDK version described in docs/server-owned-agents.md.
 Codex versions are informational: Monty attempts the native connection regardless
 of version and reports connection or protocol failures. Other Pi runtime versions
 fail closed. Pi also supports read-only native JSONL
 history mirroring without starting its runtime. This service is separate from optional external
 context collection and never enables it. CLI guidance comes from the Monty skill.
 
-The managed Codex daemon can differ from the CLI version. Check the selected
-account with `CODEX_HOME=/selected/home codex app-server daemon version`;
-`appServerVersion` identifies the running daemon. `/health` lists tested versions in
+Codex connects through a private server-owned app-server, rather than adopting
+the account's independently launched daemon. `/health` lists protocol baselines in
 `codex_tested_versions`; `codex_version` retains the original compatibility baseline.
 New threads explicitly request `historyMode: "legacy"`, matching Monty's existing
 full-history adapter instead of inheriting Codex's changing storage default.
@@ -544,9 +544,9 @@ account homes and workspace roots explicitly. A trusted configuration is:
 }
 ```
 
-Each profile requires a distinct account `CODEX_HOME`; its upstream daemon is
-started or reused in that scope. Do not point test configurations at personal
-accounts. Native daemon processes inherit a minimal system environment, not
+Each Codex profile requires an explicit account `CODEX_HOME`; its private runtime
+is fenced within that scope. Do not point automated test configurations at personal
+accounts. Native processes inherit a minimal system environment, not
 Monty worker variables or ambient API keys. Use account configuration in the
 selected native home. Per-thread workspace roots, instructions, shell Monty
 variables are supplied in `thread/start` config. The Monty CLI skill is installed
@@ -570,7 +570,7 @@ monty service start --home /absolute/monty-home --config /absolute/profiles.json
 ```
 
 Run this once to select the trusted configuration and start in the background. Monty remembers its absolute
-path and bound port in `.monty/client-service.json`. Later Codex launches,
+path and bound port in `.monty/client-service.json`. Later native launches,
 including plain `monty`, automatically start the service in the background if
 needed and wait for authenticated health before opening the terminal. A healthy
 service is reused; concurrent launches share the existing service lock. Logs go
@@ -588,12 +588,12 @@ the saved configuration or port with `start --config FILE --port PORT`.
 `service serve --config FILE` remains available for foreground operation with
 Ctrl-C to stop. `service stop` also works for foreground services, authenticates
 to the current service epoch, and never signals a PID from saved metadata. The
-next Codex launch starts it again. Stopping the service disconnects
-Monty's observer and API clients. The shared Codex daemon keeps running, but
-service-owned Pi RPC children are shut down, ending their active execution.
-Restart with the same configuration and home for history catch-up; Pi control
-requires an explicit `resume`. Stop a Codex account daemon separately only when intentionally stopping
-its chats: `CODEX_HOME=/selected/home codex app-server daemon stop`.
+next managed launch starts it again. Stopping the service disconnects clients
+and shuts down its private Codex, Pi, Claude and terminal processes. Independently
+launched native daemons are left alone. Restart with the same configuration and
+home to inspect retained history; control requires explicit resume. Unfinished
+turns are never silently replayed. Retained terminal bytes remain readable through
+the API after restart, with an unknown outcome when the owner died mid-session.
 
 The listener binds IPv4 loopback only. Port zero (the default) chooses a free
 port. `.monty/client-service.json` records the address, PID and service epoch;
@@ -931,8 +931,9 @@ python3 test/test_pi_api.py _build/default/bin/main.exe --real
 ```
 
 The default suite uses isolated homes, temporary Git repositories and fake native
-servers. `--real` additionally requires installed Codex and a PTY; it starts
-and stops only its isolated daemon, and serves all inference from a local fixture.
+servers. `--real` additionally requires installed Codex and a PTY; it verifies
+the server's private native runtime and terminal, with all inference served by
+a local fixture. The private runtime test passed with Codex 0.162.1.
 The Pi `--real` suite requires Pi 1.0.2, fresh native/system homes and a local
 model fixture; it verifies RPC send/interrupt, shared API observation, native
 file continuation/mirroring and resuming the exact detached native identity.

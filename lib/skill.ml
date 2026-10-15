@@ -8,6 +8,7 @@ let files =
 let agent_directory harness =
   let variable, fallback = match harness with
     | Harness.Codex -> "CODEX_HOME", ".codex"
+    | Harness.Claude -> "CLAUDE_CONFIG_DIR", ".claude"
     | Harness.Pi -> "PI_CODING_AGENT_DIR", ".pi/agent" in
   match Sys.getenv_opt variable with
   | Some path when String.trim path <> "" -> Ok (Shell.abs_path path)
@@ -69,7 +70,7 @@ let ensure_at ~home ~harness ~directory ~monty_command =
         let* () = List.fold_left (fun result (path, contents) ->
           let* () = result in State_store.write_file_atomic ~path ~perm:0o600 contents) (Ok ()) changes in
         match harness with
-        | Harness.Codex -> Ok ()
+        | Harness.Codex | Harness.Claude -> Ok ()
         | Harness.Pi -> remove_pi_mcp ~directory ~monty_command)))
 
 let ensure ~home ~harness ~monty_command =

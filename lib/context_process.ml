@@ -41,7 +41,7 @@ let run ?(env = Unix.environment ()) ?(cancel = fun () -> false)
           let stop () =
             (try Unix.kill (-pid) Sys.sigkill with _ -> ());
             (try Unix.kill pid Sys.sigkill with _ -> ());
-            (try ignore (Unix.waitpid [] pid) with _ -> ())
+            (try ignore (Process.waitpid [] pid) with _ -> ())
           in
           let deadline = Unix.gettimeofday () +. float_of_int seconds in
           let rec wait () =
@@ -50,8 +50,8 @@ let run ?(env = Unix.environment ()) ?(cancel = fun () -> false)
             if cancel () then (stop (); Error "context operation cancelled")
             else if Unix.gettimeofday () >= deadline || too_large then (
               stop (); Error "context child exceeded time/output budget")
-            else match Unix.waitpid [Unix.WNOHANG] pid with
-              | 0, _ -> ignore (Unix.select [] [] [] 0.1); wait ()
+            else match Process.waitpid [Unix.WNOHANG] pid with
+              | 0, _ -> (try ignore (Unix.select [] [] [] 0.1) with Unix.Unix_error(Unix.EINTR,_,_)->()); wait ()
               | _, Unix.WEXITED 0 -> Ok (Shell.read_file stdout_path)
               | _, _ when diagnostic_failure -> Ok (Shell.read_file stdout_path ^ Shell.read_file stderr_path)
               | _, status ->

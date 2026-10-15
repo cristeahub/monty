@@ -14,7 +14,7 @@ let command ~home_arg =
     Term.(const (fun home config_path port -> exit (fun () ->
       ignore(Lwt_main.run (Client_terminal.ensure_service ?config_path ?port ~home:(Unix.realpath home) ()));
       Printf.printf "Monty service is running.\n")) $ home_arg $ config $ port) in
-  let stop=Cmd.v (Cmd.info "stop" ~doc:"Stop the client service, preserving its configuration and shared Codex daemon.")
+  let stop=Cmd.v (Cmd.info "stop" ~doc:"Stop the client service and its owned runtimes, preserving configuration and history.")
     Term.(const (fun home -> exit (fun () ->
       let stopped=Lwt_main.run (Client_terminal.stop_service ~home:(Unix.realpath home)) in
       Printf.printf "Monty service %s.\n" (if stopped then "stopped" else "is already stopped"))) $ home_arg) in
@@ -43,17 +43,23 @@ let web ~home_arg =
 
 let terminal ~home_arg =
   let open Cmdliner in
-  let opt name doc = Arg.(value & opt (some string) None & info [name] ~doc) in
-  let profile=Arg.(value & opt (some string) (Sys.getenv_opt "MONTY_API_PROFILE") & info ["profile"]
-    ~doc:"Configured service profile. Defaults to the Codex profile matching the active CODEX_HOME.") in
-  let codex=Arg.(value & opt string "codex" & info ["codex-command"]) in
+  let opt name doc=Arg.(value & opt (some string) None & info [name] ~doc) in
+  let profile=Arg.(value & opt (some string) (Sys.getenv_opt "MONTY_API_PROFILE") & info ["profile"] ~doc:"Configured service account profile.") in
+  let harness=Arg.(value & opt string "codex" & info ["harness"] ~doc:"pi, codex or claude.") in
   let yolo=Arg.(value & flag & info ["codex-yolo"] ~doc:"Run Codex without approvals or sandboxing. This is dangerous.") in
-  let worker=Arg.(value & flag & info ["worker"] ~doc:"Use the explicit Monty worker environment, task link, workspaces and session sidecar.") in
-  let mode=Arg.(value & opt string "fresh" & info ["mode"] ~doc:"fresh, picker, last or exact (with --session).") in
-  Cmd.v (Cmd.info "terminal" ~doc:"Open native Codex on an exact Monty service thread; never falls back to standalone.")
-    Term.(const (fun home profile codex_command mode session_id prompt instructions context request_id yolo worker -> exit (fun () ->
+  let worker=Arg.(value & flag & info ["worker"] ~doc:"Use the explicit worker environment, workspaces and native sidecar.") in
+  let mode=Arg.(value & opt string "fresh" & info ["mode"] ~doc:"fresh, picker, last or exact with --session.") in
+  let title=Arg.(value & opt string "Monty conversation" & info ["title"]) in
+  Cmd.v (Cmd.info "terminal" ~doc:"Display a native terminal owned by Monty's server; client exit detaches.")
+    Term.(const(fun home profile harness mode session_id prompt instructions context request_id yolo worker title codex pi claude fork -> exit(fun () ->
+      let harness=get(Harness.of_string harness |> Result.map_error(fun (`Msg m)->m)) in
       let codex_yolo=get(Settings.effective_codex_yolo ~getenv:Sys.getenv_opt ~home yolo) in
-      Client_terminal.launch ~home ~profile ~codex_command ~codex_yolo ~mode ~session_id ~prompt ~instructions ~context ~request_id ~worker))
-      $ home_arg $ profile $ codex $ mode $ opt "session" "Exact registered native thread."
-      $ opt "prompt" "Initial user prompt." $ opt "instructions" "Worker instructions file."
-      $ opt "context" "Task context file." $ opt "request-id" "Stable command ID for retry/receipt lookup." $ yolo $ worker)
+      let title=if worker then Option.value ~default:title (Sys.getenv_opt "MONTY_JOB_TITLE") else title in
+      let command_override=match harness with Harness.Pi->pi|Codex->codex|Claude->claude in
+      let code=Client_terminal.launch ~home ~profile ~harness ~command_override ~fork ~codex_yolo ~mode ~session_id ~prompt ~instructions ~context ~request_id ~worker ~title in
+      if code<>0 then Stdlib.exit code))
+      $ home_arg $ profile $ harness $ mode $ opt "session" "Exact registered native session."
+      $ opt "prompt" "Initial prompt." $ opt "instructions" "Worker instructions file." $ opt "context" "Task context file."
+      $ opt "request-id" "Stable command receipt ID." $ yolo $ worker $ title
+      $ opt "codex-command" "Use the matching trusted server command." $ opt "pi-command" "Use the matching trusted server command."
+      $ opt "claude-command" "Use the matching trusted server command." $ opt "fork" "Pi fork selector.")

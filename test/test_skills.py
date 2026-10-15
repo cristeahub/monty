@@ -20,7 +20,7 @@ with tempfile.TemporaryDirectory(prefix="monty-skills-") as tmp:
     shutil.copy2(BINARY, executable)
     env = dict(os.environ, HOME=str(root), MONTY_HOME=str(home), MONTY_HARNESS="codex",
                CODEX_HOME=str(root / "codex profile"), PI_CODING_AGENT_DIR=str(root / "pi profile"),
-               MANTLE_CONTEXT="", MONTY_CODEX_YOLO="false")
+               CLAUDE_CONFIG_DIR=str(root / "claude profile"), MANTLE_CONTEXT="", MONTY_CODEX_YOLO="false")
 
     def cli(*args, ok=True, environment=env):
         result = subprocess.run([str(executable), *args], cwd=root, env=environment,
@@ -41,7 +41,7 @@ with tempfile.TemporaryDirectory(prefix="monty-skills-") as tmp:
     assert not Path(env["PI_CODING_AGENT_DIR"]).exists()
 
     originals = {}
-    for harness, key in [("codex", "CODEX_HOME"), ("pi", "PI_CODING_AGENT_DIR")]:
+    for harness, key in [("codex", "CODEX_HOME"), ("pi", "PI_CODING_AGENT_DIR"), ("claude", "CLAUDE_CONFIG_DIR")]:
         agent = Path(env[key])
         target = agent / "skills/monty"
         cli("skills", "install", "--harness", harness)
@@ -161,10 +161,21 @@ with tempfile.TemporaryDirectory(prefix="monty-skills-") as tmp:
                     "assert skill.is_file()\n"
                     f"Path({str(log)!r}).write_text(json.dumps(sys.argv[1:]))\n")
     fake.chmod(0o755)
-    for command in [["start"], ["continue", "--last"], ["continue", "saved-session"]]:
-        shutil.rmtree(agent / "skills/monty")
-        cli(*command, "--harness", "pi", "--pi-command", shlex.quote(str(fake)))
-        assert json.loads(log.read_text())
+    config=root/'server.json'
+    config.write_text(json.dumps({'profiles':[{'id':'pi','harness':'pi','command':str(fake),'pi_home':str(agent),'roots':[str(root)]}]}))
+    log.unlink(missing_ok=True)
+    cli('start','--harness','pi','--pi-command',shlex.quote(str(fake)),ok=False)
+    assert not log.exists(), 'unavailable server launched an independent harness'
+    cli('service','start','--config',str(config))
+    try:
+        cli('start','--harness','pi','--pi-command',shlex.quote(str(fake)))
+        for _ in range(100):
+            if log.exists():break
+            import time;time.sleep(.02)
+        args=json.loads(log.read_text());assert '--session-id' in args
+        # API/terminal ownership and exact continuation have dedicated suites.
+        assert (agent/'skills/monty/SKILL.md').exists()
+    finally:cli('service','stop')
     assert not (root / "INJECTED").exists()
     assert not (home / ".monty/tasks.local.json").exists()
     assert not (home / ".monty/runs").exists()

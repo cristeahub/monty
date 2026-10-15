@@ -17,7 +17,7 @@ let render snapshot =
       List.iter (fun o -> Printf.printf "  %s\n" (s "url" o)) (xs "evidence" f)) (xs "findings" snapshot);
   if xs "findings" snapshot = [] then print_endline "No findings in this snapshot; consult coverage and backlog above.";
   (match field "next_cursor" snapshot with `String cursor -> Printf.printf "Next page: --before %s\n" cursor | _ -> ())
-let commands ~home_arg ~harness_arg ~pi_command_arg ~codex_command_arg ~getenv =
+let commands ~home_arg ~harness_arg ~pi_command_arg ~codex_command_arg ~claude_command_arg ~getenv =
   let open Cmdliner in
   let home_arg = Term.(const (fun home -> match State_path.canonicalize home with
       | Ok path -> path | Error _ -> Shell.normalize (Shell.abs_path home)) $ home_arg) in
@@ -29,9 +29,9 @@ let commands ~home_arg ~harness_arg ~pi_command_arg ~codex_command_arg ~getenv =
         print_endline (if enabled then "Context service enabled." else "Context service disabled; data preserved."))) in
   let configure home file = emit (configure ~home file) in
   let check home id = emit (Context.check ~home id) in
-  let tick home override pi codex =
+  let tick home override pi codex claude =
     exit (let* harness = Settings.effective_harness ~getenv ~home override in
-          Context.tick ~home ~harness ~command:(match harness with Harness.Pi -> pi | Harness.Codex -> codex)) in
+          Context.tick ~home ~harness ~command:(match harness with Harness.Pi -> pi | Harness.Codex -> codex | Harness.Claude -> claude)) in
   let retriage home id = exit (mutate ~home (fun state ->
       let* c = connection state id in
       let generation = i "generation" state + 1 in
@@ -50,7 +50,7 @@ let commands ~home_arg ~harness_arg ~pi_command_arg ~codex_command_arg ~getenv =
      command "retriage" "Queue retained observations for analysis with current relevance rules."
        Term.(const retriage $ home_arg $ positional "CONNECTION");
      command "tick" "Run one bounded collection/analysis tick if enabled; normally called by launchd."
-       Term.(const tick $ home_arg $ harness_arg $ pi_command_arg $ codex_command_arg)] in
+       Term.(const tick $ home_arg $ harness_arg $ pi_command_arg $ codex_command_arg $ claude_command_arg)] in
   let source = Arg.(value & opt (some string) None & info ["source"] ~doc:"Filter by slack, zulip or connection ID.") in
   let new_only = Arg.(value & flag & info ["new"] ~doc:"Only revisions not yet presented.") in
   let limit = Arg.(value & opt int 20 & info ["limit"] ~doc:"Page size, 1-100.") in

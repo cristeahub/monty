@@ -1,6 +1,6 @@
 let ( let* ) = Result.bind
 
-external try_lock : Unix.file_descr -> unit = "monty_worker_flock"
+let try_lock = Process.try_worker_lock
 
 let with_lock ~home ~(record : Job_store.record) operation =
   let directory = Filename.concat record.run_dir ".worker-locks" in

@@ -961,7 +961,7 @@ let test_job_store_rejects_symlink_escape () =
 let test_doctor_typed_checks_and_configuration () =
   let home = temp_root "doctor" in
   let find_command command =
-    if List.mem command [ "pi --fixed"; "codex --fixed"; "gh" ] then
+    if List.mem command [ "pi --fixed"; "codex --fixed"; "gh"; "python3" ] then
       Ok ("/fake/" ^ command)
     else Error ("missing " ^ command)
   in
@@ -1002,19 +1002,12 @@ let test_head_butler_continuation_commands () =
   let command harness continuation =
     Head_butler.continuation_command ~monty_command:"/monty/bin/monty" ~home:"/monty home" ~harness
       ~harness_command:
-        (match harness with Harness.Pi -> "pi --fixed" | Harness.Codex -> "codex --fixed")
+        (match harness with Harness.Pi -> "pi --fixed" | Harness.Codex -> "codex --fixed" | Harness.Claude -> "claude --fixed")
       ~codex_yolo:true continuation
   in
-  assert_equal "Pi continuation picker"
-    "cd '/monty home' && exec pi --fixed --resume"
-    (command Harness.Pi Head_butler.Picker);
-  assert_equal "Pi continuation last"
-    "cd '/monty home' && exec pi --fixed --continue"
-    (command Harness.Pi Head_butler.Last);
-  assert_equal "Pi continuation exact selector"
-    ("cd '/monty home' && exec pi --fixed --session "
-    ^ Shell.quote "design's notes")
-    (command Harness.Pi (Head_butler.Session "design's notes"));
+  assert_contains "Pi continuation picker" (command Harness.Pi Head_butler.Picker) "--harness pi --pi-command 'pi --fixed' --mode picker";
+  assert_contains "Pi continuation last" (command Harness.Pi Head_butler.Last) "--mode last";
+  assert_contains "Pi continuation exact selector" (command Harness.Pi (Head_butler.Session "design's notes")) ("--session " ^ Shell.quote "design's notes");
   let codex_picker = command Harness.Codex Head_butler.Picker in
   assert_contains "Codex continuation picker" codex_picker "terminal --home '/monty home'";
   assert_contains "Codex fixed command" codex_picker "--codex-command 'codex --fixed'";
@@ -1338,6 +1331,52 @@ let test_container_worker_contract () =
   assert_bool "parsed insertions" (changes.insertions = 1);
   assert_bool "parsed deletions" (changes.deletions = 2)
 
+let test_claude_final_message () =
+  let path=Filename.temp_file "monty-claude-result" ".jsonl" in
+  Fun.protect ~finally:(fun ()->Sys.remove path)(fun ()->
+    let result=`Assoc["type",`String "result";"subtype",`String "success";"is_error",`Bool false;
+      "session_id",`String "12345678-1234-4234-8234-123456789abc";"permission_denials",`List[];"result",`String "Validated handoff"] in
+    let write values=Shell.write_file path (String.concat "\n" (List.map Yojson.Safe.to_string values) ^ "\n") in
+    write[result];assert_equal "Claude completed handoff" "Validated handoff\n" (match Headless.claude_final_message path with Ok text->text|Error message->failwith message);
+    let invalid label values=write values;assert_bool label (Result.is_error(Headless.claude_final_message path)) in
+    invalid "Claude missing terminal result" [`Assoc["type",`String "assistant"]];
+    invalid "Claude duplicate terminal result" [result;result];
+    let replace key value=match result with `Assoc fields->`Assoc((key,value)::List.remove_assoc key fields)|_->assert false in
+    invalid "Claude permission denial" [replace "permission_denials" (`List[`Assoc["tool_name",`String "Write"]])];
+    invalid "Claude malformed permission denials" [replace "permission_denials" (`String "none")];
+    invalid "Claude invalid UUID" [replace "session_id" (`String "not-a-session")];
+    invalid "Claude empty result" [replace "result" (`String "")];
+    Shell.write_file path "{malformed\n";assert_bool "Claude malformed stream" (Result.is_error(Headless.claude_final_message path)))
+
+let test_review_command () =
+  List.iter (fun (harness,args) ->
+    assert_bool ("reviewer rejects " ^ args)
+      (Result.is_error(Harness.check_review_command harness ("'/tool with spaces' " ^ args))))
+    [Harness.Pi,"-e /plugin.ts";Pi,"--extension=/plugin.ts";
+     Codex,"-cmcp_servers.x.command=tool";Codex,"--dangerously-bypass-approvals-and-sandbox";
+     Codex,"--approve-for-me";Codex,"--dangerously-bypass-hook-trust";
+     Claude,"--mcp-config '{}'";Claude,"--plugin-dir /plugin";Claude,"--settings '{\"hooks\":{}}'";
+     Claude,"--tools Bash";Claude,"--worktree";Claude,"--"];
+  List.iter (fun harness -> assert_bool "reviewer preserves model argument"
+    (Result.is_ok(Harness.check_review_command harness "'/tool with spaces' --model 'model name'")))
+    [Harness.Pi;Codex;Claude]
+
+let test_codex_review_config () =
+  let provider=`Assoc["name",`String "Fixture";"base_url",`String "http://localhost/v1";
+    "wire_api",`String "responses";"requires_openai_auth",`Bool false] in
+  let config definition=`Assoc["model",`String "scoped-model";"model_provider",`String "fixture";
+    "model_providers",`Assoc["fixture",definition];"features",`Assoc["hooks",`Bool true];
+    "mcp_servers",`Assoc["unsafe",`Assoc[]];"sandbox_mode",`String "danger-full-access"] in
+  let projected=must(Native_command.codex_model_config(config provider)) in
+  assert_bool "reviewer retains scoped model" (Context_store.field "model" projected=`String "scoped-model");
+  assert_bool "reviewer retains scoped provider URL"
+    (Context_store.field "model_providers.fixture.base_url" projected=`String "http://localhost/v1");
+  List.iter(fun key->assert_bool ("reviewer excludes " ^ key) (Context_store.field key projected=`Null))
+    ["features";"mcp_servers";"sandbox_mode"];
+  assert_bool "reviewer inline credentials require explicit env references"
+    (Result.is_error(Native_command.codex_model_config(config (`Assoc["http_headers",`Assoc["Authorization",`String "secret"]]))));
+  assert_bool "clients cannot supply reviewer model bindings" (not(Worker_environment.allowed "MONTY_CODEX_REVIEW_CONFIG"))
+
 let test_headless_json_contract () =
   let dispatch =
     Headless.
@@ -1591,5 +1630,8 @@ let () =
       test_settings_harness_roundtrip_and_precedence );
     ("container_worker_contract", test_container_worker_contract);
     ("headless_json_contract", test_headless_json_contract);
-    ("pi_final_message", test_pi_final_message) ]
+    ("pi_final_message", test_pi_final_message);
+    ("claude_final_message", test_claude_final_message);
+    ("review_command", test_review_command);
+    ("codex_review_config", test_codex_review_config) ]
   |> List.iter (fun (name, test) -> run_named name test)

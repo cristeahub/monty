@@ -116,6 +116,7 @@ let check_worktree_dependency options =
   | Always -> check_dependency "wt" options.wt_command
 
 let check_dependencies options =
+  let* () = check_dependency "server runtime Python 3.9+" "python3" in
   let* () =
     match (Harness.supports_fork options.harness, options.fork) with
     | false, Some _ ->
@@ -394,7 +395,9 @@ let script_environment contents =
     | None ->
         (match profiles start Harness_command.profile_environment_names with
          | Some _ as current -> current
-         | None -> profiles start (List.filter ((<>) "PI_CODING_AGENT_DIR") Harness_command.profile_environment_names))
+         | None -> (match profiles start (List.filter ((<>) "CLAUDE_CONFIG_DIR") Harness_command.profile_environment_names) with
+           | Some _ as legacy -> legacy
+           | None -> profiles start (List.filter (fun n -> not(List.mem n ["PI_CODING_AGENT_DIR";"CLAUDE_CONFIG_DIR"])) Harness_command.profile_environment_names)))
   in
   Some (environment_path, profile_environment)
 
@@ -1284,9 +1287,9 @@ let dry_run ?(codex_mode = Codex_session.Fresh) options
   Fmt.pr "[dry-run] harness: %s\n" (Harness.to_string options.harness);
   (match options.harness with
   | Harness.Pi -> ()
-  | Codex ->
-      Fmt.pr "[dry-run] Codex session: %s%s\n"
-        (Harness_command.codex_mode_name codex_mode)
+  | Codex | Claude ->
+      Fmt.pr "[dry-run] %s session: %s%s\n"
+        (if options.harness=Harness.Codex then "Codex" else "Claude") (Harness_command.codex_mode_name codex_mode)
         (match codex_mode with
         | Codex_session.Exact session_id -> " " ^ session_id
         | _ -> ""));
@@ -1548,7 +1551,7 @@ let common_retry_options options =
        "--branch-prefix"; Shell.quote options.branch_prefix;
        "--agent-profile"; Shell.quote options.agent_profile;
        "--harness"; Harness.to_string options.harness;
-       (match options.harness with Harness.Pi -> "--pi-command" | Harness.Codex -> "--codex-command");
+       (match options.harness with Harness.Pi -> "--pi-command" | Harness.Codex -> "--codex-command" | Harness.Claude -> "--claude-command");
        Shell.quote options.harness_command;
        "--wt-command"; Shell.quote options.wt_command;
        "--script-dir"; Shell.quote options.script_dir ]
