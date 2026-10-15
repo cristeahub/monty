@@ -5,6 +5,7 @@ import os
 import fcntl
 from pathlib import Path
 import shutil
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -120,7 +121,7 @@ def run_tests(root):
     write(root / 'token', 'fake-secret'); write(root / 'zuliprc', '[api]\nkey=fake\n')
     case = dict(root=f'{time.time()-100:.6f}', reply=f'{time.time()-20:.6f}')
     env = dict(os.environ, HOME=str(home), MONTY_HOME=str(home), MONTY_HARNESS='pi',
-               MONTY_PI_COMMAND=str(tools / 'model'), MONTY_CODEX_COMMAND=str(tools / 'model'),
+               PI_CODING_AGENT_DIR=str(home/'.pi/agent'), CODEX_HOME=str(home/'.codex'), MONTY_PI_COMMAND=str(tools / 'model'), MONTY_CODEX_COMMAND=str(tools / 'model'),
                MONTY_LAUNCHCTL_COMMAND=str(tools / 'launchctl'),
                MONTY_CONTEXT_LAUNCH_AGENTS=str(root / 'agents'),
                PYTHONPATH=str(tools), CASE=str(root / 'case.json'), CALLS=str(root / 'calls'),
@@ -168,6 +169,14 @@ def run_tests(root):
     assert j('context','status')['service']=='loaded'
     plist=next((root/'agents').glob('*.plist')).read_text()
     assert 'StartCalendarInterval' in plist and 'StartInterval' not in plist and 'fake-secret' not in plist
+    for directory in [home/'.pi/agent',home/'.codex']:directory.mkdir(parents=True,exist_ok=True)
+    wrapper=tools/'server-model'
+    wrapper.write_text('#!/bin/sh\n'+ ' '.join([key+'='+shlex.quote(env[key]) for key in ['CASE','MODEL_CALLS']])+ ' exec '+shlex.quote(str(tools/'model'))+' "$@"\n')
+    wrapper.chmod(0o700)
+    profiles=root/'server-profiles.json'
+    profiles.write_text(json.dumps({'profiles':[{'id':name,'harness':name,'command':str(wrapper),key:str(directory),'roots':[str(root)]}
+        for name,key,directory in [('pi','pi_home',home/'.pi/agent'),('codex','codex_home',home/'.codex')]]}))
+    cli('service','start','--config',str(profiles))
     tick()
     snapshot=j('findings','--json');assert len(snapshot['findings'])==2,snapshot
     assert all(c['backlog']==0 for c in j('context','status')['connections'])
@@ -284,6 +293,7 @@ def run_tests(root):
     cli('findings','to-task',current['reference'],'--project','repo')
     assert 'context' in cli('tasks','list','--no-sync')
     assert any('evidence snapshot' in path.read_text() for path in (home/'.monty').rglob('*.json') if 'context' not in str(path.relative_to(home/'.monty')))
+    cli('service','stop')
     print('context E2E passed: disabled default, both providers, triage, revisions, pagination, failure recovery, cancellation, lifecycle and task conversion')
 
 with tempfile.TemporaryDirectory(prefix='monty-context-e2e-') as directory:

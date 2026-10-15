@@ -363,7 +363,7 @@ let active_turn history sess =
   let captured=List.find (xs "sessions" history) ~f:(fun value -> s "id" value=s "id" sess) |> Option.value ~default:`Null in
   let raw=List.rev(xs "records" captured) |> List.find_map ~f:(fun batch ->
     let raw=field "raw" batch in if Poly.equal raw `Null then None else Some raw) |> Option.value ~default:`Null in
-  if s "harness" sess="pi" then
+  if List.mem ["pi";"claude"] (s "harness" sess) ~equal:String.equal then
     if s "runtime" sess="running" then Some "" else None
   else List.find_map (xs "turns" (field "thread" raw)) ~f:(fun turn->
     if s "status" turn="inProgress" then Some(s "id" turn) else None)
@@ -393,6 +393,19 @@ let pending_ui m inject chat sess =
       | _ -> [note "This native dialog is not supported."]) @
       [button ~disabled:busy "Cancel request" (respond(obj["cancelled",`Bool true]))]
     else match meth with
+    | "claude/approval" -> [N.strong[txt("Approve " ^ s "tool" params ^ " once?")];
+        N.pre[txt(Yojson.Safe.pretty_to_string(field "input" params))];
+        decision "Approve once" "allow";decision "Decline" "deny"]
+    | "claude/question" ->
+        let questions=xs "questions" (field "input" params) in
+        [N.strong[txt "Your input is needed"]] @ List.map questions ~f:(fun q ->
+          let key=s "question" q in
+          el "fieldset" ~attrs:(if busy then [A.disabled] else []) [el "legend"[txt key];
+            N.div(List.map(xs "options" q) ~f:(fun option->button ~disabled:busy (s "label" option) (update key (s "label" option))));
+            textarea ~disabled:busy "Answer" (answer key) (update key)]) @
+        [button ~disabled:(busy || List.exists questions ~f:(fun q->String.strip(answer(s "question" q))="")) "Submit answers"
+          (respond(obj["decision",str "allow";"answers",obj(List.map questions ~f:(fun q->s "question" q,str(answer(s "question" q))))]));
+         decision "Decline" "deny"]
     | "item/commandExecution/requestApproval"|"item/fileChange/requestApproval" ->
         let network=field "networkApprovalContext" params in
         let title=if not(Poly.equal network `Null) then "Network access requested" else
@@ -463,7 +476,7 @@ let apply_live event m =
   let item=field "item" params in
   let item_id=if s "id" item<>"" then s "id" item else s "itemId" params in
   let same preview=s "conversation" preview=cid && s "session" preview=sid &&
-    (if kind<>"" then s "source_id" preview="pi-live" else s "source_id" preview=item_id && s "turn_id" preview=s "turnId" params) in
+    (if kind<>"" then s "source_id" preview=(if kind="sdk_message" then "claude-live" else "pi-live") else s "source_id" preview=item_id && s "turn_id" preview=s "turnId" params) in
   let previous=List.find m.live ~f:same in
   let base text kind source turn=obj["conversation",str cid;"session",str sid;"source_id",str source;"turn_id",str turn;
     "kind",str kind;"text",str text;"complete",`Bool false;
@@ -480,6 +493,20 @@ let apply_live event m =
     | "item/completed",_ -> Option.map previous ~f:(fun preview->
         let value=if s "type" item="commandExecution" then s "aggregatedOutput" item else s "text" item in
         put "complete" (`Bool true) (put "text" (str value) preview))
+    | _,"sdk_message" ->
+        let message=field "message" native in
+        let event=field "event" message in
+        (match s "kind" native,s "type" event with
+        | "StreamEvent","message_start" -> Some(base "" "agentMessage" "claude-live" "")
+        | "StreamEvent","content_block_delta" when s "type" (field "delta" event)="text_delta" ->
+            let preview=Option.value previous ~default:(base "" "agentMessage" "claude-live" "") in
+            let value=s "text" preview ^ s "text" (field "delta" event) in
+            Some(if String.length value>1_048_576 then put "truncated" (`Bool true) preview else put "text" (str value) preview)
+        | "AssistantMessage",_ ->
+            let value=content message in
+            let preview=Option.value previous ~default:(base "" "agentMessage" "claude-live" "") in
+            Some(put "complete" (`Bool true)(put "text" (str value) preview))
+        | _ -> previous)
     | _,"message_start" when s "role" (field "message" native)="assistant" ->
         Some(put "blocks" (obj[]) (base (content(field "message" native)) "agentMessage" "pi-live" ""))
     | _,"message_update" ->

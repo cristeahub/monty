@@ -6,7 +6,7 @@ let schema = "monty:run-handoff:v1"
 let notice_schema = "monty:run-handoff-notice:v1"
 let follow_up_schema = "monty:run-handoff-follow-up:v1"
 
-type source = Interactive | Headless_codex | Headless_pi
+type source = Interactive | Headless_codex | Headless_pi | Headless_claude
 
 type outcome = Ready_for_review | Needs_attention | Failed
 
@@ -97,11 +97,13 @@ let source_to_string = function
   | Interactive -> "interactive"
   | Headless_codex -> "headless-codex"
   | Headless_pi -> "headless-pi"
+  | Headless_claude -> "headless-claude"
 
 let source_of_string = function
   | "interactive" -> Ok Interactive
   | "headless-codex" -> Ok Headless_codex
   | "headless-pi" -> Ok Headless_pi
+  | "headless-claude" -> Ok Headless_claude
   | value -> Error (Printf.sprintf "unknown run-handoff source %S" value)
 
 let outcome_to_string = function
@@ -1061,7 +1063,7 @@ let publish ~home ~(record : Job_store.record) ?handoff_id ~source ~outcome
             acknowledged_at =
               (match handoff.source with
               | Interactive -> Some handoff.finished_at
-              | Headless_codex | Headless_pi -> None);
+              | Headless_codex | Headless_pi | Headless_claude -> None);
             reference;
             handoff_path = json_path;
           }
@@ -1197,7 +1199,7 @@ let recover_orphaned_notices ~home =
                                    acknowledged_at =
                                      (match handoff.source with
                                      | Interactive -> Some handoff.finished_at
-                                     | Headless_codex | Headless_pi -> None);
+                                     | Headless_codex | Headless_pi | Headless_claude -> None);
                                    reference;
                                    handoff_path = handoff_path home reference;
                                  }

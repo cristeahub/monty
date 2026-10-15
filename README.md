@@ -4,7 +4,7 @@
 
 Monty is a small OCaml launcher for running a head agent session that plans work and spins out Pi or Codex worker sessions.
 Ghostty tabs, windows, and splits remain the default execution surface.
-An optional headless workflow runs independent background Pi or Codex processes without opening Ghostty.
+An optional headless workflow runs server-owned Pi, Codex or Claude processes without opening Ghostty.
 The model does the planning.
 Monty handles the glue around Ghostty, `wt`, worktrees, manifests, agent harnesses, and startup commands.
 
@@ -361,7 +361,7 @@ Harness selection still follows CLI, environment, and persisted-settings precede
 
 ### Legacy Pi extension dispatch
 
-`headless begin` and `headless finish` remain available for existing integrations using the legacy `subagent` chain contract. They are not used by `headless run` or `headless resume`. A legacy successor dispatch is explicit: `monty headless begin <worker> --resume`.
+`headless begin` submits server-owned execution, like `headless run`. An explicit successor uses `monty headless begin <worker> --resume`. `headless finish` remains available to recover already persisted legacy callback attempts; new execution returns startup and final receipts rather than a `subagent` dispatch payload.
 
 Before mutating a legacy Pi extension workflow, verify that the parent exposes `subagent` with `action: "list"` and the required agents. Pass emitted `harness_call.arguments` unchanged; finalize successful/failed callbacks with the emitted completion commands. Callback-loss recovery applies only to legacy v1 attempts, never to live standalone process attempts. The similarly named `@tintinweb/pi-subagents` package exposes a different API and cannot execute this legacy payload.
 
@@ -730,7 +730,7 @@ The most important options are available as CLI flags.
 --worktree always|never
 --branch-prefix PREFIX
 --agent-profile NAME
---harness pi|codex
+--harness pi|codex|claude
 --pi-command COMMAND
 --codex-command COMMAND
 --wt-command COMMAND
@@ -838,7 +838,7 @@ Register each Mantle account home in the service configuration once; an explicit
 
 Harness selection uses this precedence:
 
-1. `--harness pi|codex`
+1. `--harness pi|codex|claude`
 2. `MONTY_HARNESS`
 3. The persisted `harness` setting
 4. The Pi compatibility default
@@ -893,3 +893,5 @@ dune build @all
 dune runtest --force
 git diff --check
 ```
+
+Server ownership and Claude development status, dependency setup and recovery boundaries are documented in [server-owned agents](docs/server-owned-agents.md). This implementation is still under validation.

@@ -22,3 +22,23 @@
     (echo "let text = {monty_skill|")
     (cat %{dep:../skills/monty/SKILL.md})
     (echo "|monty_skill}")))))
+
+(rule
+ (target embedded_runtime.ml)
+ (deps ../helpers/owned_runtime.py)
+ (action
+  (with-stdout-to %{target}
+   (progn
+    (echo "let text = {monty_runtime|")
+    (cat %{dep:../helpers/owned_runtime.py})
+    (echo "|monty_runtime}")))))
+
+(rule
+ (target embedded_claude.ml)
+ (deps ../helpers/claude_bridge.py)
+ (action
+  (with-stdout-to %{target}
+   (progn
+    (echo "let text = {monty_claude|")
+    (cat %{dep:../helpers/claude_bridge.py})
+    (echo "|monty_claude}")))))

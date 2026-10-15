@@ -56,12 +56,12 @@ let role home key =
   | Some r -> value(Agent_profile.load_pinned ~home ~worker_dir:r.worker_dir r.job.agent_profile))
   |> Agent_profile.to_snapshot_json
 let profile profiles id = match List.find_opt (fun p->s "id" p=id) profiles with
-  | Some p when List.mem (s "harness" p) ["codex";"pi"] -> p
-  | _ -> fail 400 "select a configured Codex or Pi account"
+  | Some p when List.mem (s "harness" p) ["codex";"pi";"claude"] -> p
+  | _ -> fail 400 "select a configured Pi, Codex or Claude account"
 let environment make_env home p = make_env ["MONTY_HOME=" ^ home;"MONTY_CODEX_YOLO=false";
-  (if s "harness" p="codex" then "CODEX_HOME=" ^ s "codex_home" p else "PI_CODING_AGENT_DIR=" ^ s "pi_home" p)]
+  (match s "harness" p with "codex"->"CODEX_HOME=" ^ s "codex_home" p|"claude"->"CLAUDE_CONFIG_DIR=" ^ s "claude_home" p|_->"PI_CODING_AGENT_DIR=" ^ s "pi_home" p)]
 let options home p = ["--home";home;"--harness";s "harness" p;
-  (if s "harness" p="codex" then "--codex-command" else "--pi-command");Shell.quote(s "command" p);
+  ("--" ^ s "harness" p ^ "-command");Shell.quote(s "command" p);
   "--wt-command";wt_command ();"--worktree";"always"]
 let doctor ~env home p = run ~env ("doctor" :: options home p @ ["--terminal";"ghostty"])
 let ready result = field "exit_code" result=`Int 0
@@ -77,7 +77,7 @@ let check_account p (record:Job_store.record) =
         (match value(State_store.lstat (safe path)) with
         | Some {Unix.st_kind=Unix.S_REG;_} -> Launcher.script_environment (Shell.read_file path)
         | _ -> None) in
-  let key,expected=if s "harness" p="codex" then "CODEX_HOME",s "codex_home" p else "PI_CODING_AGENT_DIR",s "pi_home" p in
+  let key,expected=match s "harness" p with "codex"->"CODEX_HOME",s "codex_home" p|"claude"->"CLAUDE_CONFIG_DIR",s "claude_home" p|_->"PI_CODING_AGENT_DIR",s "pi_home" p in
   match environment with
   | Some (_,bindings) when List.assoc_opt key bindings=Some(Some expected) -> ()
   | _ -> fail 409 "the selected account does not match this worker's saved launch environment; select its original account or inspect its CLI recovery"

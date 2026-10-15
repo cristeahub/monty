@@ -1,6 +1,6 @@
 # Monty CLI skill
 
-Monty supports Codex and Pi. Every Monty session launch installs or refreshes
+Monty has Pi, Codex and Claude harness selection. Claude/server ownership rollout status is tracked in [server-owned agents](server-owned-agents.md). Every Monty session launch installs or refreshes
 one portable `monty` skill, including head-butler continuations, interactive
 worker resumes, headless phases, and service-owned native runtimes. Installation
 happens before the harness starts, in the account/profile it will actually use.
@@ -8,8 +8,9 @@ happens before the harness starts, in the account/profile it will actually use.
 | Execution surface | Skill directory |
 | --- | --- |
 | Codex on the host | `${CODEX_HOME:-$HOME/.codex}/skills/monty` |
+| Claude on the host | `${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills/monty` |
 | Pi on the host | `${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/skills/monty` |
-| Client service | `skills/monty` inside the session profile's configured `codex_home` or `pi_home` |
+| Client service | `skills/monty` inside the session profile's configured `pi_home`, `codex_home` or `claude_home` |
 | Container workers, both harnesses | `/monty/home/.agents/skills/monty` |
 
 The executable embeds `skills/monty/SKILL.md` and `docs/monty-workflows.md`.
@@ -27,9 +28,7 @@ Native settings that disable skills are not overridden. Existing sessions may
 need their native reload command or a restart to discover newly installed skills.
 
 Read-only CLI queries and dry-run preflight do not install anything. Optional
-source triage keeps its existing skills-disabled isolation. Monty does not launch
-Claude Code or other harnesses; the portable skill can be copied to another
-Agent Skills-compatible client manually.
+source triage keeps its existing skills-disabled isolation. Claude receives Monty instructions, task context and every ordered workspace explicitly; it is not expected to discover AGENTS.md or MONTY.md automatically.
 
 The former documentation MCP server and setup commands have been removed.
 The old `monty mcp guide` spelling remains a CLI alias so saved worker and native

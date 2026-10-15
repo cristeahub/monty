@@ -166,12 +166,15 @@ let with_worker_lock ?(wait = true) ~worker_dir operation =
   let* fd = State_store.open_lock_file path in
   Fun.protect
     ~finally:(fun () ->
-      (try Unix.lockf fd Unix.F_ULOCK 0 with _ -> ());
       Unix.close fd)
     (fun () ->
       let acquired =
         try
-          Unix.lockf fd (if wait then Unix.F_LOCK else Unix.F_TLOCK) 0;
+          let rec acquire () =
+            try Process.try_worker_lock fd with
+            | Unix.Unix_error((Unix.EACCES|Unix.EAGAIN),_,_) when wait ->
+                ignore(Unix.select [] [] [] 0.05);acquire () in
+          acquire ();
           Ok ()
         with
         | Unix.Unix_error ((Unix.EACCES | Unix.EAGAIN), _, _) ->
@@ -182,6 +185,7 @@ let with_worker_lock ?(wait = true) ~worker_dir operation =
       in
       let* () = acquired in
       let* () = State_store.verify_lock_identity path fd in
+      Unix.clear_close_on_exec fd;
       operation ())
 
 let image_record_path ~home =
@@ -254,8 +258,17 @@ let inspect_image () =
   with Yojson.Json_error message ->
     Error ("invalid Apple image inspection JSON: " ^ message)
 
+let image_command harness configured_command =
+  let* executable,finish=Process.command_word configured_command in
+  let name=Harness.to_string harness in
+  if harness=Harness.Claude then Error "Claude Apple-container execution is not supported"
+  else if Filename.basename executable<>name then
+    Error "container profiles must name the native pi or codex executable; host wrappers are unsupported"
+  else Ok(name ^ String.sub configured_command finish (String.length configured_command-finish))
+
 let check_harness harness configured_command =
   match harness with
+  | Harness.Claude -> Error "Claude Apple-container execution is not supported"
   | Harness.Codex -> Ok ()
   | Harness.Pi ->
       let* executable = Process.first_command_word configured_command in
@@ -504,9 +517,12 @@ let ensure_resources value =
     validate_container value
 
 let auth_path ~harness =
-  let label = match harness with Harness.Pi -> "Pi" | Harness.Codex -> "Codex" in
+  let label = match harness with
+  | Harness.Claude -> invalid_arg "Claude Apple-container execution is not supported"
+  | Harness.Pi -> "Pi" | Harness.Codex -> "Codex" in
   let variable, default =
     match harness with
+  | Harness.Claude -> invalid_arg "Claude Apple-container execution is not supported"
     | Harness.Pi -> ("PI_CODING_AGENT_DIR", ".pi/agent")
     | Harness.Codex -> ("CODEX_HOME", ".codex")
   in
@@ -543,6 +559,7 @@ let credential_values ?(harness = Harness.Codex) contents =
     let json = Yojson.Safe.from_string contents in
     let json =
       match harness, json with
+      | Harness.Claude, _ -> invalid_arg "Claude Apple-container execution is not supported"
       | Harness.Pi, `Assoc providers ->
           `Assoc (List.map (fun (provider, credential) ->
               let credential = match credential with
@@ -589,6 +606,7 @@ let inject_auth ~harness value =
   in
   let script =
     match harness with
+  | Harness.Claude -> invalid_arg "Claude Apple-container execution is not supported"
     | Harness.Codex ->
         "set -eu; umask 077; cat > /run/monty-secrets/auth.json; "
         ^ "chmod 600 /run/monty-secrets/auth.json; "
@@ -608,6 +626,7 @@ let inject_auth ~harness value =
 let phase_credentials ~harness value =
   let* _, credentials = load_auth ~harness in
   match harness with
+  | Harness.Claude -> invalid_arg "Claude Apple-container execution is not supported"
   | Harness.Codex -> Ok credentials
   | Harness.Pi ->
       (* Pi can refresh OAuth credentials while running. Keep those writes in
@@ -938,20 +957,17 @@ let run_phase ~harness ~command value ~attempt ~name ~worktree ~codex_yolo ~writ
   let guest_output = outbox ^ "/" ^ name ^ ".md" in
   let guest_events = outbox ^ "/" ^ name ^ ".jsonl" in
   let guest_progress = outbox ^ "/" ^ name ^ ".log" in
-  let permission =
-    if codex_yolo then " --dangerously-bypass-approvals-and-sandbox"
-    else if writable then " --sandbox workspace-write"
-    else " --sandbox read-only"
-  in
   let invocation =
     match harness with
+  | Harness.Claude -> invalid_arg "Claude Apple-container execution is not supported"
     | Harness.Pi ->
         "PI_CODING_AGENT_DIR=/run/monty-secrets/pi " ^ command
         ^ Harness.pi_headless_args ~writable
     | Harness.Codex ->
         command ^ " exec -c " ^ Shell.quote "model_reasoning_effort=\"xhigh\""
         ^ Codex_trust.argument worktree
-        ^ " --ephemeral --json --color never" ^ permission ^ " -C "
+        ^ " --ephemeral --json --color never"
+        ^ Harness.codex_headless_permissions ~codex_yolo ~writable ^ " -C "
         ^ Shell.quote worktree ^ " --output-last-message " ^ Shell.quote guest_output
         ^ " -"
   in
@@ -962,6 +978,7 @@ let run_phase ~harness ~command value ~attempt ~name ~worktree ~codex_yolo ~writ
   let result =
     let* credentials =
       match harness with
+  | Harness.Claude -> invalid_arg "Claude Apple-container execution is not supported"
       | Harness.Codex -> inject_auth ~harness value
       | Harness.Pi -> phase_credentials ~harness value
     in
@@ -984,6 +1001,7 @@ let run_phase ~harness ~command value ~attempt ~name ~worktree ~codex_yolo ~writ
       let* () = collect credentials guest_events events in
       let* () = collect credentials guest_progress progress in
       (match harness with
+  | Harness.Claude -> invalid_arg "Claude Apple-container execution is not supported"
       | Harness.Codex -> collect credentials guest_output output
       | Harness.Pi -> Ok ())
   | Ok (credentials, { status; _ }) ->

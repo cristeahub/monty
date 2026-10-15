@@ -77,7 +77,7 @@ def check(home):
             {'permissions': {'network': {'enabled': True}}, 'scope': 'turn'}]
         assert all('secret-fixture-phrase' not in p.read_text() for p in (home / '.monty').glob('**/*.json'))
         imported = [chat for chat in c.req('conversations') if any(s['native_id'] == 'native-only' for s in chat['sessions'])]
-        assert len(imported) == 1 and imported[0]['sessions'][0]['observed']
+        assert len(imported) == 1 and not imported[0]['sessions'][0]['observed'], 'restart must retain the import without automatically recreating its writer'
         assert len(c.req('conversations')) == 4
         assert c.req('tasks/local:local-002')['status'] == 'done'
         assert (home / 'tools.log').read_text().count('osascript') == 2

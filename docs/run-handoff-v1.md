@@ -79,3 +79,5 @@ explicitly approved actions.
 ## Standalone background runs
 
 Pi and Codex process runners publish this same handoff directly. Their startup receipt references its future canonical path; a startup receipt is not a completed run. Process attempts use `monty:headless-attempt:v2` and are excluded from legacy Pi callback-loss recovery, including the interval between writing final.md and publishing the handoff. Per-phase events and `logs/supervisor.log` remain in the attempt directory. `job.json` retains the existing open lifecycle state.
+
+Claude headless runs use the `headless-claude` source. Native session identity remains in conversation records/sidecars, outside job.json.

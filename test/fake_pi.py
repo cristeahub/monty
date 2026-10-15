@@ -80,6 +80,10 @@ for line in sys.stdin:
         emit({'type':'agent_start'})
         append('message',message={'role':'user','content':[{'type':'text','text':command['message']}]})
         if command['message']=='lost response':sys.exit(7)
+        if command['message']=='malformed stream':
+            print('{malformed',flush=True)
+            sys.stdout.write('x'*262144);sys.stdout.flush()
+            continue
         if command['message'] in ('dialog','expiring dialog'):
             dialog=command
             emit({'type':'extension_ui_request','id':'native-dialog','method':'confirm',

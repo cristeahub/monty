@@ -456,6 +456,8 @@ let prepare_many ~dry_run options indexed_jobs =
       worktree_mode = Launcher.Always }
   in
   let* prepared = Launcher.preflight_batch options indexed_jobs in
+  let* () = if List.exists (fun worker -> worker.Launcher.profile.reviews<>[]) prepared then
+    Harness.check_review_command options.harness options.harness_command else Ok () in
   let needs_host =
     List.exists
       (fun worker -> Option.is_none worker.Launcher.container_worker)
@@ -817,11 +819,9 @@ let write_phase_prompt paths name contents =
   let* () = State_store.write_file_atomic ~path ~perm:0o600 contents in
   Ok path
 
-let codex_permission_arg (options : Launcher.options) ~writable =
-  if options.codex_yolo then
-    " --dangerously-bypass-approvals-and-sandbox"
-  else if writable then " --sandbox workspace-write"
-  else " --sandbox read-only"
+let codex_review_arguments () =
+  let config=match Sys.getenv_opt "MONTY_CODEX_REVIEW_CONFIG" with None|Some ""->`Null|Some value->Yojson.Safe.from_string value in
+  Native_command.codex_model_arguments config
 
 let run_codex_phase (options : Launcher.options) (dispatch : dispatch)
     (paths : attempt_paths) ~name ~writable ~prompt ~output =
@@ -849,7 +849,8 @@ let run_codex_phase (options : Launcher.options) (dispatch : dispatch)
         | [] -> [ dispatch.worktree ]
         | paths -> paths)
     ^ " --ephemeral --json --color never"
-    ^ codex_permission_arg options ~writable
+    ^ (if writable then "" else codex_review_arguments ())
+    ^ Harness.codex_headless_permissions ~codex_yolo:options.codex_yolo ~writable
     ^ " -C " ^ Shell.quote dispatch.worktree
     ^ additional_dirs
     ^ " --output-last-message " ^ Shell.quote output ^ " - < "
@@ -859,7 +860,7 @@ let run_codex_phase (options : Launcher.options) (dispatch : dispatch)
   match dispatch.container_worker with
   | Some container_worker ->
       let prompt_contents = Shell.read_file prompt in
-      Container_worker.run_phase ~harness:Harness.Codex ~command:"codex"
+      Container_worker.run_phase ~harness:Harness.Codex ~command:options.harness_command
         container_worker ~attempt:paths.id ~name
         ~worktree:dispatch.worktree ~codex_yolo:options.codex_yolo ~writable
         ~prompt:prompt_contents ~output ~events ~progress
@@ -967,10 +968,44 @@ let run_pi_phase (options : Launcher.options) (dispatch : dispatch)
       Printf.sprintf "Pi %s phase failed: %s (events: %s; progress: %s)"
         name message events progress) result
 
+let claude_final_message events =
+  let* ()=Run_handoff.require_regular_file events in
+  try
+    let lines=String.split_on_char '\n' (Shell.read_file events) |> List.filter (fun s->String.trim s<>"") in
+    let records=List.map Yojson.Safe.from_string lines in
+    if List.length(List.filter(fun value->Context_store.field "type" value=`String "result") records)<>1 then Error "Claude stream must contain exactly one terminal result" else
+    match List.rev records with
+    | result::_ when Context_store.s "type" result="result" && Context_store.s "subtype" result="success"
+      && Context_store.field "is_error" result=`Bool false
+      && (match Context_store.field "permission_denials" result with `Null|`List []->true|_->false) ->
+        let text=Context_store.s "result" result |> String.trim in
+        if text="" || Context_store.s "session_id" result="" then Error "Claude terminal result is missing handoff or native session identity"
+        else let* _=Native_session.validate ~harness:Harness.Claude (Context_store.s "session_id" result) in Ok(text ^ "\n")
+    | _ -> Error "Claude stream has no valid final result, or contains permission denials; inspect retained events"
+  with Sys_error message | Yojson.Json_error message -> Error message
+
+let run_claude_phase (options:Launcher.options) (dispatch:dispatch) (paths:attempt_paths) ~name ~writable ~prompt ~output =
+  let events=phase_path paths.events name ".jsonl" and progress=phase_path paths.logs name ".log" in
+  let* ()=if dispatch.container_worker<>None then Error "Claude Apple-container execution is not supported" else Ok () in
+  let* ()=Skill.ensure ~home:dispatch.home ~harness:Harness.Claude ~monty_command:options.monty_command in
+  let dirs=dispatch.workspaces |> List.filter_map (fun (w:Job_store.workspace_state)->w.worktree) in
+  let policy=if writable then "" else
+    " --restricted --safe-mode --tools Read,Grep,Glob --allowedTools Read,Grep,Glob --strict-mcp-config --mcp-config " ^ Shell.quote "{\"mcpServers\":{}}"
+    ^ " --setting-sources " ^ Shell.quote "" ^ " --settings " ^ Shell.quote "{\"disableAllHooks\":true}" in
+  let command="umask 077 && " ^ options.harness_command ^ " --print --verbose --output-format stream-json --no-session-persistence"
+    ^ " --permission-mode default" ^ policy
+    ^ (List.tl dirs |> List.map (fun path->" --add-dir " ^ Shell.quote path) |> String.concat "")
+    ^ " < " ^ Shell.quote prompt ^ " > " ^ Shell.quote events ^ " 2> " ^ Shell.quote progress in
+  let* result=Process.run_capture ~cwd:dispatch.worktree command in
+  let* ()=match result.status with `Exited 0->Ok ()|status->Error("Claude phase failed: " ^ Process.status_to_string status) in
+  let* final=claude_final_message events in
+  State_store.write_file_atomic ~path:output ~perm:0o600 final
+
 let run_phase options =
   match options.Launcher.harness with
   | Harness.Pi -> run_pi_phase options
   | Harness.Codex -> run_codex_phase options
+  | Harness.Claude -> run_claude_phase options
 
 type 'a spawned_result = {
   pid : int;
@@ -1018,7 +1053,7 @@ let await_result child =
            (Printexc.to_string exn))
   in
   close_in_noerr child.channel;
-  let _, status = Unix.waitpid [] child.pid in
+  let _, status = Process.waitpid [] child.pid in
   match (status, payload) with
   | Unix.WEXITED 0, Ok result -> result
   | Unix.WEXITED 0, Error message -> Error message
@@ -1098,6 +1133,8 @@ let preflight_worker ~explicit_resume options worker =
   let* script_dir = State_path.canonicalize options.script_dir in
   let options = { options with home; script_dir } in
   let* plan = prepare_begin ~explicit_resume options worker in
+  let* () = if plan.prepared.profile.reviews<>[] then
+    Harness.check_review_command plan.options.harness plan.options.harness_command else Ok () in
   let* harness_command, wt_command =
     match plan.record.container_worker with
     | Some _ -> Ok (plan.options.harness_command, plan.options.wt_command)
@@ -1171,7 +1208,7 @@ let run_worker_unlocked ~on_started ~explicit_resume options worker =
   let preview = provisional_dispatch plan in
   let paths = attempt_paths preview (fresh_attempt_id ()) in
   let source = match options.Launcher.harness with
-    | Harness.Pi -> Run_handoff.Headless_pi | Harness.Codex -> Run_handoff.Headless_codex in
+    | Harness.Pi -> Run_handoff.Headless_pi | Harness.Codex -> Run_handoff.Headless_codex | Harness.Claude -> Run_handoff.Headless_claude in
   let* () = prepare_attempt ~schema:process_attempt_schema plan preview paths
       (Run_handoff.source_to_string source) in
   let* dispatch = claim_begin plan in
@@ -1340,20 +1377,20 @@ let background operation =
           Error ("headless supervisor failed before confirming startup: " ^ Printexc.to_string exn)
       in
       close_in_noerr channel;
-      (match result with Error _ -> ignore (Unix.waitpid [] pid) | Ok _ -> ());
+      (match result with Error _ -> ignore (Process.waitpid [] pid) | Ok _ -> ());
       result
 
-let run_worker ~wait ~explicit_resume options worker =
+let run_worker ?(locked=false) ?(on_started=(fun _ _ -> ())) ~wait ~explicit_resume options worker =
   let* plan, _inputs = preflight_worker ~explicit_resume options worker in
   let options = plan.options in
   let record = plan.record in
   let operation on_started =
     let run () = run_worker_unlocked ~on_started ~explicit_resume options worker in
-    match record.container_worker with
+    if locked then run () else match record.container_worker with
     | None -> Worker_lock.with_lock ~home:options.Launcher.home ~record run
     | Some _ -> Container_worker.with_worker_lock ~worker_dir:record.worker_dir run
   in
-  if wait then operation (fun _ _ -> ()) else background operation
+  if wait then operation on_started else background operation
 
 let read_attempt_descriptor ~record ~profile paths ~expected_source =
   State_store.decode_json ~path:paths.descriptor (fun () ->
@@ -1736,6 +1773,7 @@ let run_many ~wait options indexed_jobs =
     `Assoc
       [ ("schema", `String (if not wait then "monty:headless-start-many:v1"
                             else if options.Launcher.harness = Harness.Codex then codex_run_many_schema
+                            else if options.Launcher.harness = Harness.Claude then "monty:headless-claude-run-many:v1"
                             else "monty:headless-pi-run-many:v1"));
         ("harness", `String (Harness.to_string options.Launcher.harness));
         ("codex_yolo", `Bool (options.harness = Harness.Codex && options.codex_yolo));

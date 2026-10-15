@@ -83,6 +83,11 @@ let rec redact = function
       if List.mem (String.lowercase_ascii k) ["authorization";"api_key";"apikey";"access_token";"accesstoken";"refresh_token";"refreshtoken";"id_token";"idtoken";"password";"secret"]
       then string "[redacted]" else redact v) fields)
   | `List xs -> `List (List.map redact xs) | x -> x
+let rec public = function
+  | `Assoc fields as value -> `Assoc(List.filter_map(fun (key,item)->
+      if key="endpoint" && field "native_id" value<>`Null then None else Some(key,public item)) fields)
+  | `List values->`List(List.map public values)
+  | value->value
 let within root path = path = root || String.starts_with ~prefix:(root ^ "/") path
 let store_blob home ~source ~media_type bytes =
   if String.length bytes>8_388_608 then fail 413 "attachment exceeds 8 MiB";
@@ -109,6 +114,10 @@ let rec attachments home roots j =
   let here = match field "type" j with
     | `String ("localImage"|"imageGeneration") -> (match field "path" j with
         | `String p -> [attachment home roots p] | _ -> [])
+    | `String "image" when field "type" (field "source" j)=string "base64" ->
+        let source=field "source" j in
+        [ (try store_blob home ~source:"embedded image" ~media_type:(field "media_type" source) (Base64.decode_exn(bounded_string 11_184_812 (field "data" source)))
+           with _ -> obj ["source",string "embedded image";"available",`Bool false;"reason",string "invalid or oversized image"]) ]
     | `String "image" -> (match field "data" j,field "url" j with
         | `String encoded,_ -> [
             (try
@@ -134,6 +143,12 @@ let normalized sess snapshot =
       obj ["source_id",field "id" e;"turn_id",turn;"order",`Int order;"kind",string kind;
         "parent",field "parentId" e;"content",e;"timestamp",field "timestamp" e;
         "provider",field "provider" message;"model",field "model" message;"trust",string "historical_data"])
+  else if s "harness" sess = "claude" then
+    array "entries" snapshot |> List.mapi (fun order e ->
+      obj ["source_id",field "uuid" e;"turn_id",field "uuid" e;"order",`Int order;
+        "kind",string (if s "type" e="user" then "userMessage" else "agentMessage");
+        "content",field "message" e;"parent",field "parent_tool_use_id" e;
+        "model",field "model" (field "message" e);"provider",string "anthropic";"trust",string "historical_data"])
   else if s "harness" sess = "fixture" then
     array "entries" snapshot |> List.mapi (fun order e ->
       obj ["source_id",field "uuid" e;"turn_id",field "exchange" e;"order",`Int order;
@@ -254,7 +269,8 @@ let reserve home id request = locked home (fun () ->
     false,r)
   else let r = obj ["id",string id;"fingerprint",string fingerprint;"status",string "accepted";
       "created_at",now ();"request",redact (if field "op" request=string "respond" then
-        put "response" (string "[response omitted]") request else request)] in write path r;true,r)
+        put "response" (string "[response omitted]") request else if field "op" request=string "terminal_input" then
+        put "data" (string "[terminal input omitted]") request else request)] in write path r;true,r)
 let finish home id status result = locked home (fun () ->
   let r = receipt home id |> puts ["status",string status;"result",redact result;"updated_at",now ()] in
   write (receipt_path home id) r; r)

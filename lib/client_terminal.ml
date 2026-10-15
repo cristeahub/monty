@@ -1,22 +1,7 @@
 open Lwt.Infix
 open Context_store
 open Conversation_store
-let request ~home meth path body =
-  let metadata_path=file home ["client-service.json"] in
-  if not(Sys.file_exists metadata_path) then fail 503 "Monty client service is not running; run monty service start --config FILE";
-  let state=read metadata_path in
-  let base=s "url" state in
-  let uri=Uri.of_string base in
-  if Uri.scheme uri<>Some "http" || Uri.host uri<>Some "127.0.0.1" then fail 500 "unsafe service address";
-  let token=String.trim (Shell.read_file (file home ["client-service-token"])) in
-  let headers=Cohttp.Header.of_list ["authorization","Bearer " ^ token;"content-type","application/json"] in
-  let body=Cohttp_lwt.Body.of_string (Yojson.Safe.to_string body) in
-  Lwt_unix.with_timeout 35. (fun () ->
-    Cohttp_lwt_unix.Client.call ~headers ~body meth (Uri.of_string (base ^ path)) >>= fun (response,body) ->
-    Cohttp_lwt.Body.to_string body >|= fun text ->
-    let json=Yojson.Safe.from_string text in
-    let code=Cohttp.Code.code_of_status (Cohttp.Response.status response) in
-    if code>=400 then fail code (Yojson.Safe.to_string json);json)
+let request=Client_http.request
 let health ~home = Lwt.catch (fun () ->
     Cohttp_lwt_unix.Private.IO.catch (fun () ->
       Lwt_unix.with_timeout 1. (fun () -> request ~home `GET "/v1/health" `Null)) >>= function
@@ -62,7 +47,7 @@ let stop_service ~home =
   if not(service_running ~home) then Lwt.return_false else
   let epoch=field "epoch" (read (file home ["client-service.json"])) in
   let stopped () = not(service_running ~home) || field "epoch" (read (file home ["client-service.json"]))<>epoch in
-  let deadline=Unix.gettimeofday ()+.15. in
+  let deadline=Unix.gettimeofday ()+.25. in
   let rec wait () =
     if stopped () then Lwt.return_true else
     if Unix.gettimeofday ()>=deadline then fail 503 "Monty service did not stop; inspect .monty/client-service.log" else
@@ -84,113 +69,105 @@ let command ~home id json =
     | "finished" -> Lwt.return (field "result" receipt)
     | "accepted"|"running" -> Lwt_unix.sleep 0.2 >>= poll
     | _ -> Lwt.fail (Failure (409,"command " ^ id ^ ": " ^ Yojson.Safe.to_string receipt)) in poll ()
-let launch ~home ~profile ~codex_command ~codex_yolo ~mode ~session_id ~prompt ~instructions ~context ~request_id ~worker =
-  if not (List.mem mode ["fresh";"picker";"last";"exact"]) || (mode="exact" && session_id=None) then
-    fail 400 "choose fresh, picker, last, or exact with --session";
-  let expect = if Unix.isatty Unix.stdin && Unix.isatty Unix.stdout then
-      Some (get (Process.command_exists_with_arguments "expect")) else None in
+let profile_for ~home harness =
+  ensure_service ~home () >|= fun health ->
+  let directory=get(Skill.agent_directory harness) |> Unix.realpath in
+  let candidates=xs "profiles" health |> List.filter(fun p -> field "harness" p=string(Harness.to_string harness) && field "scope" p=string(sha directory)) in
+  match Sys.getenv_opt "MONTY_API_PROFILE",candidates with
+  | Some id,_ -> (match List.find_opt(fun p->s "id" p=id) candidates with Some p->s "id" p|None->fail 409 "selected service profile does not match the account scope")
+  | None,[p]->s "id" p|_->fail 409 "configure/select one server profile matching the native account directory"
+let headless_async ~wait ~resume (options:Launcher.options) worker =
+  let home=Unix.realpath options.home in
+  let options={options with Launcher.home=home} in
+  match Headless.preflight_worker ~explicit_resume:resume options worker with Error message->Lwt.return(Error message)|Ok (plan,_) ->
+  let options=plan.Headless.options in
+  Lwt.catch (fun () ->
+    profile_for ~home:options.home options.harness >>= fun profile ->
+    let id=random_id() in
+    request ~home:options.home `POST ("/v1/commands/" ^ id)
+      (obj["op",string "headless_start";"profile",string profile;"command",string options.harness_command;"worker",string worker;"resume",`Bool resume;
+        "codex_yolo",`Bool options.codex_yolo;"wt_command",string options.wt_command;
+        "environment",`Assoc(Unix.environment () |> Array.to_list |> List.filter_map(fun binding->
+          let pos=String.index binding '=' in let key=String.sub binding 0 pos in
+          if Worker_environment.allowed key then
+            Some(key,string(String.sub binding (pos+1)(String.length binding-pos-1))) else None))]) >>= fun _ ->
+    let rec poll () = request ~home:options.home `GET ("/v1/commands/" ^ id) `Null >>= fun receipt ->
+      match s "status" receipt with
+      | "running" when not wait && field "run_status" (field "result" receipt)=string "started" -> Lwt.return(field "result" receipt)
+      | "finished" -> let result=field "result" receipt in
+          if field "exit_code" result<>`Int 0 then fail 409 (s "stderr" result);
+          (try Lwt.return(Yojson.Safe.from_string(s "stdout" result)) with _->fail 502 "headless supervisor returned no valid final result")
+      | "accepted"|"running" -> Lwt_unix.sleep 0.1 >>= poll
+      | _ -> fail 409 (Yojson.Safe.to_string receipt) in poll () >|= fun result->Ok result)
+    (function Failure(_,message)->Lwt.return(Error message)|_->Lwt.return(Error "Monty server unavailable; inspect receipts before retrying; no independent headless fallback"))
+let headless ~wait ~resume options worker = Lwt_main.run(headless_async ~wait ~resume options worker)
+let launch ~home ~profile ~harness ~command_override ~fork ~mode ~session_id ~prompt ~instructions ~context ~request_id ~worker ~title ~codex_yolo =
+  if not(List.mem mode ["fresh";"picker";"last";"exact"]) || (mode="exact" && session_id=None) then fail 400 "choose fresh, picker, last, or exact with --session";
   let home=Unix.realpath home in
-  let id=Option.value ~default:(random_id ()) request_id in
-  let workspaces =
-    let rec collect n acc = match Sys.getenv_opt (Printf.sprintf "MONTY_WORKSPACE_%d" n) with
-      | Some path -> collect (n+1) (acc @ [string (Unix.realpath path)]) | None -> acc in
-    match (if worker then collect 1 [] else []) with [] -> [string (Unix.realpath (Sys.getcwd ()))] | xs -> xs in
-  let read_input = function None->"" | Some path ->
-    let st=Unix.stat path in if st.st_size>65536 then fail 413 "instruction/context file too large";
-    Shell.read_file path in
-  let instruction_text=String.concat "\n\n" [read_input instructions;read_input context] in
+  let workspaces=if worker then (
+    let id=match Sys.getenv_opt "MONTY_JOB_ID" with Some id when id<>""->id|_->fail 400 "worker terminal requires its durable worker identity" in
+    let record=get(Job_store.find ~home ~scope:Job_store.Active id) in
+    record.workspaces |> List.map(fun (workspace:Job_store.workspace_state)->string(Unix.realpath(Option.value ~default:workspace.repo workspace.worktree))))
+    else [string(Unix.realpath(Sys.getcwd()))] in
+  let contents = function None->""|Some path->
+    if (Unix.stat path).st_size>65536 then fail 413 "instruction/context file too large";Shell.read_file path in
   let environment=Unix.environment () |> Array.to_list |> List.filter_map (fun binding ->
-    match String.index_opt binding '=' with None->None|Some pos ->
-      let key=String.sub binding 0 pos in
-      if worker && String.starts_with ~prefix:"MONTY_" key && not(List.mem key ["MONTY_API_TOKEN";"MONTY_FAULT_INJECT"])
-      then Some(key,string(String.sub binding (pos+1) (String.length binding-pos-1))) else None) in
-  let context=obj ["workspaces",`List workspaces;"instructions",string instruction_text;"environment",`Assoc environment] in
+    let pos=String.index binding '=' in let key=String.sub binding 0 pos in
+    if worker && Worker_environment.allowed key && key<>"MONTY_JOB_WORKTREE" && not(String.starts_with ~prefix:"MONTY_WORKSPACE_" key) then
+      Some(key,string(String.sub binding (pos+1) (String.length binding-pos-1))) else None) in
+  let environment=environment @ (if worker then ("MONTY_JOB_WORKTREE",List.hd workspaces)::List.mapi(fun i path->Printf.sprintf "MONTY_WORKSPACE_%d" (i+1),path) workspaces else []) in
+  let context=obj["workspaces",`List workspaces;"instructions",string(String.concat "\n\n" [contents instructions;contents context]);"environment",`Assoc environment] in
   let flow () =
     ensure_service ~home () >>= fun health ->
-    let native_home=Option.value ~default:(Filename.concat (Sys.getenv "HOME") ".codex") (Sys.getenv_opt "CODEX_HOME") |> Unix.realpath in
-    let matches p = field "harness" p=string "codex" && field "scope" p=string(sha native_home) in
+    let directory=get(Skill.agent_directory harness) |> Unix.realpath in
+    let matches p=field "harness" p=string(Harness.to_string harness) && field "scope" p=string(sha directory) in
     let profiles=xs "profiles" health in
     let p=match profile with
-      | Some id -> (match List.find_opt (fun p -> s "id" p=id) profiles with
-          | Some p when matches p -> p
-          | Some _ -> fail 409 "terminal CODEX_HOME does not match service profile"
-          | None -> fail 400 "profile not configured in service")
-      | None -> (match List.filter matches profiles with
-          | [p] -> p
-          | [] -> fail 409 ("No Codex service profile matches CODEX_HOME " ^ native_home ^
-              "; add this account home to the service's profile configuration, then run monty service stop and monty service start")
-          | _ -> fail 409 "Multiple Codex service profiles match CODEX_HOME; select one with --profile or MONTY_API_PROFILE") in
-    get(Skill.ensure_at ~home ~harness:Harness.Codex ~directory:native_home ~monty_command:(Unix.realpath Sys.executable_name));
-    let profile=s "id" p in
-    (if mode="fresh" then
-      command ~home id (obj ["op",string "start";"profile",string profile;"context",context;"codex_yolo",`Bool codex_yolo;
-        "title",string (Option.value ~default:"Monty conversation" (if worker then Sys.getenv_opt "MONTY_JOB_TITLE" else None));
-        "task_keys",`List (match (if worker then Sys.getenv_opt "MONTY_TASK_KEY" else None) with Some k when k<>""->[string k]|_->[])])
-    else request ~home `GET "/v1/conversations" `Null >>= fun catalog ->
-      let candidates=Context_store.list catalog |> List.filter (fun c -> field "purged" c<>`Bool true &&
-        List.exists (fun sess -> s "profile" sess=profile &&
-          match session_id with None->field "id" sess=field "selected_session" c|Some id->s "native_id" sess=id) (xs "sessions" c)) in
-      let candidates=List.sort (fun a b -> compare (n "created_at" b) (n "created_at" a)) candidates in
-      let c=match candidates with
-        | [] -> fail 404 "No registered conversation. Explicitly import/attach the selected native thread through the API first."
-        | [c] -> c | c::_ when mode="last" || session_id<>None -> c
-        | cs ->
-            List.iteri (fun n c -> Printf.eprintf "%d. %s (%s)\n" (n+1) (s "title" c) (s "id" c)) cs;
-            Printf.eprintf "Select conversation: %!";
-            let choice=try int_of_string (read_line ()) with _ -> fail 400 "invalid selection" in
-            (try List.nth cs (choice-1) with _ -> fail 400 "invalid selection") in
-      let sess=List.find (fun sess -> s "profile" sess=profile &&
-        match session_id with None -> field "id" sess=field "selected_session" c | Some id->s "native_id" sess=id) (xs "sessions" c) in
-      if field "observed" sess<>`Bool true then fail 409 "Stored history requires explicit detached resume through the API";
-      Lwt.return (put "selected_session" (field "id" sess) c)) >>= fun c ->
+      | Some id -> (match List.find_opt(fun p->s "id" p=id && matches p) profiles with Some p->p|_->fail 409 "terminal account scope does not match its configured service profile")
+      | None -> (match List.filter matches profiles with [p]->p|[]->fail 409 "no service profile matches the selected native account directory; configure its account and roots before launching"|_->fail 409 "multiple service profiles match; select --profile") in
+    let pid=s "id" p in
+    (if mode="fresh" then command ~home (Option.value ~default:(random_id()) request_id)
+       (obj ["op",string "start";"profile",string pid;"command",Option.fold ~none:`Null ~some:string command_override;"context",context;"terminal",`Bool true;"fork",Option.fold ~none:`Null ~some:string fork;"codex_yolo",`Bool codex_yolo;
+         "title",string title;"task_keys",`List(match if worker then Sys.getenv_opt "MONTY_TASK_KEY" else None with Some key when key<>""->[string key]|_->[])])
+     else request ~home `GET "/v1/conversations" `Null >|= fun catalog ->
+       let candidates=Context_store.list catalog |> List.filter(fun c -> field "purged" c<>`Bool true &&
+         List.exists(fun sess->matches sess &&
+           (match session_id with None->field "id" sess=field "selected_session" c|Some id->s "native_id" sess=id)) (xs "sessions" c))
+         |> List.sort(fun a b->compare(n "created_at" b)(n "created_at" a)) in
+       match candidates with
+       | []->fail 404 "no registered session; import the chosen native session through Monty first, or explicitly use fresh"
+       | [c]->c|c::_ when mode="last" || session_id<>None->c
+       | cs->List.iteri(fun index c->Printf.eprintf "%d. %s (%s)\n" (index+1) (s "title" c) (s "id" c)) cs;
+         Printf.eprintf "Select conversation: %!";
+         let choice=try int_of_string(read_line()) with _->fail 400 "invalid selection" in
+         try List.nth cs (choice-1) with _->fail 400 "invalid selection") >>= fun c ->
+    (match session_id with None->Lwt.return c|Some native->
+      let chosen=match List.find_opt(fun sess->s "native_id" sess=native && matches sess)(xs "sessions" c) with Some sess->sess|None->fail 404 "chosen exact native session was not registered" in
+      if field "selected_session" c=field "id" chosen then Lwt.return c else
+      command ~home(random_id())(obj["op",string "select_session";"conversation",field "id" c;"revision",field "revision" c;"session",field "id" chosen])) >>= fun c ->
     let sess=session c (s "selected_session" c) in
-    if field "harness" sess<>string "codex" || field "scope" sess<>field "scope" p then
-      fail 409 "stored terminal session does not match the configured Codex account scope";
-    (* A terminal always targets the endpoint registered by the service, never a
-       native default which might create an unobserved standalone runtime. *)
-    let endpoint=required "endpoint" sess in
-    if not(String.starts_with ~prefix:"unix://" endpoint) then fail 500 "only local Unix Codex endpoints are supported";
-    let native=s "native_id" sess in
-    (* Remote Codex also reads the account defaults when opening another session.
-       Keep Vim enabled there as well as in this terminal's CLI overrides. *)
-    Codex_rpc.connect (String.sub endpoint 7 (String.length endpoint-7)) >>= fun rpc ->
-    Codex_rpc.call rpc "skills/list" (obj ["cwds",`List workspaces;"forceReload",`Bool true]) >>= fun _ ->
-    Codex_rpc.call rpc "config/value/write" (obj ["keyPath",string "tui.vim_mode_default";
-      "value",`Bool true;"mergeStrategy",string "replace"]) >>= fun _ ->
-    Lwt_io.close rpc.oc >>= fun () ->
-    (if worker then
-      get(Codex_session.capture ~home (Yojson.Safe.to_string(obj ["hook_event_name",string "SessionStart";
-        "source",string "resume";"session_id",string native]))));
-    Lwt.return (endpoint,native) in
-  Printf.eprintf "Monty command receipt: %s\n%!" id;
-  let endpoint,native=try Lwt_main.run (flow ()) with
-    | Failure _ as e -> raise e | _ -> fail 503 ("service unavailable; command receipt " ^ id ^ " may need inspection; no standalone fallback") in
-  let command=codex_command ^ " resume --remote " ^ Shell.quote endpoint ^ " -C " ^ Shell.quote (Sys.getcwd ())
-    ^ " -c " ^ Shell.quote "tui.vim_mode_default=true" ^ " -- " ^ Shell.quote native ^ Option.fold ~none:"" ~some:(fun p -> " " ^ Shell.quote p) prompt in
-  match expect with
-  | None -> Unix.execv "/bin/sh" [|"/bin/sh";"-c";"exec " ^ command|]
-  | Some expect ->
-      (* ponytail: match the native Vim footer once; remove this bridge when Codex
-         honors vim_mode_default at startup instead of forcing Insert mode. *)
-      Unix.putenv "MONTY_CODEX_TUI_COMMAND" ("exec " ^ command);
-      Unix.execv expect [|expect;"-N";"-n";"-c";{|
-set command $env(MONTY_CODEX_TUI_COMMAND)
-unset env(MONTY_CODEX_TUI_COMMAND)
-spawn -noecho /bin/sh -c $command
-proc resize {} {
-    global spawn_out
-    stty rows [stty rows < /dev/fd/0] columns [stty columns < /dev/fd/0] < $spawn_out(slave,name)
-}
-resize
-trap resize WINCH
-set initialized 0
-interact -o -nobuffer -re {Vim: (Insert|Normal)} {
-    if {!$initialized} {
-        set initialized 1
-        if {$interact_out(1,string) eq "Insert"} {send -- "\033"}
-    }
-}
-set result [wait]
-if {[lindex $result 2] != 0 || [llength $result] > 4} {exit 1}
-exit [lindex $result 3]
-|}|]
+    if not(matches sess) || Option.fold ~none:false ~some:(fun id->s "native_id" sess<>id) session_id then fail 409 "chosen native session is not the selected conversation";
+    let rows,cols=Terminal_size.get Unix.stdin in
+    command ~home (random_id()) (obj ["op",string "terminal_open";"rows",`Int rows;"cols",`Int cols;"command",Option.fold ~none:`Null ~some:string command_override;"conversation",field "id" c;"selected_session",field "id" sess;
+      "revision",field "revision" c;"fresh",`Bool(mode="fresh");"fork",Option.fold ~none:`Null ~some:string fork;"prompt",Option.fold ~none:`Null ~some:string prompt;
+      "term",string(Option.value ~default:"xterm-256color" (Sys.getenv_opt "TERM"))]) >|= fun sess ->
+    s "id" c,s "id" sess in
+  let cid,sid=try Lwt_main.run(flow()) with Failure _ as e->raise e|_->fail 503 "Monty service unavailable; inspect receipts before retrying; no independent harness fallback" in
+  let original=if Unix.isatty Unix.stdin then Some(Unix.tcgetattr Unix.stdin) else None in
+  Fun.protect ~finally:(fun () -> Option.iter(fun attrs->Unix.tcsetattr Unix.stdin Unix.TCSANOW attrs) original) (fun () ->
+    Option.iter(fun attrs->Unix.tcsetattr Unix.stdin Unix.TCSANOW {attrs with
+      c_icanon=false;c_echo=false;c_isig=false;c_ixon=false;c_icrnl=false;c_opost=false;c_vmin=1;c_vtime=0}) original;
+    let offset=ref 0 and resized=ref true in
+    let prior=Sys.signal (Terminal_size.winch ()) (Sys.Signal_handle(fun _->resized:=true)) in
+    Fun.protect ~finally:(fun () -> ignore(Sys.signal (Terminal_size.winch ()) prior)) (fun () ->
+      let route op extra=command ~home (random_id()) (obj(["op",string op;"conversation",string cid;"selected_session",string sid] @ extra)) >|= ignore in
+      let rec output () = request ~home `GET ("/v1/terminals/" ^ sid ^ "?offset=" ^ string_of_int !offset) `Null >>= fun value ->
+        let bytes=Base64.decode_exn(s "data" value) in
+        Lwt_io.write Lwt_io.stdout bytes >>= fun () -> Lwt_io.flush Lwt_io.stdout >>= fun () ->
+        offset:=i "offset" value;
+        (if !resized && field "running" value=`Bool true then (resized:=false;let rows,cols=Terminal_size.get Unix.stdin in
+          route "terminal_resize" ["rows",`Int rows;"cols",`Int cols]) else Lwt.return_unit) >>= fun () ->
+        if field "running" value=`Bool false && bytes="" then (match field "code" value with `Int code->Lwt.return code|_->fail 503 "native terminal outcome is unknown; inspect retained output") else Lwt_unix.sleep 0.04 >>= output in
+      let rec input () = Lwt_io.read ~count:4096 Lwt_io.stdin >>= fun bytes ->
+        if bytes="" then Lwt.return 0 else route "terminal_input" ["data",string(Base64.encode_exn bytes)] >>= input in
+      Lwt_main.run(Lwt.pick [input();output()])))

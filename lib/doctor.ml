@@ -211,6 +211,7 @@ let checks ?(find_command = Process.command_exists_with_arguments)
                 "Install the configured %s executable or pass --%s-command COMMAND."
                 (Harness.to_string harness) (Harness.to_string harness) ] ]
   in
+  let required = check_command find_command ~required:true ~name:"server-runtime-python" ~command:"python3" ~recovery:["Install Python 3.9+ for Monty server runtime ownership guards."] :: required in
   let required =
     match (container_workers, worktree_mode) with
     | true, _ | false, Launcher.Never -> required

@@ -41,20 +41,35 @@
 
 (rule
  (alias runtest)
- (deps test_client_api.py ../bin/main.exe)
+ (deps test_client_api.py owned_fake_appserver.py ../bin/main.exe (source_tree ../agent-profiles))
  (action (run python3 %{dep:test_client_api.py} %{dep:../bin/main.exe})))
 
 (rule
  (alias runtest)
- (deps test_pi_api.py fake_pi.py test_client_api.py ../bin/main.exe)
+ (deps test_pi_api.py fake_pi.py test_client_api.py owned_fake_appserver.py ../bin/main.exe)
  (action (run python3 %{dep:test_pi_api.py} %{dep:../bin/main.exe})))
 
 (rule
  (alias runtest)
- (deps test_browser_api.py test_client_api.py ../bin/main.exe)
+ (deps test_browser_api.py test_client_api.py owned_fake_appserver.py ../bin/main.exe)
  (action (run python3 %{dep:test_browser_api.py} %{dep:../bin/main.exe})))
 
 (rule
  (alias runtest)
- (deps test_tasks_api.py test_client_api.py ../bin/main.exe (source_tree ../agent-profiles))
+ (deps test_tasks_api.py test_client_api.py owned_fake_appserver.py ../bin/main.exe (source_tree ../agent-profiles))
  (action (run python3 %{dep:test_tasks_api.py} %{dep:../bin/main.exe})))
+
+(rule
+ (alias runtest)
+ (deps test_owned_runtime.py ../helpers/owned_runtime.py)
+ (action (run python3 %{dep:test_owned_runtime.py} %{dep:../helpers/owned_runtime.py})))
+
+(rule
+ (alias runtest)
+ (deps test_claude_api.py test_client_api.py owned_fake_appserver.py ../bin/main.exe (source_tree fake_claude_sdk) (source_tree ../agent-profiles))
+ (action (run python3 %{dep:test_claude_api.py} %{dep:../bin/main.exe})))
+
+(rule
+ (alias runtest)
+ (deps test_server_headless.py test_tasks_api.py test_client_api.py owned_fake_appserver.py ../bin/main.exe (source_tree ../agent-profiles))
+ (action (run python3 %{dep:test_server_headless.py} %{dep:../bin/main.exe})))

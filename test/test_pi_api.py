@@ -135,7 +135,9 @@ def suite(home):
         c.cmd('model',{'op':'set_model','conversation':cid,'revision':c.revision(cid),'provider':'fixture','model':'second'})
         c.cmd('hold',{'op':'send','conversation':cid,'revision':c.revision(cid),'text':'hold'})
         c.cmd('steer',{'op':'send','conversation':cid,'revision':c.revision(cid),'text':'queued steering','delivery':'steer'})
-        c.cmd('busy-detach',{'op':'detach','conversation':cid,'revision':c.revision(cid)},status='rejected')
+        c.cmd('ui-detach',{'op':'detach','conversation':cid,'revision':c.revision(cid)})
+        assert c.req('conversations/'+cid)['sessions'][0]['runtime']=='running'
+        c.cmd('busy-detach',{'op':'release_runtime','conversation':cid,'revision':c.revision(cid)},status='rejected')
         c.cmd('busy-switch',{'op':'switch','conversation':cid,'revision':c.revision(cid),'mode':'branch','profile':'second','context':context},status='rejected')
         stopped=c.cmd('interrupt',{'op':'interrupt','conversation':cid,'revision':c.revision(cid)})
         assert stopped['cleared_queue']['steering']==['queued steering']
@@ -207,9 +209,9 @@ def suite(home):
         volatile=c.cmd('volatile-start',{'op':'start','profile':'pi-renamed',
           'context':dict(context,environment={'MONTY_FIXTURE_UNFLUSHED':'1'})})
         volatile_id=volatile['id'];volatile_path=Path(volatile['sessions'][0]['source_file'])
-        c.cmd('volatile-detach',{'op':'detach','conversation':volatile_id,'revision':c.revision(volatile_id)})
+        c.cmd('volatile-detach',{'op':'release_runtime','conversation':volatile_id,'revision':c.revision(volatile_id)})
         final_batches=[batch for batch in c.history(volatile_id)['sessions'][0]['records']
-                       if batch['provenance']=='Pi detach boundary']
+                       if batch['provenance']=='Pi release_runtime boundary']
         assert final_batches and any(item['content']['data']=='unflushed setup' for item in final_batches[-1]['items'])
         assert not volatile_path.exists()
         assert c.req('conversations/'+volatile_id)['sessions'][0]['runtime']=='disconnected'
@@ -218,13 +220,24 @@ def suite(home):
           'context':dict(context,environment={'MONTY_FIXTURE_REBIND':'1'})})
         rebound_id=rebound['id'];source_file=rebound['sessions'][0]['source_file']
         c.cmd('rebind-send',{'op':'send','conversation':rebound_id,'revision':c.revision(rebound_id),'text':'persist fixture history'})
-        c.cmd('rebind-detach',{'op':'detach','conversation':rebound_id,'revision':c.revision(rebound_id)})
+        c.cmd('rebind-detach',{'op':'release_runtime','conversation':rebound_id,'revision':c.revision(rebound_id)})
         before_stops=len([call for call in calls() if 'stopped' in call])
         result=c.cmd('rebind-resume',{'op':'resume','conversation':rebound_id,
           'revision':c.revision(rebound_id),'detached':True},status='rejected')
         assert result['code']==409 and 'different session file' in result['message']
         until(lambda:len([call for call in calls() if 'stopped' in call]),lambda count:count==before_stops+1)
         assert c.req('conversations/'+rebound_id)['sessions'][0]['source_file']==source_file
+        malformed=c.cmd('malformed-start',{'op':'start','profile':'pi-renamed','context':context})
+        malformed_id=malformed['id'];native_id=malformed['sessions'][0]['native_id']
+        native_pid=next(call['pid'] for call in calls() if call.get('start')==native_id)
+        c.cmd('malformed-send',{'op':'send','conversation':malformed_id,'revision':c.revision(malformed_id),
+                              'text':'malformed stream'},status='outcome_unknown')
+        until(lambda:any(call.get('stopped')==native_id for call in calls()))
+        stat=subprocess.run(['ps','-o','stat=','-p',str(native_pid)],capture_output=True,text=True).stdout.strip()
+        assert not stat or stat.startswith('Z'), 'malformed stream left its native child running: '+stat
+        starts=len([call for call in calls() if 'start' in call])
+        c.history(malformed_id)
+        assert len([call for call in calls() if 'start' in call])==starts
         assert c.req('inventory')['tasks']==[]
         assert not (home/'.monty/tasks.local.json').exists()
         print('Pi file mirror, RPC control, dialog races, switching and restart E2E passed')
@@ -262,7 +275,8 @@ def real_suite(home):
       'models':[{'id':'fixture','name':'Local fixture','reasoning':False,'input':['text'],
                  'cost':{'input':0,'output':0,'cacheRead':0,'cacheWrite':0},'contextWindow':32768,'maxTokens':512}]}}}))
     config=home/'profiles.json';config.write_text(json.dumps({'profiles':[
-      {'id':'pi','harness':'pi','command':command,'pi_home':str(pi),'roots':[str(repo)],'tools':[]}]}))
+      {'id':'pi','harness':'pi','command':command+' --offline --provider fixture --model fixture --no-tools --no-extensions --no-skills',
+       'pi_home':str(pi),'roots':[str(repo)],'tools':[]}]}))
     service=Service(home,config,{'HOME':str(shell_home)});c=service.client
     try:
         chat=c.cmd('real-pi-start',{'op':'start','profile':'pi','modelProvider':'fixture','model':'fixture',
@@ -284,7 +298,7 @@ def real_suite(home):
         observer.cmd('real-pi-abort',{'op':'interrupt','conversation':cid,'revision':observer.revision(cid)})
         model.release.set()
         until(lambda:c.req('conversations/'+cid)['sessions'][0]['runtime'],lambda state:state=='idle')
-        c.cmd('real-pi-detach',{'op':'detach','conversation':cid,'revision':c.revision(cid)})
+        c.cmd('real-pi-detach',{'op':'release_runtime','conversation':cid,'revision':c.revision(cid)})
         # Native Pi can continue the detached file; the read-only mirror catches it.
         run=subprocess.run([command,'--offline','--no-approve','--no-tools','--no-extensions','--no-skills',
           '--session',str(source),'--provider','fixture','--model','fixture','-p','native terminal continuation'],
@@ -294,8 +308,29 @@ def real_suite(home):
         assert json.loads(source.read_text().splitlines()[0])['id']==native
         c.cmd('real-pi-resume',{'op':'resume','conversation':cid,'revision':c.revision(cid),'detached':True})
         assert c.req('conversations/'+cid)['sessions'][0]['native_id']==native
+        c.cmd('real-pi-terminal',{'op':'terminal_open','conversation':cid,'selected_session':chat['sessions'][0]['id'],
+                                'revision':c.revision(cid),'prompt':'server-owned native terminal turn','rows':40,'cols':120})
+        until(lambda:entries(c,cid),lambda xs:any('server-owned native terminal turn' in json.dumps(x) for x in xs),seconds=20)
+        until(lambda:len(model.requests),lambda count:count>=4,seconds=20)
+        until(lambda:json.loads(source.read_text().splitlines()[-1]).get('message',{}).get('role'),lambda role:role=='assistant')
+        c.cmd('real-pi-terminal-input',{'op':'terminal_input','conversation':cid,'selected_session':chat['sessions'][0]['id'],
+          'data':base64.b64encode(b'native terminal byte input\r').decode()})
+        until(lambda:entries(c,cid),lambda xs:any('native terminal byte input' in json.dumps(x) for x in xs),seconds=20)
+        assert json.loads(source.read_text().splitlines()[0])['id']==native
+        fork=c.cmd('real-pi-fork',{'op':'start','profile':'pi','terminal':True,'fork':native,
+          'context':{'workspaces':[str(repo)],'instructions':'Continue the local fork fixture.'}})
+        fork_id=fork['id'];fork_session=fork['sessions'][0]
+        c.cmd('real-pi-fork-terminal',{'op':'terminal_open','conversation':fork_id,'selected_session':fork_session['id'],
+                                    'revision':c.revision(fork_id),'fresh':True,'fork':native,'prompt':'fork terminal turn','rows':40,'cols':120})
+        until(lambda:entries(c,fork_id),lambda xs:any('fork terminal turn' in json.dumps(x) for x in xs),seconds=20)
+        fork_state=c.req('conversations/'+fork_id)['sessions'][0]
+        assert fork_state['native_id']!=native
+        fork_file=Path(fork_state['source_file'])
+        assert json.loads(fork_file.read_text().splitlines()[0])['id']==fork_state['native_id']
+        assert 'server-owned native terminal turn' in fork_file.read_text()
+        assert 'fork terminal turn' not in source.read_text()
         assert c.req('inventory')['tasks']==[]
-        print('real Pi 1.0.2: RPC send/interrupt, shared API observation, native file continuation/mirroring and exact detached resume passed; all inference local')
+        print('real Pi 1.0.2: RPC send/interrupt, shared observation, exact server-owned PTY resume and fork identity passed; all inference local')
     finally:
         model.release.set();service.close();model.shutdown();model.server_close()
 
