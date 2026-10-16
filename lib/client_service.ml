@@ -4,7 +4,6 @@ open Conversation_store
 
 type worker_fence = {process:Lwt_process.process_full; mutable session_id:string}
 type t = {home:string; config:Yojson.Safe.t; clients:(string,Codex_rpc.t) Hashtbl.t;
-  browser:Client_browser.t;
   pi_clients:(string,Pi_rpc.t) Hashtbl.t;
   claude_clients:(string,Pi_rpc.t) Hashtbl.t;
   terminals:(string,Owned_terminal.t) Hashtbl.t;
@@ -934,7 +933,6 @@ let inventory t uri =
         "status",string x.status;"title",string x.title;"branch",Option.fold ~none:`Null ~some:string x.branch;
         "workspaces",`List (List.map (fun (w:Overview_types.task_workspace)->obj ["repo",string w.repo;"branch",string w.branch]) x.workspaces)]) tasks)]
 let capabilities t = obj ["api_version",`Int 1;"epoch",string t.epoch;"cursor",string (t.epoch ^ ":" ^ string_of_int t.sequence);
-  "storage_scope",string (sha t.home);
   "profiles",`List (List.map (fun p -> obj ["id",field "id" p;"harness",field "harness" p;
     "scope",field "scope" p;"roots",field "roots" p]) (xs "profiles" t.config));
   "codex_version",string "0.160.0";"codex_tested_versions",`List [string "0.160.0";string "0.160.1"];
@@ -942,10 +940,10 @@ let capabilities t = obj ["api_version",`Int 1;"epoch",string t.epoch;"cursor",s
   "standalone_release_verification",`Bool false;"switch_modes",`List [string "branch"];
   "history_mode",string "legacy exposed snapshots";"event_retention",`Int 256;
   "request_limit",`Int 262144;"real_adapters",`List [string "codex";string "pi";string "claude"];"claude_sdk_version",string "0.2.166"]
-let response ?(status=`OK) ?(headers=[]) json =
+let response ?(status=`OK) json =
   Cohttp_lwt_unix.Server.respond_string ~status ~headers:(Cohttp.Header.of_list
-    (headers @ ["content-type","application/json";"cache-control","no-store";"connection","close";
-      "x-content-type-options","nosniff"]))
+    ["content-type","application/json";"cache-control","no-store";"connection","close";
+      "x-content-type-options","nosniff"])
     ~body:(Yojson.Safe.to_string(public json)) ()
 let error code message = response ~status:(Cohttp.Code.status_of_code code) (obj ["error",string message])
 let bounded_body body =
@@ -960,12 +958,11 @@ let cursor t value = match String.split_on_char ':' value with
       | Some n when n>=max 0 (t.sequence-256) && n<=t.sequence -> n
       | _ -> fail 409 "cursor expired; obtain authoritative snapshots")
   | _ -> fail 409 "cursor expired; service epoch changed; obtain authoritative snapshots"
-let stream t ~authorized last =
+let stream t last =
   let position=ref last in
   let ended=ref false in
   let next () =
     if !ended then Lwt.return_none else
-    if not (authorized ()) then (ended:=true;Lwt.return_some "event: session_expired\ndata: {}\n\n") else
     if !position < t.sequence-256 then (ended:=true;Lwt.return_some "event: resync\ndata: {\"reason\":\"cursor expired\"}\n\n")
     else match List.rev t.events |> List.find_opt (fun (n,_) -> n > !position) with
     | Some (n,data) -> position:=n; Lwt.return_some (Printf.sprintf "id: %s:%d\nevent: update\ndata: %s\n\n" t.epoch n (Yojson.Safe.to_string data))
@@ -981,37 +978,16 @@ let callback t ~token ~port ~shutdown conn req body =
     if Cohttp.Header.get headers "host"<>Some host then fail 403 "invalid Host";
     (match Cohttp.Header.get headers "origin" with None -> ()
       | Some value when value="http://" ^ host -> () | _ -> fail 403 "invalid Origin");
-    let bearer=Eqaf.equal (Option.value ~default:"" (Cohttp.Header.get headers "authorization")) ("Bearer " ^ token) in
+    if not (Eqaf.equal (Option.value ~default:"" (Cohttp.Header.get headers "authorization")) ("Bearer " ^ token)) then
+      fail 401 "bearer authentication required";
     let uri=Cohttp.Request.uri req in
     let parts=Uri.path uri |> String.split_on_char '/' |> List.filter ((<>) "") in
-    match Cohttp.Request.meth req,Client_browser.asset t.browser (Uri.path uri) with
-    | `GET,Some asset -> Client_browser.serve_asset asset
-    | _ ->
-    let login=Cohttp.Request.meth req=`POST && parts=["v1";"browser";"session"] in
-    let authorized () = bearer || (Cohttp.Header.get headers "authorization"=None && Client_browser.authenticated t.browser ~port headers) in
-    if not login && not (authorized ()) then fail 401 "bearer authentication required; browser clients can pair with monty web";
-    if not bearer && Cohttp.Request.meth req<>`GET && Cohttp.Header.get headers "origin"<>Some ("http://" ^ host) then
-      fail 403 "same-origin browser request required";
     let json_body () =
       if Cohttp.Header.get headers "content-type"<>Some "application/json" then fail 415 "application/json required";
       bounded_body body in
     match Cohttp.Request.meth req,parts with
-    | `POST,["v1";"browser";"pair"] ->
-        if not bearer then fail 403 "pairing requires the local service credential";
-        json_body () >>= fun request ->
-        (match field "assets" request with `Null->()|_->Client_browser.load_assets t.browser (required "assets" request));
-        response (Client_browser.issue t.browser)
-    | `POST,["v1";"browser";"session"] ->
-        json_body () >>= fun request ->
-        let cookie=Client_browser.login t.browser ~port (required "code" request) in
-        response ~headers:["set-cookie",cookie] (obj ["authenticated",`Bool true])
-    | `POST,["v1";"browser";"logout"] ->
-        json_body () >>= fun _ ->
-        let cookie=Client_browser.logout t.browser ~port headers in
-        response ~headers:["set-cookie",cookie] (obj ["authenticated",`Bool false])
     | `GET,["v1";"health"] -> response (capabilities t)
     | `POST,["v1";"supervisors";"authorize"] ->
-        if not bearer then fail 403 "supervisor authorization requires the local service credential";
         json_body () >>= fun request ->
         let id=required "execution" request in
         (match Hashtbl.find_opt t.supervisors id with
@@ -1019,7 +995,6 @@ let callback t ~token ~port ~shutdown conn req body =
             Hashtbl.remove t.supervisors id;response (obj["authorized",`Bool true])
         | _->fail 403 "supervisor is not an authorized server child");
     | `POST,["v1";"shutdown"] ->
-        if not bearer then fail 403 "service shutdown requires the local service credential";
         if Cohttp.Header.get headers "content-type"<>Some "application/json" then fail 415 "application/json required";
         bounded_body body >>= fun request ->
         if required "epoch" request<>t.epoch then fail 409 "service epoch changed; retry stop";
@@ -1075,7 +1050,7 @@ let callback t ~token ~port ~shutdown conn req body =
         if Cohttp.Header.get headers "content-type"<>Some "application/json" then fail 415 "application/json required";
         bounded_body body >>= fun request -> response ~status:`Accepted (submit t id request)
     | `GET,["v1";"events"] ->
-        let last=match Cohttp.Header.get headers "last-event-id" with None->t.sequence|Some v->cursor t v in stream t ~authorized last
+        let last=match Cohttp.Header.get headers "last-event-id" with None->t.sequence|Some v->cursor t v in stream t last
     | `GET,["v1";"blobs";hash] ->
         if String.length hash<>64 || not (String.for_all (function '0'..'9'|'a'..'f'->true|_->false) hash) then fail 400 "invalid blob hash";
         let p=file t.home ["conversation-blobs";hash] in
@@ -1156,7 +1131,7 @@ let serve ~home ~config_path ~port =
       if changed then save home (puts ["revision",`Int(i "revision" c+1);"sessions",`List (xs "sessions" c |> List.map (fun sess ->
         puts ["observed",`Bool false;"pending",`List [];"runtime",string "disconnected";"terminal",`Bool false;
           "terminal_code",(if field "terminal" sess=`Bool true then string "outcome_unknown" else field "terminal_code" sess)] sess))] c)));
-    let t={home;config;browser=Client_browser.create ();clients=Hashtbl.create 8;connecting=Hashtbl.create 8;
+    let t={home;config;clients=Hashtbl.create 8;connecting=Hashtbl.create 8;
       pi_clients=Hashtbl.create 8;claude_clients=Hashtbl.create 8;terminals=Hashtbl.create 8;executions=Hashtbl.create 8;supervisors=Hashtbl.create 8;active_workers=Hashtbl.create 8;codex_processes=Hashtbl.create 8;worker_fences=Hashtbl.create 8;commands=Lwt_mutex.create ();changed=Lwt_condition.create ();endpoints=Hashtbl.create 8;sequence=0;stopping=false;epoch=random_id ();events=[]} in
     let run () =
       let socket=Lwt_unix.socket Unix.PF_INET Unix.SOCK_STREAM 0 in

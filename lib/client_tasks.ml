@@ -119,7 +119,7 @@ let prepare ~home ~profiles ~make_env ~id request =
     | _ -> fail 400 "task preflight action must be launch or resume" in
   locked home (fun () ->
     ignore(current home request);
-    get(State_store.ensure_real_directory ~label:"web task plan" ~mode:0o700 dir);
+    get(State_store.ensure_real_directory ~label:"task plan" ~mode:0o700 dir);
     List.iter (fun (path,contents)->get(State_store.write_file_atomic ~path ~perm:0o600 contents)) files);
   let env=environment make_env home p in
   let role=role home key in

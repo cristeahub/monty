@@ -129,10 +129,6 @@ class Handler(socketserver.StreamRequestHandler):
                 req = receive(self.rfile)
                 if 'method' not in req:
                     server.answers.append(req)
-                    if req['id'] in server.ui_requests:
-                        native, turn = server.ui_requests.pop(req['id'])
-                        turn['status'] = 'completed'
-                        server.emit({'method': 'serverRequest/resolved', 'params': {'threadId': native, 'requestId': req['id']}})
                     continue
                 method = req['method']; params = req.get('params', {})
                 server.calls.append((method, params))
@@ -180,50 +176,6 @@ class Handler(socketserver.StreamRequestHandler):
                         {'id': 'u-' + str(server.sends), 'type': 'userMessage', 'content': params.get('input', [])},
                         {'id': 'a-' + str(server.sends), 'type': 'agentMessage', 'text': 'hello'}]}
                     server.threads[native]['turns'].append(turn)
-                    prompt = params.get('input', [{}])[0].get('text', '')
-                    if server.ui_scenarios and prompt == 'Fixture: stream':
-                        turn['status'] = 'inProgress'
-                        answer = turn['items'].pop()
-                        answer['text'] = ''
-                        server.emit({'method': 'item/started', 'params': {'threadId': native, 'turnId': turn['id'], 'item': answer}})
-                        def stream(native=native, turn=turn, answer=answer):
-                            for delta in ['Live Codex ', 'answer']:
-                                time.sleep(.6)
-                                answer['text'] += delta
-                                server.emit({'method': 'item/agentMessage/delta', 'params': {
-                                    'threadId': native, 'turnId': turn['id'], 'itemId': answer['id'], 'delta': delta}})
-                            time.sleep(1.5)
-                            turn['items'].append(answer)
-                            turn['status'] = 'completed'
-                            server.emit({'method': 'item/completed', 'params': {'threadId': native, 'turnId': turn['id'], 'item': answer}})
-                            server.emit({'method': 'turn/completed', 'params': {'threadId': native, 'turn': turn}})
-                        threading.Thread(target=stream, daemon=True).start()
-                    if server.ui_scenarios and prompt.startswith('Fixture: '):
-                        turn['status'] = 'inProgress'
-                        title = prompt.removeprefix('Fixture: ')
-                        approval = {'threadId': native, 'turnId': turn['id'], 'itemId': 'request-item', 'startedAtMs': 1}
-                        method = None
-                        if title == 'approval':
-                            method = 'item/commandExecution/requestApproval'
-                            approval.update(command='printf approved', cwd='/fixture/workspace', reason='A harmless fixture command')
-                        elif title == 'files':
-                            method = 'item/fileChange/requestApproval'
-                            server.emit({'method': 'item/started', 'params': {'threadId': native, 'turnId': turn['id'],
-                                'item': {'id': 'request-item', 'type': 'fileChange', 'changes': [
-                                    {'path': '/fixture/workspace/example.txt', 'diff': '+fixture change'}]}}})
-                        elif title == 'questions':
-                            method = 'item/tool/requestUserInput'
-                            approval.update(isBlocking=True, questions=[
-                                {'id': 'style', 'header': 'Style', 'question': 'Choose a style', 'isOther': True,
-                                 'options': [{'label': 'Calm', 'description': 'Use a quiet palette'}, {'label': 'Bold', 'description': 'Use strong colors'}]},
-                                {'id': 'phrase', 'header': 'Phrase', 'question': 'Access phrase', 'isSecret': True}])
-                        elif title == 'permissions':
-                            method = 'item/permissions/requestApproval'
-                            approval.update(cwd='/fixture/workspace', reason='Fetch a fixture resource', permissions={'network': {'enabled': True}})
-                        if method:
-                            approval_id = 1000 + server.sends
-                            server.ui_requests[approval_id] = (native, turn)
-                            server.emit({'id': approval_id, 'method': method, 'params': approval})
                     for item in turn['items']:
                         server.emit({'method': 'item/completed', 'params': {'threadId': native, 'turnId': turn['id'], 'item': item}})
                     result = {'turn': turn}
@@ -232,12 +184,6 @@ class Handler(socketserver.StreamRequestHandler):
                         self.request.shutdown(socket.SHUT_RDWR)
                         return
                 elif method in ('turn/interrupt', 'abort'):
-                    if server.ui_scenarios:
-                        native = params['threadId']
-                        for turn in server.threads[native]['turns']:
-                            if turn['id'] == params['turnId']:
-                                turn['status'] = 'interrupted'
-                                server.emit({'method': 'turn/completed', 'params': {'threadId': native, 'turn': turn}})
                     result = {}
                 else:
                     raise AssertionError(method)
@@ -251,9 +197,7 @@ class Handler(socketserver.StreamRequestHandler):
 
 class Native(socketserver.ThreadingUnixStreamServer):
     daemon_threads = True
-    ui_scenarios = False
     def __init__(self, path):
-        self.ui_requests = {}
         self.clients = set();self.calls = [];self.threads = {};self.loaded = set()
         self.sends = 0;self.answers = [];self.drop_next = False;self.drop_open = False
         super().__init__(str(path), Handler)
@@ -448,6 +392,22 @@ def fake_suite(home):
         http_error(401,lambda:c.req('health',headers={'Authorization':'no'}))
         http_error(403,lambda:c.req('health',headers={'Origin':'https://evil.example'}))
         http_error(403,lambda:c.req('health',headers={'Host':'evil.example'}))
+        # The service accepts only its bearer token; no dashboard, pairing or cookie auth remains.
+        health = c.req('health')
+        assert 'storage_scope' not in health
+        port = c.url.rsplit(':', 1)[1]
+        http_error(401, lambda: c.req('health', headers={
+            'Authorization': '', 'Cookie': 'monty_session_' + port + '=' + c.token, 'Origin': c.url}))
+        for route in ('browser/pair', 'browser/session', 'browser/logout'):
+            http_error(404, lambda route=route: c.req(route, {}))
+        for path in ('/', '/main.bc.js'):
+            http_error(401, lambda path=path: urllib.request.urlopen(c.url + path))
+            request = urllib.request.Request(c.url + path, headers={'Authorization': 'Bearer ' + c.token})
+            http_error(404, lambda: urllib.request.urlopen(request))
+        for args in [('web', '--help=plain'), ('guide', 'web-client')]:
+            removed_cli = subprocess.run([BIN, *args, '--home', str(home)] if args[0] == 'web' else [BIN, *args],
+                                         env=service.env, capture_output=True, text=True)
+            assert removed_cli.returncode != 0, (args, removed_cli.stdout, removed_cli.stderr)
         assert c.req('inventory')['tasks']==[]
         assert not (home/'.monty/tasks.json').exists()
         removed=c.cmd('removed-classify',{'op':'classify','profile':'default',

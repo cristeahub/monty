@@ -1,6 +1,6 @@
 # Server-owned agents (implementation in progress)
 
-The authority is `clients → Monty server → native runtimes`. This includes web/API,
+The authority is `clients → Monty server → native runtimes`. This includes API,
 CLI/head-butler conversations, Ghostty and Rex terminals, and headless supervisors.
 An unavailable server is an error; there is no independent vendor launch fallback.
 
@@ -81,7 +81,7 @@ registered older session uses a receipt and conversation revision.
 sessions hold the worker fence until release or native cleanup, including server
 loss; their shared account adapter remains server-owned. `interrupt` requests
 native interruption; `cancel_execution` targets an execution receipt and checks
-its `updated_at` value. These are separate from closing a browser or terminal.
+its `updated_at` value. These are separate from disconnecting a client or closing a terminal.
 
 Headless commands submit a server-owned supervisor, retaining the existing worker
 locks, pinned profiles, phase sequencing, artifacts and handoffs. The startup

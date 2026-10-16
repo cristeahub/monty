@@ -44,8 +44,8 @@
 
 (rule
  (alias runtest)
- (deps test_browser_api.py test_client_api.py owned_fake_appserver.py ../bin/main.exe ../web/monty.svg)
- (action (run python3 %{dep:test_browser_api.py} %{dep:../bin/main.exe})))
+ (deps test_discovery_api.py test_client_api.py owned_fake_appserver.py ../bin/main.exe)
+ (action (run python3 %{dep:test_discovery_api.py} %{dep:../bin/main.exe})))
 
 (rule
  (alias runtest)

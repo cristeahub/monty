@@ -44,12 +44,6 @@ mirroring of explicitly selected native Pi session logs. See
 and the native-terminal ownership boundary. Existing native Pi launches and
 headless execution retain their transports.
 
-The local OCaml/Bonsai web client supports tasks and Codex/Pi conversations. Build it separately with
-`python3 web/build.py`, then run `monty web --assets web/_build/default` with the
-service configuration above. The command prints a local URL and a one-use pairing
-code. Paste the code into the page to connect; the service bearer token stays out
-of the browser. See the [web client workflow](docs/monty-workflows.md#web-client).
-
 ## Install
 
 Install the `monty` CLI without opam:
@@ -700,7 +694,7 @@ Rex terminology differs from Ghostty, so `--target` maps deliberately:
 Placement never follows moving UI focus. Rex sets `REX_SESSION`, `REX_BLOCK` and `REX_SERVER` in every terminal it opens; Monty pins the whole batch to those exact IDs before reserving any worker:
 
 - Inside a Rex terminal, `tab` lands in the caller's session and `split` beside the caller's pane. `REX_SERVER` selects the server; `REX_CLIENT` selects the app when several are connected.
-- Outside Rex (a plain shell, the web client, a service-owned chat), `tab` follows the active Mantle profile: it lands in the session named by `monty settings set rex-session <session>` for that profile (an ID or label from `rex ls`, resolved through `rex session inspect` on every launch and refused in preflight when it is not live), else in a session labelled after the profile (`work`, say) that the user already has or that Monty creates and records in `.monty/rex-session.<profile>.json`; without a profile the label is `monty` and the record `.monty/rex-session.json`. `split` is refused in preflight because there is no pane to split; `window` always creates a session.
+- Outside Rex (a plain shell or a service-owned chat), `tab` follows the active Mantle profile: it lands in the session named by `monty settings set rex-session <session>` for that profile (an ID or label from `rex ls`, resolved through `rex session inspect` on every launch and refused in preflight when it is not live), else in a session labelled after the profile (`work`, say) that the user already has or that Monty creates and records in `.monty/rex-session.<profile>.json`; without a profile the label is `monty` and the record `.monty/rex-session.json`. `split` is refused in preflight because there is no pane to split; `window` always creates a session.
 - Showing a new session needs exactly one connected Rex app (or `REX_CLIENT`) that offers `session.select`; otherwise preflight fails before any reservation and explains what is missing. Creating the session succeeds server-side regardless, so a display failure after creation leaves the worker `launch-requested` with the error and `monty resume` recovers it.
 
 Each worker keeps `rex-terminal.json` beside its `job.json` with the server endpoint, session, window and block IDs, the app client, the target and the launch attempt. Nothing about Rex is written to `job.json`. `monty resume`/`monty open` asks Rex whether that block's child process is still running: live means focus it (and show its session) without a second writer; exited or vanished means the normal resume flow opens a new tab for the same conversation, account and branches. An unreachable server stops resume rather than guessing. `monty rex status <worker>` prints the recorded reference, its liveness and the program-status records; it is read-only.
@@ -802,7 +796,7 @@ monty settings set terminal ghostty
 monty settings set terminal rex
 ```
 
-Tabs requested from outside a Rex terminal (the head butler in another app, the web client, a service-owned chat) follow the active Mantle profile: they land in a session labelled after the profile (`work`, `private`), or in `monty` without a profile, unless a session is persisted for that profile; `monty doctor --terminal rex` reports whether it resolves:
+Tabs requested from outside a Rex terminal (the head butler in another app or a service-owned chat) follow the active Mantle profile: they land in a session labelled after the profile (`work`, `private`), or in `monty` without a profile, unless a session is persisted for that profile; `monty doctor --terminal rex` reports whether it resolves:
 
 ```sh
 rex ls                                      # session labels and IDs
@@ -811,7 +805,7 @@ monty settings set rex-session.private pers # another profile's mapping
 monty settings set rex-session ''           # back to the session labelled after the profile
 ```
 
-The web client's task preflight and apply use the same setting, show it in the plan, and refuse an apply whose terminal changed since preflight.
+The task API's preflight and apply use the same setting and refuse an apply whose terminal changed since preflight.
 
 Enable Codex YOLO mode for Monty-launched Codex sessions with:
 

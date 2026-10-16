@@ -12,7 +12,7 @@ import tempfile
 from test_client_api import BIN, Service, http_error
 
 
-def fixture(home, native_socket=None, profile='local'):
+def fixture(home):
     repo = home / 'repo'
     repo.mkdir()
     subprocess.run(['git', 'init', '-q', str(repo)], check=True)
@@ -24,10 +24,7 @@ def fixture(home, native_socket=None, profile='local'):
     for name in ('codex', 'pi', 'ghostty', 'osascript', 'sdef', 'gh'):
         path = fake / name
         path.write_text('#!/usr/bin/env python3\nfrom pathlib import Path\n'
-            'import sys, json\n'
-            + (f'if sys.argv[1:4] == ["app-server", "daemon", "start"]:\n print(json.dumps({{"socketPath": {str(native_socket)!r}, "appServerVersion": "0.160.0"}})); sys.exit(0)\n'
-               if name == 'codex' and native_socket else '')
-            +
+            'import sys\n'
             f'with open({str(home / "tools.log")!r}, "a") as log: log.write({name!r} + " " + repr(sys.argv[1:]) + "\\n")\n'
             f'if {name!r} == "osascript" and Path({str(home / "fail-terminal")!r}).exists(): sys.exit(7)\n')
         path.chmod(0o700)
@@ -62,19 +59,10 @@ else: raise AssertionError(sys.argv)
     (home / 'codex').mkdir()
     (home / 'other-codex').mkdir()
     config = home / 'profiles.json'
-    config.write_text(json.dumps({'profiles': [{'id': profile, 'harness': 'codex',
+    config.write_text(json.dumps({'profiles': [{'id': 'local', 'harness': 'codex',
         'command': str(fake / 'codex'), 'codex_home': str(home / 'codex'), 'roots': [str(repo)]},
         {'id': 'other', 'harness': 'codex', 'command': str(fake / 'codex'),
          'codex_home': str(home / 'other-codex'), 'roots': [str(repo)]}]}))
-    if native_socket:
-        pi_home = home / 'pi'
-        pi_home.mkdir()
-        (fake / 'pi').write_text('#!/bin/sh\nexec ' + shlex.quote(sys.executable) + ' ' +
-            shlex.quote(str(Path(__file__).with_name('fake_pi.py').resolve())) + ' "$@"\n')
-        data = json.loads(config.read_text())
-        data['profiles'].append({'id': 'Pi', 'harness': 'pi', 'command': str(fake / 'pi'),
-                                 'pi_home': str(pi_home), 'roots': [str(repo)]})
-        config.write_text(json.dumps(data))
     service = Service(home, config, {'PATH': str(fake) + ':' + os.environ['PATH'],
         'MONTY_CODEX_YOLO': 'true', 'MONTY_BRANCH_PREFIX': 'testprefix'})
     cli(service, 'projects', 'add', '--repo', str(repo))
@@ -96,9 +84,9 @@ def check(home):
         c = service.client
         cli(service, 'settings', 'set', 'codex-yolo', 'true')
         assert c.req('projects')[0]['repo'] == str(repo)
-        created = c.cmd('create', {'op': 'task_create', 'project': 'repo', 'title': 'Safe web launch', 'notes': 'Test notes'})
+        created = c.cmd('create', {'op': 'task_create', 'project': 'repo', 'title': 'Safe API launch', 'notes': 'Test notes'})
         key = created['key']
-        c.req('commands/create', {'op': 'task_create', 'project': 'repo', 'title': 'Safe web launch', 'notes': 'Test notes'})
+        c.req('commands/create', {'op': 'task_create', 'project': 'repo', 'title': 'Safe API launch', 'notes': 'Test notes'})
         assert len(c.req('inventory')['tasks']) == 1
         assert created['notes'] == 'Test notes'
         def request(op, **args):
@@ -192,7 +180,7 @@ def check(home):
         (fake / 'rex').chmod(0o700)
         applescript_calls = (home / 'tools.log').read_text().count('osascript')
         cli(service, 'settings', 'set', 'terminal', 'rex')
-        created = c.cmd('create-rex', {'op': 'task_create', 'project': 'repo', 'title': 'Rex web launch'})
+        created = c.cmd('create-rex', {'op': 'task_create', 'project': 'repo', 'title': 'Rex API launch'})
         key = created['key']
         preview = preflight('rex-preview')
         assert preview['ready'] and preview['terminal'] == 'rex', preview
