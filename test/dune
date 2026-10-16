@@ -15,6 +15,11 @@
  (libraries monty lwt.unix unix yojson))
 
 (test
+ (name test_owned_terminal)
+ (modules test_owned_terminal)
+ (libraries monty lwt.unix unix yojson))
+
+(test
  (name test_cli_e2e)
  (modules test_cli_e2e)
  (libraries monty unix yojson)
@@ -81,3 +86,13 @@
  (alias runtest)
  (deps test_server_headless.py test_tasks_api.py test_client_api.py owned_fake_appserver.py ../bin/main.exe (source_tree ../agent-profiles))
  (action (run python3 %{dep:test_server_headless.py} %{dep:../bin/main.exe})))
+
+(rule
+ (alias runtest)
+ (deps test_terminal_selectors.py test_client_api.py owned_fake_appserver.py ../bin/main.exe)
+ (action (run python3 %{dep:test_terminal_selectors.py} %{dep:../bin/main.exe})))
+
+(rule
+ (alias runtest)
+ (deps test_sync_purge.py test_client_api.py owned_fake_appserver.py ../bin/main.exe (source_tree fake_claude_sdk))
+ (action (run python3 %{dep:test_sync_purge.py} %{dep:../bin/main.exe})))

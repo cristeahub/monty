@@ -226,12 +226,12 @@ let continue_head_butler session last home harness_override
 let continue_term =
   let session =
     let doc =
-      "Exact native session selector: a Pi path or id, or a Codex UUID or session name."
+      "Exact registered native session ID for the selected harness and account."
     in
     Cmdliner.Arg.(value & pos 0 (some string) None & info [] ~docv:"SESSION" ~doc)
   in
   let last =
-    let doc = "Resume the most recent head-butler conversation without a picker." in
+    let doc = "Resume the newest registered task-free conversation in the Monty control room without a picker." in
     Cmdliner.Arg.(value & flag & info [ "last" ] ~doc)
   in
   Cmdliner.Term.(
@@ -623,14 +623,17 @@ let resume archived fresh worker options =
       let validate_open_task =
         (not archived) || options.backend <> Terminal.Dry_run
       in
-      Launcher.resume_job_unlocked ~validate_open_task ~fresh ~codex_mode
+      Launcher.prepare_resume_job_unlocked ~validate_open_task ~fresh ~codex_mode
         ~persisted_worktree_mode:record.worktree_mode ~profile options job
     in
-    match options.Launcher.backend with
-    | Terminal.Dry_run -> execute ()
-    | Terminal.Ghostty | Terminal.Rex ->
-        let* record = find_record () in
-        Worker_lock.with_lock ~home:options.home ~record execute
+    let* dispatch =
+      match options.Launcher.backend with
+      | Terminal.Dry_run -> execute ()
+      | Terminal.Ghostty | Terminal.Rex ->
+          let* record = find_record () in
+          Worker_lock.with_lock ~home:options.home ~record execute
+    in
+    dispatch ()
   in
   exit_code result
  in
@@ -708,7 +711,20 @@ let list_jobs_term =
  in
 let ensure_worktree repo branch wt_command =
   let repo = Shell.normalize (Shell.abs_path repo) in
-  match Wt.create_or_reuse ~wt_command ~repo ~branch with
+  let result =
+    let ( let* ) = Result.bind in
+    match Sys.getenv_opt "MONTY_WORKER_DIR", Sys.getenv_opt "MONTY_JOB_ID",
+          Sys.getenv_opt "MONTY_JOB_FILE" with
+    | None, None, None -> Wt.create_or_reuse ~wt_command ~repo ~branch
+    | Some worker_dir, Some id, Some job_file ->
+        let* state =
+          State_path.of_worker_identity ~worker_dir ~id ~job_file
+            ?run_dir:(Sys.getenv_opt "MONTY_RUN_DIR") ()
+        in
+        Project_overview.ensure_worker_workspace ~state ~repo ~branch ~wt_command ()
+    | _ -> Error "worker workspace materialization requires the complete MONTY_WORKER_DIR, MONTY_JOB_ID and MONTY_JOB_FILE identity"
+  in
+  match result with
   | Error msg -> exit_code (Error msg)
   | Ok path ->
       Fmt.pr "%s\n" path;

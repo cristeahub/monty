@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
+import time
 import uuid
 from types import SimpleNamespace
 from .types import PermissionResultAllow
@@ -49,6 +50,15 @@ class SessionMessage:
     parent_tool_use_id: object=None
 
 def get_session_messages(native):
+    pause=home()/'pause-history'
+    if pause.exists():
+        pause.unlink()
+        (home()/'history-started').touch()
+        deadline=time.monotonic()+8
+        while not (home()/'release-history').exists():
+            if time.monotonic()>deadline:raise TimeoutError('history gate was not released')
+            time.sleep(.01)
+    log({'history':native})
     p=path(native)
     return [SessionMessage(**x) for x in json.loads(p.read_text())['entries']] if p.exists() else []
 def list_sessions(limit=25,offset=0):

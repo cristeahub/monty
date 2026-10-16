@@ -317,7 +317,11 @@ let prepare_many ~dry_run options indexed_jobs =
     let rec materialize acc = function
       | [] -> Ok (List.rev acc)
       | worker :: rest ->
-          let* job = ensure_worktree options worker in
+          let* job =
+            Launcher.with_prepared_worker_lock options worker
+              ~expected_statuses:[ status_before_prepare worker ]
+              (fun () -> ensure_worktree options worker)
+          in
           materialize (job :: acc) rest
     in
     let* jobs = materialize [] reserved in

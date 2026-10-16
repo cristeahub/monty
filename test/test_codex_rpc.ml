@@ -6,7 +6,7 @@ module Ws = Codex_rpc.Ws
 
 let assert_true label value = if not value then failwith label
 
-let upgrade ic oc accepted =
+let upgrade_request ic =
   Lwt_io.read_line ic >>= fun _ ->
   let rec headers values = Lwt_io.read_line ic >>= fun line ->
     let line=String.trim line in
@@ -14,7 +14,10 @@ let upgrade ic oc accepted =
     let boundary=String.index line ':' in
     headers ((String.lowercase_ascii(String.sub line 0 boundary),
       String.trim(String.sub line (boundary+1) (String.length line-boundary-1))) :: values) in
-  headers [] >>= fun values ->
+  headers []
+
+let upgrade ic oc accepted =
+  upgrade_request ic >>= fun values ->
   let response=if accepted then
     "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: " ^
     Websocket.b64_encoded_sha1sum(List.assoc "sec-websocket-key" values ^ Websocket.websocket_uuid) ^ "\r\n\r\n"
@@ -37,7 +40,7 @@ let read_frames ic oc =
 let expect_eof ic = Lwt_unix.with_timeout 2. (fun () -> Lwt_io.read_char_opt ic) >|= fun value ->
   assert_true "failed or closed Codex connection retained its socket" (value=None)
 
-let with_server serve run =
+let with_server ?(timeout=5.) serve run =
   let path=Filename.temp_file "monty-rpc-" ".sock" in
   Unix.unlink path;
   let complete,wake=Lwt.wait () in
@@ -45,7 +48,7 @@ let with_server serve run =
     Lwt.catch (fun () -> serve ic oc >|= fun () -> Lwt.wakeup_later wake ())
       (fun error -> Lwt.wakeup_later_exn wake error;Lwt.return_unit)) >>= fun server ->
   Lwt.finalize
-    (fun () -> Lwt_unix.with_timeout 5. (fun () ->
+    (fun () -> Lwt_unix.with_timeout timeout (fun () ->
       Lwt.both (run path) complete >|= fun _ -> ()))
     (fun () -> Lwt_io.shutdown_server server >|= fun () ->
       try Unix.unlink path with Unix.Unix_error(Unix.ENOENT,_,_)->())
@@ -57,6 +60,21 @@ let expect_rejected promise =
 let test_upgrade_failure () = with_server
   (fun ic oc -> upgrade ic oc false >>= fun () -> expect_eof ic)
   (fun path -> expect_rejected(Codex_rpc.connect path))
+
+let test_upgrade_timeout () = with_server ~timeout:15.
+  (fun ic _ ->
+    upgrade_request ic >>= fun _ ->
+    (* Keep the peer open without replying, then observe client ownership end. *)
+    Lwt_unix.with_timeout 14. (fun () -> Lwt_io.read_char_opt ic) >|= fun value ->
+    assert_true "timed-out WebSocket upgrade retained its socket" (value=None))
+  (fun path ->
+    let started=Unix.gettimeofday () in
+    Lwt.catch (fun () -> Codex_rpc.connect path >>= fun rpc ->
+      Codex_rpc.close rpc >>= fun () -> Lwt.fail(Failure "expected stalled upgrade to time out"))
+      (function Lwt_unix.Timeout ->
+        assert_true "stalled upgrade exceeded its startup budget" (Unix.gettimeofday ()-.started<14.);
+        Lwt.return_unit
+        | error -> Lwt.fail error))
 
 let test_initialize_failure () = with_server
   (fun ic oc ->
@@ -104,7 +122,8 @@ let test_notification_failure_still_closes () = with_server
 
 let () = Lwt_main.run (
   test_upgrade_failure () >>= fun () ->
+  test_upgrade_timeout () >>= fun () ->
   test_initialize_failure () >>= fun () ->
   test_duplicate_response () >>= fun () ->
   test_notification_failure_still_closes () >|= fun () ->
-  print_endline "Codex RPC: failed handshakes close sockets, duplicate responses settle once, and notification errors preserve cleanup")
+  print_endline "Codex RPC: failed/stalled handshakes close sockets, duplicate responses settle once, and notification errors preserve cleanup")

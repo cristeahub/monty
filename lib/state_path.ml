@@ -170,6 +170,29 @@ let validate_persisted_path ~home ~label ~expected = function
           "unsafe legacy job metadata: persisted %s %s does not match physical canonical path %s; repair the record explicitly"
           label actual expected
 
+let of_worker_identity ~worker_dir ~id ~job_file ?run_dir () =
+  if Filename.is_relative worker_dir || Filename.is_relative job_file then
+    Error "worker directory and job file identity must be absolute paths"
+  else
+    (* Infer home from home/.monty/runs/<run>/workers/<id>, then let the
+       canonical layout validator verify every component before using it. *)
+    let worker_run_dir =
+      Shell.normalize worker_dir |> Filename.dirname |> Filename.dirname
+    in
+    let home =
+      worker_run_dir |> Filename.dirname |> Filename.dirname |> Filename.dirname
+    in
+    let* state = of_worker_dir ~home ~id worker_dir in
+    let* () =
+      validate_persisted_path ~home ~label:"worker job file"
+        ~expected:state.job_file (Some job_file)
+    in
+    let* () =
+      validate_persisted_path ~home ~label:"worker run directory"
+        ~expected:state.run_dir run_dir
+    in
+    Ok state
+
 let ensure_contained_for_mutation state =
   let* home = canonicalize state.home in
   let runs = runs_root home in

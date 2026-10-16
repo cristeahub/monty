@@ -312,9 +312,13 @@ let capture_snapshot t cid sess ~provenance =
     t.home cid sid ~snapshot:raw ~provenance;
   raw
 let sync t cid sid =
-  let sess=session (load t.home cid) sid in
+  let conversation=load t.home cid in
+  if field "purged" conversation=`Bool true then Lwt.return_unit else
+  let sess=session conversation sid in
   let signature sess = field "checkpoint" sess,field "state" (field "coverage" sess) in
-  let changed () = signature sess<>signature(session(load t.home cid) sid) in
+  let changed () =
+    let current=load t.home cid in
+    field "purged" current<>`Bool true && signature sess<>signature(session current sid) in
   Lwt.catch (fun () -> capture_snapshot t cid sess ~provenance:"native history snapshot" >|= fun _ ->
     if changed () then event t (obj ["conversation",string cid;"type",string "history_changed"]))
     (fun _ -> source_error t.home cid sid "Source history read failed; retained archive remains available";
@@ -903,10 +907,10 @@ let execute t ~id request =
       let owns_runtime sess =
         let sid=s "id" sess in
         (match Hashtbl.find_opt t.terminals sid with
-        | Some terminal -> terminal.Owned_terminal.alive | None -> false)
+        | Some terminal -> terminal.Owned_terminal.alive || terminal.process#state=Lwt_process.Running | None -> false)
         || List.exists (fun clients ->
           match Hashtbl.find_opt clients sid with
-          | Some rpc -> rpc.Native_rpc.alive | None -> false) [t.pi_clients;t.claude_clients]
+          | Some rpc -> rpc.Native_rpc.alive || rpc.process#state=Lwt_process.Running | None -> false) [t.pi_clients;t.claude_clients]
         || Hashtbl.fold (fun _ fence owned ->
           owned || (fence.session_id=sid && fence.process#state=Lwt_process.Running)) t.worker_fences false
       in

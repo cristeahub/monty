@@ -5,8 +5,9 @@ open Conversation_store
 type t = {process:Lwt_process.process_full; path:string; mutable code:Yojson.Safe.t; mutable alive:bool}
 let start ~rows ~cols ~vim ~env ~cwd ~lock ~locks ~path ~notify args =
   let fd=get(State_store.open_verified_lock path [Unix.O_WRONLY;Unix.O_CREAT;Unix.O_APPEND]) in
-  Unix.fchmod fd 0o600;
-  let process=try Owned_process.start ~mode:(Printf.sprintf "pty:%d:%d%s" rows cols (if vim then ":vim" else "")) ~lock ~locks ~env ~cwd args
+  let process=try
+    Unix.fchmod fd 0o600;
+    Owned_process.start ~mode:(Printf.sprintf "pty:%d:%d%s" rows cols (if vim then ":vim" else "")) ~lock ~locks ~env ~cwd args
     with error->Unix.close fd;raise error in
   Lwt.async (fun () -> Owned_process.drain process#stderr);
   Lwt.catch (fun () -> Lwt_unix.with_timeout 10. (fun () -> Lwt_io.read_line_opt process#stdout) >>= function
@@ -15,7 +16,9 @@ let start ~rows ~cols ~vim ~env ~cwd ~lock ~locks ~path ~notify args =
     (fun error->Unix.close fd;Owned_process.close process >>= fun ()->Lwt.fail error) >>= fun () ->
   let t={process;path;code=`Null;alive=true} in
   let rec read () = Lwt_io.read_line_opt process#stdout >>= function
-    | None -> Lwt.return_unit
+    | None ->
+        if t.code=`Null then t.code<-string "outcome_unknown";
+        Lwt.return_unit
     | Some line ->
         if String.length line>65536 then fail 502 "terminal frame too large";
         let json=Yojson.Safe.from_string line in
@@ -29,9 +32,14 @@ let start ~rows ~cols ~vim ~env ~cwd ~lock ~locks ~path ~notify args =
         else if s "type" json="exit" then t.code<-field "code" json
         else fail 502 "invalid terminal frame";
         read () in
-  Lwt.async (fun () -> Lwt.finalize
+  Lwt.async (fun () -> Lwt.catch (fun () -> Lwt.finalize
     (fun () -> Lwt.catch read (fun _ -> t.code<-string "outcome_unknown";Lwt.return_unit))
-    (fun () -> t.alive<-false;Unix.close fd;notify(obj ["type",string "terminal_closed";"code",t.code]);Owned_process.close process));
+    (fun () ->
+      Lwt.finalize (fun () -> Owned_process.close process)
+        (fun () -> t.alive<-false;Unix.close fd;notify(obj ["type",string "terminal_closed";"code",t.code]);Lwt.return_unit)))
+    (fun _ ->
+      (try prerr_endline "Monty could not finalize a terminal closure notice" with Sys_error _ -> ());
+      Lwt.return_unit));
   Lwt.return t
 let send t request =
   if not t.alive then fail 409 "terminal runtime ended; inspect its history before explicit resume";

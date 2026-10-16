@@ -117,11 +117,24 @@ let launch ~home ~profile ~harness ~command_override ~fork ~mode ~session_id ~pr
   (* The caller's own Rex placement travels with each attachment, never with the durable session. *)
   let rex=Rex.context_of_env () in
   let terminal_environment=`Assoc (List.map (fun (key,value)->key,string value) (Rex.bindings_of_context rex)) in
-  let workspaces=if worker then (
+  let worker_record=if worker then (
     let id=match Sys.getenv_opt "MONTY_JOB_ID" with Some id when id<>""->id|_->fail 400 "worker terminal requires its durable worker identity" in
-    let record=get(Job_store.find ~home ~scope:Job_store.Active id) in
-    record.workspaces |> List.map(fun (workspace:Job_store.workspace_state)->string(Unix.realpath(Option.value ~default:workspace.repo workspace.worktree))))
-    else [string(Unix.realpath(Sys.getcwd()))] in
+    Some(get(Job_store.find ~home ~scope:Job_store.Active id))) else None in
+  let workspaces=match worker_record with
+    | Some record -> record.workspaces |> List.map(fun (workspace:Job_store.workspace_state)->string(Unix.realpath(Option.value ~default:workspace.repo workspace.worktree)))
+    | None -> [string(Unix.realpath(Sys.getcwd()))] in
+  let matches_context sess =
+    let saved=field "context" sess in
+    let environment=field "environment" saved in
+    match worker_record with
+    | Some record ->
+        field "MONTY_JOB_ID" environment=string record.id &&
+        field "MONTY_WORKER_DIR" environment=string record.worker_dir &&
+        field "MONTY_JOB_FILE" environment=string record.path &&
+        field "workspaces" saved=`List workspaces
+    | None ->
+        (match field "MONTY_JOB_ID" environment with `Null|`String ""->true|_->false) &&
+        (session_id<>None || field "workspaces" saved=`List workspaces) in
   let contents = function None->""|Some path->
     if (Unix.stat path).st_size>65536 then fail 413 "instruction/context file too large";Shell.read_file path in
   let environment=Unix.environment () |> Array.to_list |> List.filter_map (fun binding ->
@@ -144,7 +157,7 @@ let launch ~home ~profile ~harness ~command_override ~fork ~mode ~session_id ~pr
          "title",string title;"task_keys",`List(match if worker then Sys.getenv_opt "MONTY_TASK_KEY" else None with Some key when key<>""->[string key]|_->[])])
      else request ~home `GET "/v1/conversations" `Null >|= fun catalog ->
        let candidates=Json_fields.list catalog |> List.filter(fun c -> field "purged" c<>`Bool true &&
-         List.exists(fun sess->matches sess &&
+         List.exists(fun sess->matches sess && matches_context sess &&
            (match session_id with None->field "id" sess=field "selected_session" c|Some id->s "native_id" sess=id)) (xs "sessions" c))
          |> List.sort(fun a b->compare(n "created_at" b)(n "created_at" a)) in
        match candidates with
@@ -155,11 +168,11 @@ let launch ~home ~profile ~harness ~command_override ~fork ~mode ~session_id ~pr
          let choice=try int_of_string(read_line()) with _->fail 400 "invalid selection" in
          try List.nth cs (choice-1) with _->fail 400 "invalid selection") >>= fun c ->
     (match session_id with None->Lwt.return c|Some native->
-      let chosen=match List.find_opt(fun sess->s "native_id" sess=native && matches sess)(xs "sessions" c) with Some sess->sess|None->fail 404 "chosen exact native session was not registered" in
+      let chosen=match List.find_opt(fun sess->s "native_id" sess=native && matches sess && matches_context sess)(xs "sessions" c) with Some sess->sess|None->fail 404 "chosen exact native session was not registered" in
       if field "selected_session" c=field "id" chosen then Lwt.return c else
       command ~home(random_id())(obj["op",string "select_session";"conversation",field "id" c;"revision",field "revision" c;"session",field "id" chosen])) >>= fun c ->
     let sess=session c (s "selected_session" c) in
-    if not(matches sess) || Option.fold ~none:false ~some:(fun id->s "native_id" sess<>id) session_id then fail 409 "chosen native session is not the selected conversation";
+    if not(matches sess && matches_context sess) || Option.fold ~none:false ~some:(fun id->s "native_id" sess<>id) session_id then fail 409 "chosen native session is not the selected conversation";
     let rows,cols=Terminal_size.get Unix.stdin in
     command ~home (random_id()) (obj ["op",string "terminal_open";"rows",`Int rows;"cols",`Int cols;"command",Option.fold ~none:`Null ~some:string command_override;"conversation",field "id" c;"selected_session",field "id" sess;
       "revision",field "revision" c;"fresh",`Bool(mode="fresh");"fork",Option.fold ~none:`Null ~some:string fork;"prompt",Option.fold ~none:`Null ~some:string prompt;

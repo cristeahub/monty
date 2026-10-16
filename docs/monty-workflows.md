@@ -109,8 +109,9 @@ workspace add` command to attach planned repo-plus-branch metadata before launch
 Use `monty task show <task>` to see every repo, branch, and absolute materialized
 worktree path. Once the task has a linked worker, the `monty task workspace ensure` command
 rehydrates all workspaces through `wt` and persists their
-absolute paths; launch and resume do this automatically. If planning accidentally
-created separate unlaunched local tasks
+absolute paths; launch and resume do this automatically.
+For persisted `never` workers, ensure returns the existing source repositories without invoking `wt`.
+If planning accidentally created separate unlaunched local tasks
 for one feature, use the `monty task merge <source> --into <target>` command after
 checking both identities; the source becomes historical and the target owns the
 combined workspace set.
@@ -273,7 +274,9 @@ monty resume <worker-id>
 ```
 
 Interactive Codex resume uses the worker's exact `codex-session-id` sidecar,
-or Monty's registered conversation picker when that sidecar is absent. Explicitly
+or Monty's registered conversation picker when that sidecar is absent. Both
+select only sessions with that worker's exact durable identity and ordered
+workspace map; a foreign sidecar never authorizes attaching another worker. Explicitly
 import a selected older native session before resuming it. Use `--fresh` only
 when the user deliberately wants a new Codex conversation; it replaces the old
 sidecar only after the service durably registers the new native session.
@@ -724,7 +727,10 @@ a profile to another account blocks native observation/control of its older
 sessions while their owned history remains readable. Explicit attachment under
 a new name can rebind the same scope; renaming does not bypass purge tombstones.
 `--request-id` permits receipt recovery. `--mode picker|last|exact --session ID`
-selects registered Monty conversations. `--prompt` sends initial native TUI input.
+selects registered Monty conversations. Task-free picker/last modes stay within
+the current workspace; an explicit ID may select another task-free workspace.
+Worker selectors require the exact durable worker identity and ordered workspace
+map. `--prompt` sends initial native TUI input.
 Worker starts/resumes and head-butler start/continue use this entry point;
 Ghostty environment and Monty-managed workspace creation stay in the existing
 launcher. Before attaching, Monty enables `tui.vim_mode_default` in the selected

@@ -3365,6 +3365,317 @@ let test_live_resume_excludes_completion () =
       if job_status (Filename.concat worker_dir "job.json") <> "launch-requested" then
         failwith "completion changed the live resume state")
 
+let test_materialization_excludes_completion () =
+  List.iter
+    (fun (headless, killed) ->
+      let name =
+        (if headless then "headless-prepare" else "fresh-launch")
+        ^ (if killed then "-parent-loss" else "-completion")
+      in
+      with_temp_root name (fun root ->
+          let home, log, env = setup_environment root in
+          let repo = Filename.concat root "repo" in
+          let context = Filename.concat root "context.md" in
+          let run_dir = Filename.concat home ".monty/runs/materialize-lock" in
+          let worker_dir = Filename.concat run_dir "workers/materialize-lock" in
+          let job_file = Filename.concat worker_dir "job.json" in
+          let task_file = Filename.concat home ".monty/tasks.local.json" in
+          let manifest = Filename.concat run_dir "jobs.json" in
+          let ready = Filename.concat root "materialize-ready" in
+          let release = Filename.concat root "materialize-release" in
+          init_git_repo repo;
+          add_project ~root ~home ~env repo;
+          Shell.write_file context "# Materialization ownership\n";
+          install_repo_scoped_wt ~root ~log;
+          let wt = Filename.concat root "fake-bin/wt" in
+          let delegate = Filename.concat root "fake-bin/wt-delegate" in
+          Unix.rename wt delegate;
+          Shell.write_file wt
+            (String.concat "\n"
+               [ "#!/bin/sh"; "set -eu"; "if [ \"$1\" = b ]; then";
+                 "  : > " ^ Shell.quote ready;
+                 "  while [ ! -f " ^ Shell.quote release ^ " ]; do sleep 0.01; done";
+                 "fi"; "exec " ^ Shell.quote delegate ^ " \"$@\""; "" ]);
+          Shell.chmod_executable wt;
+          let osascript = Filename.concat root "fake-bin/osascript" in
+          Shell.write_file osascript
+            (String.concat "\n"
+               [ "#!/bin/sh"; "set -eu";
+                 (* Terminal startup must be able to claim the lock after materialization. *)
+                 Shell.quote executable ^ " task workspace ensure local-001 --home "
+                 ^ Shell.quote home ^ " --wt-command wt >/dev/null"; "" ]);
+          Shell.chmod_executable osascript;
+          write_manifest manifest
+            [ manifest_job ~id:"materialize-lock" ~title:"Materialization ownership"
+                ~branch:"cto/materialize-lock" ~repo ~context () ];
+          let args =
+            (if headless then [ "headless"; "prepare-many" ]
+             else [ "launch-many"; "--terminal"; "ghostty" ])
+            @ [ "--manifest"; manifest; "--home"; home ]
+          in
+          let child = spawn ~root ~env ~new_session:true 1960 args in
+          let awaited = ref false in
+          Fun.protect
+            ~finally:(fun () ->
+              Shell.write_file release "release\n";
+              if not !awaited then ignore (await child);
+              try Unix.kill (-child.pid) Sys.sigkill with
+              | Unix.Unix_error (Unix.ESRCH, _, _) -> ())
+            (fun () ->
+              wait_for_path ready;
+              let before = (Shell.read_file job_file, Shell.read_file task_file) in
+              if killed then (
+                Unix.kill child.pid Sys.sigkill;
+                awaited := true;
+                let result = await child in
+                if result.code = 0 then failwith "killed materialization parent succeeded");
+              let done_args =
+                [ "done"; "materialize-lock"; "--home"; home; "--wt-command"; "wt" ]
+              in
+              let blocked = run ~root ~env 1961 done_args in
+              require_code 1 blocked;
+              require_contains "completion excludes materialization" blocked.stderr "busy";
+              if before <> (Shell.read_file job_file, Shell.read_file task_file) then
+                failwith "blocked completion changed materializing worker or task";
+              require_empty_log log;
+              Shell.write_file release "release\n";
+              if not killed then (
+                awaited := true;
+                require_code 0 (await child);
+                let expected = if headless then "prepared" else "launch-requested" in
+                if job_status job_file <> expected then
+                  failwith "materialization changed its expected launch state");
+              let rec complete remaining =
+                let result = run ~root ~env 1962 done_args in
+                if killed && result.code <> 0 && string_contains result.stderr "busy"
+                   && remaining > 0 then (
+                  Unix.sleepf 0.02;
+                  complete (remaining - 1))
+                else require_code 0 result
+              in
+              complete 250;
+              if Sys.file_exists worker_dir then
+                failwith "completion left the materialized worker active";
+              let worktree = Filename.concat root "multi-worktrees/repo_cto_materialize-lock" in
+              if Sys.file_exists worktree then
+                failwith "completion left a worktree after materialization";
+              let archived = Filename.concat run_dir "archive/materialize-lock/job.json" in
+              if job_status archived <> "done" then
+                failwith "completion did not archive materialized worker";
+              if json_string "status" (List.hd (local_tasks_json home)) <> "done" then
+                failwith "completion did not close the materialized task")))
+    [ (false, false); (true, false); (false, true); (true, true) ]
+
+let test_workspace_ensure_excludes_completion () =
+  with_temp_root "workspace-ensure-completion" (fun root ->
+      let home, log, env = setup_environment root in
+      let repo = Filename.concat root "repo" in
+      let context = Filename.concat root "context.md" in
+      let run_dir = Filename.concat home ".monty/runs/ensure-lock" in
+      let worker_dir = Filename.concat run_dir "workers/ensure-lock" in
+      let job_file = Filename.concat worker_dir "job.json" in
+      let task_file = Filename.concat home ".monty/tasks.local.json" in
+      let ready = Filename.concat root "ensure-ready" in
+      let release = Filename.concat root "ensure-release" in
+      init_git_repo repo;
+      add_project ~root ~home ~env repo;
+      Shell.write_file context "# Workspace ownership\n";
+      Shell.ensure_dir worker_dir;
+      Yojson.Safe.to_file job_file
+        (lifecycle_job_json ~id:"ensure-lock" ~title:"Workspace ownership"
+           ~branch:"cto/ensure-lock" ~worktree_mode:"always" ~status:"prepared"
+           ~repo ~context ~worker_dir ~run_dir ());
+      require_code 0 (run ~root ~env 1949 [ "tasks"; "sync"; "--home"; home ]);
+      install_repo_scoped_wt ~root ~log;
+      let wt = Filename.concat root "fake-bin/wt" in
+      let delegate = Filename.concat root "fake-bin/wt-delegate" in
+      Unix.rename wt delegate;
+      Shell.write_file wt
+        (String.concat "\n"
+           [ "#!/bin/sh"; "set -eu"; "if [ \"$1\" = b ]; then";
+             "  : > " ^ Shell.quote ready;
+             "  while [ ! -f " ^ Shell.quote release ^ " ]; do sleep 0.01; done";
+             "fi"; "exec " ^ Shell.quote delegate ^ " \"$@\""; "" ]);
+      Shell.chmod_executable wt;
+      let ensure_args =
+        [ "task"; "workspace"; "ensure"; "local-001"; "--home"; home;
+          "--wt-command"; "wt" ]
+      in
+      let child = spawn ~root ~env 1950 ensure_args in
+      let awaited = ref false in
+      Fun.protect
+        ~finally:(fun () ->
+          Shell.write_file release "release\n";
+          if not !awaited then ignore (await child))
+        (fun () ->
+          wait_for_path ready;
+          let before = (Shell.read_file job_file, Shell.read_file task_file) in
+          let done_args = [ "done"; "ensure-lock"; "--home"; home; "--wt-command"; "wt" ] in
+          let blocked = run ~root ~env 1951 done_args in
+          require_code 1 blocked;
+          require_contains "completion excludes workspace materialization" blocked.stderr "busy";
+          let duplicate = run ~root ~env 1952 ensure_args in
+          require_code 1 duplicate;
+          require_contains "duplicate workspace materialization" duplicate.stderr "busy";
+          if before <> (Shell.read_file job_file, Shell.read_file task_file) then
+            failwith "blocked lifecycle or ensure changed durable state";
+          require_empty_log log;
+          Shell.write_file release "release\n";
+          awaited := true;
+          let ensured = await child in
+          require_code 0 ensured;
+          let worktree = String.trim ensured.stdout in
+          if not (Sys.file_exists worktree && Sys.is_directory worktree) then
+            failwith "workspace ensure did not create its worktree";
+          require_code 0 (run ~root ~env 1953 done_args);
+          if Sys.file_exists worker_dir || Sys.file_exists worktree then
+            failwith "completion left the worker or ensured worktree behind";
+          let archived = Filename.concat run_dir "archive/ensure-lock/job.json" in
+          if job_status archived <> "done" then
+            failwith "completion did not archive the ensured worker";
+          if json_string "status" (List.hd (local_tasks_json home)) <> "done" then
+            failwith "completion did not close the ensured task"))
+
+let test_worker_ensure_identity_and_delayed_script () =
+  with_temp_root "worker-ensure-identity" (fun root ->
+      let root = Unix.realpath root in
+      let home, log, env = setup_environment root in
+      let repo = Filename.concat root "repo" in
+      let context = Filename.concat root "context.md" in
+      let run_dir = Filename.concat home ".monty/runs/worker-ensure" in
+      let worker_dir = Filename.concat run_dir "workers/worker-ensure" in
+      let job_file = Filename.concat worker_dir "job.json" in
+      init_git_repo repo;
+      add_project ~root ~home ~env repo;
+      install_repo_scoped_wt ~root ~log;
+      Shell.write_file context "# Worker-aware raw ensure\n";
+      Shell.ensure_dir worker_dir;
+      Yojson.Safe.to_file job_file
+        (lifecycle_job_json ~id:"worker-ensure" ~title:"Worker-aware raw ensure"
+           ~branch:"cto/worker-ensure" ~worktree_mode:"always" ~repo ~context
+           ~worker_dir ~run_dir ());
+      let args branch =
+        [ "ensure-worktree"; "--repo"; repo; "--branch"; branch; "--wt-command"; "wt" ]
+      in
+      let identity =
+        [ ("MONTY_WORKER_DIR", worker_dir); ("MONTY_JOB_ID", "worker-ensure");
+          ("MONTY_JOB_FILE", job_file); ("MONTY_RUN_DIR", run_dir);
+          ("MONTY_HOME", Filename.concat root "unrelated-home") ]
+      in
+      let reject bindings branch =
+        let result = run ~root ~env:(replace_env env bindings) 1954 (args branch) in
+        require_code 1 result;
+        require_empty_log log
+      in
+      List.iter
+        (fun (key, value) -> reject [ (key, value) ] "cto/worker-ensure")
+        (List.filter (fun (key, _) -> key <> "MONTY_RUN_DIR" && key <> "MONTY_HOME") identity);
+      List.iter
+        (fun forged -> reject (forged :: List.remove_assoc (fst forged) identity) "cto/worker-ensure")
+        [ ("MONTY_JOB_ID", "another-worker");
+          ("MONTY_JOB_FILE", Filename.concat root "unrelated-job.json");
+          ("MONTY_RUN_DIR", Filename.concat home ".monty/runs/another-run") ];
+      reject identity "cto/not-owned";
+      let ensured = run ~root ~env:(replace_env env identity) 1955 (args "cto/worker-ensure") in
+      require_code 0 ensured;
+      let worktree = String.trim ensured.stdout in
+      if not (Sys.file_exists worktree && Sys.is_directory worktree) then
+        failwith "complete legacy worker identity did not materialize its workspace";
+      let alias_home = Filename.concat root "home-alias" in
+      Unix.symlink home alias_home;
+      let alias_run = Filename.concat alias_home ".monty/runs/worker-ensure" in
+      let alias_worker = Filename.concat alias_run "workers/worker-ensure" in
+      let alias_identity =
+        [ ("MONTY_WORKER_DIR", alias_worker); ("MONTY_JOB_ID", "worker-ensure");
+          ("MONTY_JOB_FILE", Filename.concat alias_worker "job.json");
+          ("MONTY_RUN_DIR", alias_run);
+          ("MONTY_HOME", Filename.concat root "unrelated-home") ]
+      in
+      let aliased = run ~root ~env:(replace_env env alias_identity) 19551 (args "cto/worker-ensure") in
+      require_code 0 aliased;
+      require_line "home alias resolves canonical worker identity" aliased.stdout worktree;
+      if json_string "worker_dir" (Yojson.Safe.from_file job_file) <> worker_dir then
+        failwith "home alias rewrote canonical worker metadata";
+      let task_free = run ~root ~env 1956 (args "cto/task-free") in
+      require_code 0 task_free;
+      if String.trim task_free.stdout = worktree then
+        failwith "task-free ensure ignored its requested branch";
+      let osascript = Filename.concat root "fake-bin/osascript" in
+      Shell.write_file osascript
+        (String.concat "\n"
+           [ "#!/bin/sh"; "set -eu";
+             Shell.quote executable ^ " ensure-worktree --repo " ^ Shell.quote repo
+             ^ " --branch cto/worker-ensure --wt-command wt >/dev/null"; "" ]);
+      Shell.chmod_executable osascript;
+      let resume_env = replace_env env identity in
+      require_code 0
+        (run ~root ~env:resume_env 1957
+           [ "resume"; "worker-ensure"; "--home"; home; "--terminal"; "ghostty" ]));
+  with_temp_root "delayed-worker-script" (fun root ->
+      let root = Unix.realpath root in
+      let home, log, env = setup_environment root in
+      let repo = Filename.concat root "repo" in
+      let context = Filename.concat root "context.md" in
+      init_git_repo repo;
+      add_project ~root ~home ~env repo;
+      install_repo_scoped_wt ~root ~log;
+      Shell.write_file context "# Delayed singleton script\n";
+      let osascript = Filename.concat root "fake-bin/osascript" in
+      Shell.write_file osascript "#!/bin/sh\nexit 0\n";
+      Shell.chmod_executable osascript;
+      require_code 0
+        (run ~root ~env 1958
+           [ "launch"; "--repo"; repo; "--title"; "Delayed singleton";
+             "--context"; context; "--branch"; "cto/delayed-singleton";
+             "--home"; home; "--terminal"; "ghostty" ]);
+      let job_file = Filename.concat home ".monty/runs/manual/workers/delayed-singleton/job.json" in
+      let job = Yojson.Safe.from_file job_file in
+      let script = json_string "launch_script" job in
+      let worktree = json_string "last_known_worktree" job in
+      require_code 0
+        (run ~root ~env 1959 [ "done"; "delayed-singleton"; "--home"; home ]);
+      let before = Shell.read_file log in
+      let delayed =
+        run ~root ~env ~program:"/bin/sh" 1963 [ script ]
+      in
+      if delayed.code = 0 then failwith "completed worker's delayed script succeeded";
+      if Sys.file_exists worktree || Shell.read_file log <> before then
+        failwith "completed worker's delayed script invoked wt or recreated its worktree");
+  with_temp_root "never-worker-ensure" (fun root ->
+      let root = Unix.realpath root in
+      let home, log, env = setup_environment root in
+      let repo = Filename.concat root "repo" in
+      let context = Filename.concat root "context.md" in
+      let run_dir = Filename.concat home ".monty/runs/never-ensure" in
+      let worker_dir = Filename.concat run_dir "workers/never-ensure" in
+      let job_file = Filename.concat worker_dir "job.json" in
+      init_git_repo repo;
+      add_project ~root ~home ~env repo;
+      Shell.write_file context "# Preserve never mode\n";
+      Shell.ensure_dir worker_dir;
+      Yojson.Safe.to_file job_file
+        (lifecycle_job_json ~id:"never-ensure" ~title:"Never ensure"
+           ~branch:"cto/never-ensure" ~worktree_mode:"never" ~repo ~context
+           ~worker_dir ~run_dir ());
+      require_code 0 (run ~root ~env 1964 [ "tasks"; "sync"; "--home"; home ]);
+      let raw_env = replace_env env
+          [ ("MONTY_WORKER_DIR", worker_dir); ("MONTY_JOB_ID", "never-ensure");
+            ("MONTY_JOB_FILE", job_file) ] in
+      let raw = run ~root ~env:raw_env 1965
+          [ "ensure-worktree"; "--repo"; repo; "--branch"; "cto/never-ensure";
+            "--wt-command"; "wt" ] in
+      require_code 0 raw;
+      require_line "never raw ensure retains source repository" raw.stdout repo;
+      let task = run ~root ~env 1966
+          [ "task"; "workspace"; "ensure"; "local-001"; "--home"; home ] in
+      require_code 0 task;
+      require_line "never task ensure retains source repository" task.stdout repo;
+      require_empty_log log;
+      require_code 0 (run ~root ~env 1967 [ "done"; "never-ensure"; "--home"; home ]);
+      if not (Sys.file_exists (Filename.concat repo "tracked.txt")) then
+        failwith "never-mode completion removed source repository";
+      require_empty_log log)
+
 let test_forged_launch_script_and_resume_mode_are_safe () =
   with_temp_root "forged-launch-script" (fun root ->
       let home, log, env = setup_environment root in
@@ -6115,13 +6426,22 @@ let test_live_codex_excludes_resume_and_completion () =
            [ "blocked"; "independent" ]);
       require_code 0 (run ~root ~env 3000
           [ "headless"; "prepare-many"; "--manifest"; manifest; "--home"; home ]);
+      let lock_dir = Filename.concat home ".monty/runs/lock/.worker-locks" in
+      let lock_state () =
+        if not (Sys.file_exists lock_dir) then []
+        else Sys.readdir lock_dir |> Array.to_list |> List.sort String.compare
+          |> List.map (fun name ->
+                 let path = Filename.concat lock_dir name in
+                 (name, (Unix.lstat path).st_ino, Shell.read_file path))
+      in
+      let locks_before = lock_state () in
       let missing = run ~root ~env 30001
           [ "headless"; "run"; "--wait"; "blocked"; "--home"; home;
             "--codex-command"; "definitely-missing-codex" ] in
       require_code 1 missing;
       require_contains "Codex dependency preflight" missing.stderr "definitely-missing-codex";
-      if Sys.file_exists (Filename.concat home ".monty/runs/lock/.worker-locks") then
-        failwith "failed dependency preflight created worker lock state";
+      if lock_state () <> locks_before then
+        failwith "failed dependency preflight changed worker lock state";
       let worker = Filename.concat home ".monty/runs/lock/workers/blocked" in
       let job_file = Filename.concat worker "job.json" in
       let worktree = Yojson.Safe.from_file job_file |> json_string "last_known_worktree" in
@@ -6641,6 +6961,12 @@ let () =
       test_lifecycle_rejects_cross_project_and_owned_task_links );
     ( "cli_live_resume_excludes_completion",
       test_live_resume_excludes_completion );
+    ( "cli_materialization_excludes_completion",
+      test_materialization_excludes_completion );
+    ( "cli_workspace_ensure_excludes_completion",
+      test_workspace_ensure_excludes_completion );
+    ( "cli_worker_ensure_identity_and_delayed_script",
+      test_worker_ensure_identity_and_delayed_script );
     ( "cli_forged_launch_script_and_resume_mode_are_safe",
       test_forged_launch_script_and_resume_mode_are_safe );
     ( "cli_multi_workspace_sonnet_task_lifecycle",

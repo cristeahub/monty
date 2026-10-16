@@ -45,12 +45,13 @@ let connect path =
   let key = Base64.encode_exn (rng 16) in
   let request = Cohttp.Request.make ~headers:(Cohttp.Header.of_list ["host","localhost";"upgrade","websocket";
     "connection","Upgrade";"sec-websocket-version","13";"sec-websocket-key",key]) (Uri.of_string "http://localhost/") in
-  Ws.Request.write ~flush:true (fun _ -> Lwt.return_unit) request oc >>= fun () -> Lwt_io.flush oc >>= fun () ->
   let input = Cohttp_lwt_unix.Private.Input_channel.create ic in
-  Ws.Response.read input >>= (function
+  Lwt_unix.with_timeout 10. (fun () ->
+    Ws.Request.write ~flush:true (fun _ -> Lwt.return_unit) request oc >>= fun () -> Lwt_io.flush oc >>= fun () ->
+    Ws.Response.read input >>= (function
     | `Ok r when Cohttp.Response.status r = `Switching_protocols &&
         Cohttp.Header.get (Cohttp.Response.headers r) "sec-websocket-accept" = Some (Websocket.b64_encoded_sha1sum (key ^ Websocket.websocket_uuid)) -> Lwt.return_unit
-    | _ -> Lwt.fail (Failure (502,"Codex Unix WebSocket upgrade failed"))) >>= fun () ->
+    | _ -> Lwt.fail (Failure (502,"Codex Unix WebSocket upgrade failed")))) >>= fun () ->
   let c = {identity=random_id ();ic;oc;pending=Hashtbl.create 16;next=1;write_lock=Lwt_mutex.create ();alive=true;notify=(fun _ -> ())} in
   let read_frame = Ws.make_read_frame ~mode:(Ws.Client rng) input oc in
   let buffer = Buffer.create 4096 in

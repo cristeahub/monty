@@ -131,7 +131,7 @@ a durable history mirror. Reopen a registered conversation with Monty's picker:
 monty continue
 ```
 
-Skip the picker and reopen the most recent conversation associated with the
+Skip the picker and reopen the newest registered task-free conversation in the
 Monty control room:
 
 ```sh
@@ -139,7 +139,8 @@ monty continue --last
 ```
 
 Or select an exact registered native session ID. Import a selected older native
-session before continuing it:
+session before continuing it. An explicit ID may select a task-free conversation
+from another workspace; worker conversations stay in their worker lifecycle:
 
 ```sh
 monty continue <session>
@@ -438,8 +439,9 @@ monty resume issue-123
 `resume` reads `job.json`, recreates or reuses every repo-scoped worktree, and reopens the selected harness with the same durable worker memory.
 For an interactive Codex worker, Monty resumes the exact recorded sidecar id
 without `--last` or the original task prompt. A missing sidecar opens Monty's
-registered conversation picker; explicitly import selected older native history
-before resuming it. Use `--fresh` to
+registered conversation picker, restricted to that exact worker and ordered
+workspace map. A foreign sidecar cannot select another worker's conversation;
+explicitly import selected older native history before resuming it. Use `--fresh` to
 start a new Codex conversation with the normal task prompt; the prior sidecar
 is replaced only after the service registers the new thread. `open --fresh` is the
 same operation.
@@ -564,8 +566,9 @@ An explicit `--project` also overrides the default Mantle group. `--group` and
 `--all-groups` cannot be combined. A missing group is an error; create it or use
 `--all-groups`. Tasks spanning projects appear when any workspace belongs to the
 selected group, retaining all their workspace information.
-With Mantle inactive, lists show every group by default. Selection is inherited
-from the launching shell; switching another shell does not change running agents.
+With Mantle inactive, lists show every group by default. Selection follows the
+shell invoking each inventory command. Service-owned native processes receive a
+minimal environment and do not inherit the terminal client's Mantle selection.
 Reading the profile launches no external commands and writes no settings.
 
 Show a cross-project overview:
@@ -641,6 +644,7 @@ monty task workspace ensure local-005
 monty task workspace ensure local-005 --repo /absolute/path/to/admin
 ```
 
+For persisted `never` workers, ensure returns the existing source repositories without invoking `wt`.
 Normal launch and resume do this automatically. Planning-only tasks deliberately
 cannot ensure worktrees until their one durable worker record exists.
 

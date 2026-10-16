@@ -1279,6 +1279,34 @@ let persist_materialized_workspaces options (prepared : prepared)
       Job_store.update_file_unlocked prepared.state_path.job_file
         (Job_store.materialized_workspace_updates workspaces))
 
+let with_prepared_worker_lock options (prepared : prepared) ~expected_statuses operation =
+  let* record = Job_store.parse_job_file ~home:options.home prepared.state_path.job_file in
+  Worker_lock.with_lock ~home:options.home ~record (fun () ->
+      let* () =
+        State_store.with_lock ~home:options.home (fun () ->
+            let* current =
+              Job_store.parse_job_file ~home:options.home prepared.state_path.job_file
+            in
+            let* () =
+              match current.Job_store.transition with
+              | None -> Ok ()
+              | Some transition ->
+                  Error
+                    (Printf.sprintf "worker %s entered a %s transition before workspace materialization"
+                       current.id (Job_store.operation_name transition.operation))
+            in
+            if not (List.mem current.status expected_statuses) then
+              Error
+                (Printf.sprintf "worker %s changed status before workspace materialization: expected %s, found %S"
+                   current.id (String.concat ", " expected_statuses) current.status)
+            else if not (same_record prepared current) then
+              Error (Printf.sprintf "worker %s identity changed before workspace materialization" current.id)
+            else
+              Project_overview.validate_worker_task_link ~home:options.home current
+              |> Result.map ignore)
+      in
+      operation ())
+
 let materialize_workspaces ?expected_statuses options (prepared : prepared) =
   let pending_state (workspace : prepared_workspace) =
     Job_store.
@@ -1379,32 +1407,35 @@ let begin_request ?(persist_failure = true) ?(write_script = true)
                   | Error message -> `Failed message
                   | Ok () -> `Ready { workdir; initial_workdir })))
 
-let request_one ?(codex_mode = Codex_session.Fresh) ?rex options
-    (prepared : prepared) ~expected_statuses =
-  match begin_request ~codex_mode options prepared ~expected_statuses with
-  | `Failed message -> `Failed message
-  | `Ready request -> (
-      match fault "launch-after-request-state" with
+let request_terminal ?rex options (prepared : prepared) request =
+  match fault "launch-after-request-state" with
+  | Error message -> `Requested_error message
+  | Ok () -> (
+      match
+        (match (options.backend, rex) with
+        | Terminal.Rex, Some plan ->
+            Rex.launch ~home:options.home ~worker_dir:prepared.worker_dir ~plan
+              ~target:options.target ~workdir:request.initial_workdir
+              ~script_path:prepared.script_path ~label:prepared.job.Job.title
+        | Terminal.Rex, None -> Error "Rex launch requires a preflight placement plan"
+        | Terminal.Ghostty, _ ->
+            Ghostty.launch ~target:options.target
+              ~workdir:request.initial_workdir
+              ~script_path:prepared.script_path
+        | Terminal.Dry_run, _ -> Error "dry-run cannot request a terminal")
+      with
       | Error message -> `Requested_error message
       | Ok () -> (
-          match
-            (match (options.backend, rex) with
-            | Terminal.Rex, Some plan ->
-                Rex.launch ~home:options.home ~worker_dir:prepared.worker_dir ~plan
-                  ~target:options.target ~workdir:request.initial_workdir
-                  ~script_path:prepared.script_path ~label:prepared.job.Job.title
-            | Terminal.Rex, None -> Error "Rex launch requires a preflight placement plan"
-            | Terminal.Ghostty, _ ->
-                Ghostty.launch ~target:options.target
-                  ~workdir:request.initial_workdir
-                  ~script_path:prepared.script_path
-            | Terminal.Dry_run, _ -> Error "dry-run cannot request a terminal")
-          with
+          match fault "launch-after-terminal-request" with
           | Error message -> `Requested_error message
-          | Ok () -> (
-              match fault "launch-after-terminal-request" with
-              | Error message -> `Requested_error message
-              | Ok () -> `Requested)))
+          | Ok () -> `Requested))
+
+let request_one ?(codex_mode = Codex_session.Fresh) ?rex options
+    (prepared : prepared) ~expected_statuses =
+  match with_prepared_worker_lock options prepared ~expected_statuses
+          (fun () -> Ok (begin_request ~codex_mode options prepared ~expected_statuses)) with
+  | Error message | Ok (`Failed message) -> `Failed message
+  | Ok (`Ready request) -> request_terminal ?rex options prepared request
 
 let common_retry_options options =
   String.concat " "
@@ -1626,7 +1657,7 @@ let script_for_resume options prepared (record : Job_store.record) =
             in
             Ok prepared)
 
-let resume_job_unlocked ?(validate_open_task = true) ?(fresh = false)
+let prepare_resume_job_unlocked ?(validate_open_task = true) ?(fresh = false)
     ?(codex_mode = Codex_session.Fresh) ~persisted_worktree_mode ~profile options
     job =
   let* options =
@@ -1663,8 +1694,7 @@ let resume_job_unlocked ?(validate_open_task = true) ?(fresh = false)
               Error ("launch script already exists without recorded ownership: " ^ prepared.script_path)
           | None -> Ok ()
       in
-      dry_run ~codex_mode options prepared;
-      Ok ()
+      Ok (fun () -> dry_run ~codex_mode options prepared; Ok ())
   | Terminal.Ghostty | Terminal.Rex ->
       let* record =
         if not (State_path.path_exists prepared.state_path.State_path.job_file) then
@@ -1697,33 +1727,40 @@ let resume_job_unlocked ?(validate_open_task = true) ?(fresh = false)
       let* live = live_rex_terminal options prepared record in
       match live with
       | Some (reference, process) ->
-          let* () = Rex.focus reference in
-          Fmt.pr
-            "%s (%s): terminal is still live (%s running in Rex block %s); focused it instead of requesting another terminal\n"
-            prepared.id prepared.job.Job.title process reference.Rex.block_id;
-          Ok ()
+          Ok (fun () ->
+              let* () = Rex.focus reference in
+              Fmt.pr
+                "%s (%s): terminal is still live (%s running in Rex block %s); focused it instead of requesting another terminal\n"
+                prepared.id prepared.job.Job.title process reference.Rex.block_id;
+              Ok ())
       | None ->
-      let* rex = terminal_plan options in
-      let* prepared = script_for_resume options prepared record in
-      let retry =
-        String.concat " "
-          ([ Shell.quote options.monty_command; "resume" ]
-          @ (if fresh then [ "--fresh" ] else [])
-          @ [ Shell.quote prepared.id; common_retry_options options ])
-      in
-      let result =
-        match request_one ~codex_mode ?rex options prepared
-                ~expected_statuses:[ record.Job_store.status ]
-        with
-        | `Requested ->
-            result_for options retry prepared (Launch_requested None)
-        | `Requested_error message ->
-            result_for options retry prepared (Launch_requested (Some message))
-        | `Failed message ->
-            result_for options retry prepared (Launch_failed message)
-      in
-      Fmt.pr "%s\n" (render_human { jobs = [ result ] });
-      match result.outcome with
-      | Launch_requested None -> Ok ()
-      | Launch_requested (Some _) | Launch_failed _ | Unattempted_prepared ->
-          Error "worker resume did not complete the terminal request"
+          let* rex = terminal_plan options in
+          let* prepared = script_for_resume options prepared record in
+          let retry =
+            String.concat " "
+              ([ Shell.quote options.monty_command; "resume" ]
+              @ (if fresh then [ "--fresh" ] else [])
+              @ [ Shell.quote prepared.id; common_retry_options options ])
+          in
+          let begun =
+            begin_request ~codex_mode options prepared
+              ~expected_statuses:[ record.Job_store.status ]
+          in
+          Ok (fun () ->
+              let result =
+                match (match begun with
+                       | `Failed message -> `Failed message
+                       | `Ready request -> request_terminal ?rex options prepared request)
+                with
+                | `Requested ->
+                    result_for options retry prepared (Launch_requested None)
+                | `Requested_error message ->
+                    result_for options retry prepared (Launch_requested (Some message))
+                | `Failed message ->
+                    result_for options retry prepared (Launch_failed message)
+              in
+              Fmt.pr "%s\n" (render_human { jobs = [ result ] });
+              match result.outcome with
+              | Launch_requested None -> Ok ()
+              | Launch_requested (Some _) | Launch_failed _ | Unattempted_prepared ->
+                  Error "worker resume did not complete the terminal request")

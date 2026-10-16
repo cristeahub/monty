@@ -162,6 +162,11 @@ class Handler(socketserver.StreamRequestHandler):
                     native = params.get('threadId', params.get('session'))
                     if native not in server.threads:
                         self.send({'id': req['id'], 'error': {'code': -32602, 'message': 'unknown thread'}});continue
+                    if method in ('thread/read', 'history') and server.history_gate is not None:
+                        started, release = server.history_gate
+                        server.history_gate = None
+                        started.set()
+                        assert release.wait(10), 'history gate was not released'
                     if method in ('thread/resume', 'join'):
                         server.loaded.add(native)
                     if method in ('history', 'join'):
@@ -200,6 +205,7 @@ class Native(socketserver.ThreadingUnixStreamServer):
     def __init__(self, path):
         self.clients = set();self.calls = [];self.threads = {};self.loaded = set()
         self.sends = 0;self.answers = [];self.drop_next = False;self.drop_open = False
+        self.history_gate = None
         super().__init__(str(path), Handler)
         self.thread = threading.Thread(target=self.serve_forever, daemon=True);self.thread.start()
     def emit(self, event):

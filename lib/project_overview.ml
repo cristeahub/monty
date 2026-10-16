@@ -17,13 +17,8 @@ let done_local_task = Task_storage.done_local_task
 let add_task_workspace = Task_storage.add_task_workspace
 let merge_local_tasks = Task_storage.merge_local_tasks
 
-let ensure_task_workspaces ~home ~id ?repo ~wt_command () =
+let open_task_worker ~home task_id =
   let ( let* ) = Result.bind in
-  let task_id =
-    if String.starts_with ~prefix:"local:" id then
-      String.sub id 6 (String.length id - 6)
-    else id
-  in
   let task_key = "local:" ^ task_id in
   let* tasks = load_local_tasks ~home in
   let* task =
@@ -54,6 +49,23 @@ let ensure_task_workspaces ~home ~id ?repo ~wt_command () =
           (Printf.sprintf "multiple active workers link local Monty task %s"
              task.id)
   in
+  Ok (task, record)
+
+let require_open_worker_task ~home record =
+  let ( let* ) = Result.bind in
+  let* linked = Reconciliation.validate_worker_task_link ~home record in
+  match linked with
+  | None -> Ok ()
+  | Some task_id ->
+      let* tasks = load_local_tasks ~home in
+      (match List.find_opt (fun (task : local_task) -> task.id = task_id) tasks with
+      | Some task when String.lowercase_ascii task.status = "open" -> Ok ()
+      | Some task -> Error (Printf.sprintf "local Monty task %s is %s, not open" task.id task.status)
+      | None -> Error (Printf.sprintf "local Monty task %s disappeared" task_id))
+
+let ensure_worker_workspaces_unlocked ~home ~(record : Job_store.record)
+    ?repo ~wt_command () =
+  let ( let* ) = Result.bind in
   let* () =
     match record.transition with
     | None -> Ok ()
@@ -79,8 +91,7 @@ let ensure_task_workspaces ~home ~id ?repo ~wt_command () =
     match (selected_repo, targets) with
     | Some repo, [] ->
         Error
-          (Printf.sprintf "local Monty task %s has no workspace for repo %s"
-             task.id repo)
+          (Printf.sprintf "worker %s has no workspace for repo %s" record.id repo)
     | _ -> Ok ()
   in
   let workspace_identity workspaces =
@@ -91,25 +102,10 @@ let ensure_task_workspaces ~home ~id ?repo ~wt_command () =
   let persist workspaces =
     State_store.with_lock ~home (fun () ->
         let* current = Job_store.parse_job_file ~home record.path in
-        let* current_tasks = load_local_tasks ~home in
+        let* () = require_open_worker_task ~home current in
         let* () =
-          match
-            List.find_opt
-              (fun (candidate : local_task) -> String.equal candidate.id task.id)
-              current_tasks
-          with
-          | Some candidate
-            when String.equal (String.lowercase_ascii candidate.status) "open" ->
-              Ok ()
-          | Some candidate ->
-              Error
-                (Printf.sprintf "local Monty task %s changed status to %s"
-                   candidate.id candidate.status)
-          | None -> Error (Printf.sprintf "local Monty task %s disappeared" task.id)
-        in
-        let* () =
-          if current.job.Job.task_key = Some task_key then Ok ()
-          else Error (Printf.sprintf "worker %s no longer links %s" current.id task_key)
+          if current.job.Job.task_key = record.job.Job.task_key then Ok ()
+          else Error (Printf.sprintf "worker %s task link changed during workspace materialization" current.id)
         in
         let* () =
           match current.transition with
@@ -145,7 +141,13 @@ let ensure_task_workspaces ~home ~id ?repo ~wt_command () =
           | _ -> Error (Printf.sprintf "workspace in repo %s has no branch" workspace.repo)
         in
         let* worktree =
-          Wt.create_or_reuse ~wt_command ~repo:workspace.repo ~branch
+          match String.lowercase_ascii record.worktree_mode with
+          | "never" ->
+              if Sys.file_exists workspace.repo && Sys.is_directory workspace.repo then
+                Ok workspace.repo
+              else Error (Printf.sprintf "workspace repository is unavailable: %s" workspace.repo)
+          | "always" -> Wt.create_or_reuse ~wt_command ~repo:workspace.repo ~branch
+          | mode -> Error (Printf.sprintf "unsupported persisted worktree mode %S" mode)
         in
         let replacement = { workspace with worktree = Some worktree } in
         let states = replace_workspace states replacement in
@@ -154,6 +156,52 @@ let ensure_task_workspaces ~home ~id ?repo ~wt_command () =
   in
   let* workspaces = ensure record.workspaces targets in
   Ok (List.filter selected workspaces)
+
+let ensure_task_workspaces ~home ~id ?repo ~wt_command () =
+  let ( let* ) = Result.bind in
+  let task_id = Task_storage.normalize_local_id id in
+  let* _, initial_record = open_task_worker ~home task_id in
+  Worker_lock.with_lock ~home ~record:initial_record (fun () ->
+      let* record =
+        State_store.with_lock ~home (fun () ->
+            let* _, record = open_task_worker ~home task_id in
+            if not (String.equal record.Job_store.path initial_record.Job_store.path) then
+              Error
+                (Printf.sprintf
+                   "local Monty task %s worker identity changed before workspace materialization"
+                   task_id)
+            else
+              let* () = require_open_worker_task ~home record in
+              Ok record)
+      in
+      ensure_worker_workspaces_unlocked ~home ~record ?repo ~wt_command ())
+
+let ensure_worker_workspace ~(state : State_path.t) ~repo ~branch ~wt_command () =
+  let ( let* ) = Result.bind in
+  let home = state.home in
+  let* initial = Job_store.parse_job_file ~home state.job_file in
+  Worker_lock.with_lock ~home ~record:initial (fun () ->
+      let* record =
+        State_store.with_lock ~home (fun () ->
+            let* current = Job_store.parse_job_file ~home state.job_file in
+            let* () =
+              if Job_store.is_archived current || current.transition <> None
+                 || not (List.mem current.status
+                           [ "active"; "prepared"; "launch-failed"; "launch-requested" ])
+              then Error (Printf.sprintf "worker %s is not open for workspace materialization" current.id)
+              else require_open_worker_task ~home current
+            in
+            if List.exists
+                 (fun (workspace : Job_store.workspace_state) ->
+                   workspace.repo = repo && workspace.branch = Some branch)
+                 current.workspaces
+            then Ok current
+            else Error (Printf.sprintf "requested repo and branch do not belong to worker %s" current.id))
+      in
+      let* workspaces = ensure_worker_workspaces_unlocked ~home ~record ~repo ~wt_command () in
+      match workspaces with
+      | [ { worktree = Some path; _ } ] -> Ok path
+      | _ -> Error (Printf.sprintf "worker %s did not materialize its requested workspace" record.id))
 
 let show_task ~home id =
   let ( let* ) = Result.bind in
