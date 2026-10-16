@@ -78,11 +78,9 @@ def main():
         pid = process.pid
         child_in, child_out = process.stdin.fileno(), process.stdout.fileno()
     stopped = False
-    interrupted = False
 
-    def stop(*_, abort=True):
-        nonlocal stopped, interrupted
-        interrupted = interrupted or abort
+    def stop(*_):
+        nonlocal stopped
         if stopped:
             return
         stopped = True
@@ -197,7 +195,7 @@ def main():
                         else:
                             raise ValueError('invalid terminal control')
     finally:
-        stop(abort=False)
+        stop()
         deadline = time.monotonic() + 3
         while code is None and time.monotonic() < deadline:
             if process is not None:
@@ -221,22 +219,6 @@ def main():
                 code = os.waitstatus_to_exitcode(status)
         if master is not None:
             os.close(master)
-        if interrupted and options.get('cleanup'):
-            # The supervisor group may be gone while a guest agent still runs.
-            # Keep its ownership fences until the scoped cleanup finishes.
-            log_path = options.get('cleanup_log')
-            log = os.fdopen(os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600), 'wb') if log_path else sys.stderr.buffer
-            try:
-                result = subprocess.run(options['cleanup'], cwd=cwd, timeout=15,
-                                        stdout=log, stderr=log, close_fds=True)
-                log.write(('Cleanup exit code: '+str(result.returncode)+'\n').encode());log.flush()
-                if result.returncode:
-                    raise RuntimeError('owned execution cleanup failed; inspect retained logs before resuming')
-            except Exception as error:
-                log.write(('Cleanup requires inspection: '+str(error)+'\n').encode());log.flush()
-                raise
-            finally:
-                if log_path:log.close()
         for lock in locks:
             os.close(lock)
     if mode == 'pty':

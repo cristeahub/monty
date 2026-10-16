@@ -18,7 +18,6 @@ type prepared_job = {
   worker_dir : string;
   status : string;
   profile : Agent_profile.t;
-  container_worker : Container_worker.t option;
 }
 
 type dispatch = {
@@ -33,7 +32,6 @@ type dispatch = {
   context : string;
   home : string;
   profile : Agent_profile.t;
-  container_worker : Container_worker.t option;
 }
 
 type review_path = {
@@ -75,7 +73,6 @@ let prepared_job_json (job : prepared_job) =
        ("worker_dir", `String job.worker_dir);
        ("status", `String job.status) ]
     @ [ ("agent_profile", `String job.profile.id);
-        ("containerized", `Bool (Option.is_some job.container_worker));
         ("stages", `String (Agent_profile.stage_summary job.profile)) ])
 
 let prepare_json ~harness ~codex_yolo jobs =
@@ -401,27 +398,13 @@ let planned_job (prepared : Launcher.prepared) =
     worker_dir = prepared.worker_dir;
     status = "planned";
     profile = prepared.profile;
-    container_worker = prepared.container_worker;
   }
 
 let ensure_worktree options (prepared : Launcher.prepared) =
   let expected_status = status_before_prepare prepared in
   let materialized =
-    match prepared.container_worker with
-    | None ->
-        Launcher.materialize_workspaces ~expected_statuses:[ expected_status ]
-          options prepared
-    | Some container_worker ->
-        let* worktree =
-          Container_worker.ensure_prepared ~harness:options.Launcher.harness
-            container_worker ~id:prepared.id
-            ~title:prepared.job.Job.title ~repo:prepared.repo
-            ~branch:prepared.branch ~context:prepared.context
-        in
-        Ok
-          [ Job_store.
-              { repo = prepared.repo; branch = Some prepared.branch;
-                worktree = Some worktree } ]
+    Launcher.materialize_workspaces ~expected_statuses:[ expected_status ]
+      options prepared
   in
   match materialized with
   | Error message -> Error message
@@ -446,7 +429,6 @@ let ensure_worktree options (prepared : Launcher.prepared) =
           worker_dir = prepared.worker_dir;
           status = "prepared";
           profile = prepared.profile;
-          container_worker = prepared.container_worker;
         }
 
 let prepare_many ~dry_run options indexed_jobs =
@@ -458,23 +440,7 @@ let prepare_many ~dry_run options indexed_jobs =
   let* prepared = Launcher.preflight_batch options indexed_jobs in
   let* () = if List.exists (fun worker -> worker.Launcher.profile.reviews<>[]) prepared then
     Harness.check_review_command options.harness options.harness_command else Ok () in
-  let needs_host =
-    List.exists
-      (fun worker -> Option.is_none worker.Launcher.container_worker)
-      prepared
-  in
-  let* () =
-    if needs_host then
-      Launcher.check_dependencies
-        { options with Launcher.container_workers = false }
-    else Ok ()
-  in
-  let* () =
-    if List.exists (fun worker -> Option.is_some worker.Launcher.container_worker) prepared then
-      Launcher.check_dependencies
-        { options with Launcher.container_workers = true }
-    else Ok ()
-  in
+  let* () = Launcher.check_dependencies options in
   let* () =
     match
       List.find_opt
@@ -530,31 +496,15 @@ let validate_worktree_mode (record : Job_store.record) =
            record.id mode)
 
 let prepare_existing options (record : Job_store.record) =
-  let options =
-    { options with
-      Launcher.container_workers = Option.is_some record.container_worker }
-  in
   let* options =
     Launcher.options_with_persisted_worktree_mode options record.worktree_mode
   in
-  let* () =
-    match record.container_worker with
-    | None ->
-        Launcher.check_dependencies
-          { options with Launcher.container_workers = false }
-    | Some value ->
-        let* () =
-          Launcher.check_dependencies
-            { options with Launcher.container_workers = true }
-        in
-        Container_worker.preflight_existing ~home:options.home value
-  in
+  let* () = Launcher.check_dependencies options in
   let* profile =
     Agent_profile.load_pinned ~home:options.home ~worker_dir:record.worker_dir
       record.job.Job.agent_profile
   in
   let* prepared = Launcher.prepare_identity ~profile options 1 record.job in
-  let prepared = { prepared with Launcher.container_worker = record.container_worker } in
   let* _ = Project_overview.validate_worker_task_link ~home:options.home record in
   let* () =
     match record.transition with
@@ -578,32 +528,9 @@ let prepare_begin ~explicit_resume options worker =
 
 let claim_begin (plan : begin_plan) =
   let requested =
-    match plan.record.container_worker with
-    | None ->
-        Launcher.begin_request ~persist_failure:false ~write_script:false
-          plan.options plan.prepared
-          ~expected_statuses:[ plan.record.Job_store.status ]
-    | Some container_worker -> (
-        match Container_worker.wake ~harness:plan.options.harness container_worker with
-        | Error message -> `Failed message
-        | Ok (was_running, _) ->
-            let worktree =
-              Option.value ~default:(Container_worker.guest_worktree plan.prepared.branch)
-                plan.record.last_known_worktree
-            in
-            match
-              Launcher.update_launch_state plan.options plan.prepared
-                ~expected_statuses:[ plan.record.status ]
-                ~status:"launch-requested" ~worktree
-                ~workspaces:plan.record.workspaces ()
-            with
-            | Error message ->
-                let restored =
-                  if was_running then Error message
-                  else Container_worker.stop_started container_worker (Error message)
-                in
-                `Failed (Result.fold ~ok:(fun _ -> message) ~error:Fun.id restored)
-            | Ok () -> `Ready Launcher.{ workdir = worktree; initial_workdir = worktree })
+    Launcher.begin_request ~persist_failure:false ~write_script:false
+      plan.options plan.prepared
+      ~expected_statuses:[ plan.record.Job_store.status ]
   in
   match requested with
   | `Failed message -> Error message
@@ -623,21 +550,13 @@ let claim_begin (plan : begin_plan) =
             | Ok record -> record.workspaces
             | Error _ -> plan.record.workspaces);
           worker_dir = plan.prepared.worker_dir;
-          instructions =
-            (if Option.is_some plan.record.container_worker then
-               "/monty/context/MONTY.md"
-             else plan.prepared.instructions);
-          context =
-            (if Option.is_some plan.record.container_worker then
-               "/monty/context/task.md"
-             else plan.prepared.context);
+          instructions = plan.prepared.instructions;
+          context = plan.prepared.context;
           home = plan.options.home;
           profile = plan.prepared.profile;
-          container_worker = plan.record.container_worker;
         }
 
 let provisional_dispatch (plan : begin_plan) =
-  let containerized = Option.is_some plan.record.container_worker in
   {
     id = plan.prepared.id;
     title = plan.prepared.job.Job.title;
@@ -647,14 +566,10 @@ let provisional_dispatch (plan : begin_plan) =
       Option.value ~default:plan.prepared.repo plan.record.last_known_worktree;
     workspaces = plan.record.workspaces;
     worker_dir = plan.prepared.worker_dir;
-    instructions =
-      (if containerized then "/monty/context/MONTY.md"
-       else plan.prepared.instructions);
-    context =
-      (if containerized then "/monty/context/task.md" else plan.prepared.context);
+    instructions = plan.prepared.instructions;
+    context = plan.prepared.context;
     home = plan.options.home;
     profile = plan.prepared.profile;
-    container_worker = plan.record.container_worker;
   }
 
 let begin_worker_unlocked ~explicit_resume options worker =
@@ -671,11 +586,6 @@ let begin_worker ~explicit_resume options worker =
     Error "headless begin emits a Pi subagent call, but the effective harness is codex; use monty headless run"
   else
     let* record = Job_store.find ~home:options.Launcher.home ~scope:Job_store.Active worker in
-    let* () =
-      if Option.is_some record.container_worker then
-        Error "container workers require monty headless run or resume, not headless begin"
-      else Ok ()
-    in
     Worker_lock.with_lock ~home:options.home ~record (fun () ->
         begin_worker_unlocked ~explicit_resume options worker)
 
@@ -686,13 +596,7 @@ let read_required_file ~label path =
 
 let load_phase_inputs (plan : begin_plan) =
   let* instructions_contents =
-    match plan.record.container_worker with
-    | None ->
-        read_required_file ~label:"Monty instructions" plan.prepared.instructions
-    | Some _ ->
-        Ok
-          (Container_worker.guest_instructions ~id:plan.record.id
-             ~title:plan.record.job.Job.title)
+    read_required_file ~label:"Monty instructions" plan.prepared.instructions
   in
   let* context_contents =
     read_required_file ~label:"task context" plan.prepared.context
@@ -857,14 +761,6 @@ let run_codex_phase (options : Launcher.options) (dispatch : dispatch)
     ^ Shell.quote prompt ^ " > " ^ Shell.quote events ^ " 2> "
     ^ Shell.quote progress
   in
-  match dispatch.container_worker with
-  | Some container_worker ->
-      let prompt_contents = Shell.read_file prompt in
-      Container_worker.run_phase ~harness:Harness.Codex ~command:options.harness_command
-        container_worker ~attempt:paths.id ~name
-        ~worktree:dispatch.worktree ~codex_yolo:options.codex_yolo ~writable
-        ~prompt:prompt_contents ~output ~events ~progress
-  | None -> (
   let* () = Skill.ensure ~home:dispatch.home ~harness:Harness.Codex ~monty_command:options.monty_command in
   match Process.run_capture command with
   | Error message ->
@@ -881,7 +777,7 @@ let run_codex_phase (options : Launcher.options) (dispatch : dispatch)
   | Ok { status; _ } ->
       Error
         (Printf.sprintf "Codex %s phase failed with %s (events: %s; progress: %s)"
-             name (Process.status_to_string status) events progress))
+             name (Process.status_to_string status) events progress)
 
 let pi_final_message events =
   let* () = Run_handoff.require_regular_file events in
@@ -940,24 +836,17 @@ let run_pi_phase (options : Launcher.options) (dispatch : dispatch)
   (* A shell cannot be made read-only with a prompt. Pi reviewers inspect with
      file tools; writers retain bash for installation and validation. *)
   let result =
-    match dispatch.container_worker with
-    | Some value ->
-        Container_worker.run_phase ~harness:Harness.Pi
-          ~command:options.harness_command value ~attempt:paths.id ~name
-          ~worktree:dispatch.worktree ~codex_yolo:false ~writable
-          ~prompt:(Shell.read_file prompt) ~output ~events ~progress
-    | None ->
-        let* () = Skill.ensure ~home:dispatch.home ~harness:Harness.Pi ~monty_command:options.monty_command in
-        let command =
-          "umask 077 && " ^ options.harness_command
-          ^ Harness.pi_headless_args ~writable
-          ^ " < " ^ Shell.quote prompt ^ " > " ^ Shell.quote events
-          ^ " 2> " ^ Shell.quote progress
-        in
-        let* result = Process.run_capture ~cwd:dispatch.worktree command in
-        match result.status with
-        | `Exited 0 -> Ok ()
-        | status -> Error (Process.status_to_string status)
+    let* () = Skill.ensure ~home:dispatch.home ~harness:Harness.Pi ~monty_command:options.monty_command in
+    let command =
+      "umask 077 && " ^ options.harness_command
+      ^ Harness.pi_headless_args ~writable
+      ^ " < " ^ Shell.quote prompt ^ " > " ^ Shell.quote events
+      ^ " 2> " ^ Shell.quote progress
+    in
+    let* result = Process.run_capture ~cwd:dispatch.worktree command in
+    match result.status with
+    | `Exited 0 -> Ok ()
+    | status -> Error (Process.status_to_string status)
   in
   let result =
     let* () = result in
@@ -986,7 +875,6 @@ let claude_final_message events =
 
 let run_claude_phase (options:Launcher.options) (dispatch:dispatch) (paths:attempt_paths) ~name ~writable ~prompt ~output =
   let events=phase_path paths.events name ".jsonl" and progress=phase_path paths.logs name ".log" in
-  let* ()=if dispatch.container_worker<>None then Error "Claude Apple-container execution is not supported" else Ok () in
   let* ()=Skill.ensure ~home:dispatch.home ~harness:Harness.Claude ~monty_command:options.monty_command in
   let dirs=dispatch.workspaces |> List.filter_map (fun (w:Job_store.workspace_state)->w.worktree) in
   let policy=if writable then "" else
@@ -1135,36 +1023,11 @@ let preflight_worker ~explicit_resume options worker =
   let* plan = prepare_begin ~explicit_resume options worker in
   let* () = if plan.prepared.profile.reviews<>[] then
     Harness.check_review_command plan.options.harness plan.options.harness_command else Ok () in
-  let* harness_command, wt_command =
-    match plan.record.container_worker with
-    | Some _ -> Ok (plan.options.harness_command, plan.options.wt_command)
-    | None ->
-        let* harness_command = Process.absolute_command plan.options.harness_command in
-        let* wt_command = Process.absolute_command plan.options.wt_command in
-        Ok (harness_command, wt_command)
-  in
+  let* harness_command = Process.absolute_command plan.options.harness_command in
+  let* wt_command = Process.absolute_command plan.options.wt_command in
   let plan = { plan with options = { plan.options with harness_command; wt_command } } in
   let* inputs = load_phase_inputs plan in
   Ok (plan, inputs)
-
-let container_handoff_changes ~harness (dispatch : dispatch) =
-  match dispatch.container_worker with
-  | None -> None
-  | Some value ->
-      let change diff_error files insertions deletions =
-        Run_handoff.
-          { repo = dispatch.repo; branch = Some dispatch.branch;
-            worktree = Some dispatch.worktree; files; insertions; deletions;
-            diff_error }
-      in
-      Some
-        [ match
-            Container_worker.collect_changes ~harness value ~worktree:dispatch.worktree
-              ~branch:dispatch.branch
-          with
-          | Ok summary ->
-              change None summary.files summary.insertions summary.deletions
-          | Error message -> change (Some message) [] 0 0 ]
 
 let started_json (plan : begin_plan) (dispatch : dispatch) paths =
   let* reference = Run_handoff.reference_of_record plan.record paths.id in
@@ -1295,7 +1158,6 @@ let run_worker_unlocked ~on_started ~explicit_resume options worker =
         Ok final_handoff
     with exn -> Error (Printexc.to_string exn)
   in
-  let changes = container_handoff_changes ~harness:plan.options.harness dispatch in
   (match execution with
   | Error message ->
       let handoff =
@@ -1305,7 +1167,7 @@ let run_worker_unlocked ~on_started ~explicit_resume options worker =
           ~summary:(Printf.sprintf "Headless %s run failed during %s."
                       (Harness.to_string options.harness) !phase)
           ~risks:[ message ] ~last_phase:!phase ~error:message
-          ?changes ~artifacts:[ paths.root ] ()
+          ~artifacts:[ paths.root ] ()
       in
       (match handoff with
       | Ok published ->
@@ -1326,7 +1188,7 @@ let run_worker_unlocked ~on_started ~explicit_resume options worker =
           ~outcome:Run_handoff.Ready_for_review
           ~summary:(Run_handoff.compact_summary final_handoff)
           ~validation:[ validation_summary dispatch.profile ]
-          ?review_summary ?changes
+          ?review_summary
           ~artifacts:[ paths.root ] ()
       in
       Ok (run_result_json plan.options dispatch paths published))
@@ -1386,9 +1248,8 @@ let run_worker ?(locked=false) ?(on_started=(fun _ _ -> ())) ~wait ~explicit_res
   let record = plan.record in
   let operation on_started =
     let run () = run_worker_unlocked ~on_started ~explicit_resume options worker in
-    if locked then run () else match record.container_worker with
-    | None -> Worker_lock.with_lock ~home:options.Launcher.home ~record run
-    | Some _ -> Container_worker.with_worker_lock ~worker_dir:record.worker_dir run
+    if locked then run ()
+    else Worker_lock.with_lock ~home:options.Launcher.home ~record run
   in
   if wait then operation on_started else background operation
 
@@ -1477,7 +1338,6 @@ let finish_pi_worker ~home ~worker ~attempt_id ~success ?last_phase ?error () =
       context = record.job.context;
       home;
       profile;
-      container_worker = record.container_worker;
     }
   in
   let paths = attempt_paths dispatch attempt_id in
@@ -1631,7 +1491,6 @@ let recover_finished_pi ~home =
                         context = record.job.context;
                         home;
                         profile;
-                        container_worker = record.container_worker;
                       }
                     in
                     let paths = attempt_paths dispatch attempt_id in

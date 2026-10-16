@@ -11,12 +11,11 @@ happens before the harness starts, in the account/profile it will actually use.
 | Claude on the host | `${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills/monty` |
 | Pi on the host | `${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/skills/monty` |
 | Client service | `skills/monty` inside the session profile's configured `pi_home`, `codex_home` or `claude_home` |
-| Container workers, both harnesses | `/monty/home/.agents/skills/monty` |
 
 The executable embeds `skills/monty/SKILL.md` and `docs/monty-workflows.md`.
 Installation copies the manual into `references/workflows.md`; no checkout,
 network download, MCP connection, extension, or additional dependency is needed.
-Read-only reviewers and container workers read that reference with file tools.
+Read-only reviewers read that reference with file tools.
 The skill does not grant shell access or change the worker's role.
 
 Edit the source files to maintain the skill; installed copies are marked as

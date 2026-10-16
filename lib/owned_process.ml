@@ -1,10 +1,8 @@
 open Lwt.Infix
 open Conversation_store
 
-let start ?(mode="pipe") ?(cleanup=[]) ?(cleanup_log="") ?(lock="") ?(locks=[]) ~env ~cwd args =
+let start ?(mode="pipe") ?(lock="") ?(locks=[]) ~env ~cwd args =
   let python=get(Process.command_exists_with_arguments "python3") in
-  let mode=if cleanup=[] then mode else Yojson.Safe.to_string(obj["mode",string mode;
-    "cleanup",`List(List.map string cleanup);"cleanup_log",string cleanup_log]) in
   Lwt_process.open_process_full ~env
     (python,Array.of_list ([python;"-u";"-c";Embedded_runtime.text;mode;cwd;
       Yojson.Safe.to_string(`List(List.filter((<>) "")(lock::locks) |> List.map string))] @ args))

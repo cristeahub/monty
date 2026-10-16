@@ -62,7 +62,7 @@ let notify t pid connection_id j =
 let native_environment bindings =
   let inherited=Unix.environment () |> Array.to_list |> List.filter (fun value ->
     List.exists (fun key -> String.starts_with ~prefix:(key ^ "=") value)
-      ["PATH";"HOME";"TMPDIR";"LANG";"USER";"LOGNAME";"MONTY_WT_COMMAND";"MONTY_CONTAINER_COMMAND"]) in
+      ["PATH";"HOME";"TMPDIR";"LANG";"USER";"LOGNAME";"MONTY_WT_COMMAND"]) in
   Array.of_list (bindings @ inherited)
 let connection t pid =
   if t.stopping then fail 503 "Monty service is shutting down; inspect retained execution before reconnecting";
@@ -755,9 +755,8 @@ let headless_start t id request =
   let worker=required "worker" request in
   let record=get(Job_store.find ~home:t.home ~scope:Job_store.Active worker) in
   let command=Native_command.shell(s "command" p) in
-  let command=if record.container_worker=None then command else get(Container_worker.image_command harness command) in
   (match field "command" request with `Null->()|`String supplied ->
-    let normalize value=if record.container_worker=None then get(Process.absolute_command value) else get(Container_worker.image_command harness value) in
+    let normalize value=get(Process.absolute_command value) in
     let supplied=normalize supplied and expected=normalize command in
     if supplied<>expected then fail 409 "command override does not match the trusted server profile"|_->fail 400 "invalid command override");
   List.iter (fun (workspace:Job.workspace) ->
@@ -769,19 +768,18 @@ let headless_start t id request =
   let resume=field "resume" request=`Bool true in
   let settings=get(Settings.load ~home:t.home) in
   let options=Launcher.{backend=Terminal.Dry_run;target=Terminal.Tab;harness;harness_command=command;
-    codex_yolo;container_workers=record.container_worker<>None;
+    codex_yolo;
     wt_command;worktree_mode=Always;
     branch_prefix=Option.value ~default:"monty" settings.branch_prefix;agent_profile=Option.value ~default:Agent_profile.default_id settings.agent_profile;
     fork=None;home=t.home;script_dir=Home.runtime_script_dir ~home:t.home ();monty_command=Unix.realpath Sys.executable_name} in
   let plan,_=get(Headless.preflight_worker ~explicit_resume:resume options worker) in
-  if harness=Harness.Claude && options.container_workers then fail 400 "Claude Apple-container execution is not supported";
   let key=match harness with Harness.Pi->"PI_CODING_AGENT_DIR"|Codex->"CODEX_HOME"|Claude->"CLAUDE_CONFIG_DIR" in
   let directory=s (match harness with Harness.Pi->"pi_home"|Codex->"codex_home"|Claude->"claude_home") p in
   let environment=match field "environment" request with `Assoc fields ->
     List.filter_map(fun (key,value)->
       if not(Worker_environment.allowed key) then fail 400 "invalid headless environment";
       if key="MONTY_HOME" then None else Some(key ^ "=" ^ bounded_string 8192 value)) fields|`Null->[]|_->fail 400 "invalid headless environment" in
-  (if harness=Harness.Codex && record.container_worker=None && plan.Headless.prepared.profile.reviews<>[] then
+  (if harness=Harness.Codex && plan.Headless.prepared.profile.reviews<>[] then
     let cwd=match record.last_known_worktree with Some path when Sys.file_exists path->path|_->record.job.repo in
     codex_model_config t p ~cwd >|= fun config -> ["MONTY_CODEX_REVIEW_CONFIG=" ^ Yojson.Safe.to_string config]
    else Lwt.return []) >>= fun review_config ->
@@ -796,9 +794,7 @@ let headless_start t id request =
   locked t.home(fun ()->get(State_store.ensure_real_directory ~label:"execution artifacts" ~mode:0o700 (Filename.dirname log)));
   let fd=get(State_store.open_verified_lock log [Unix.O_WRONLY;Unix.O_CREAT;Unix.O_APPEND]) in
   Unix.fchmod fd 0o600;
-  let locks=worker_lock :: (if record.container_worker=None then [] else [Filename.concat record.worker_dir ".container-worker.lock"]) in
-  let cleanup=if record.container_worker=None then [] else [Unix.realpath Sys.executable_name;"stop";record.id;"--home";t.home] in
-  let child=Owned_process.start ~mode:"supervisor" ~locks ~cleanup ~cleanup_log:(log ^ ".cleanup") ~env ~cwd:t.home args in
+  let child=Owned_process.start ~mode:"supervisor" ~locks:[worker_lock] ~env ~cwd:t.home args in
   Hashtbl.add t.active_workers record.path id;
   let channel=Lwt_io.of_fd ~mode:Lwt_io.output (Lwt_unix.of_unix_file_descr fd) in
   Hashtbl.add t.executions id child;
@@ -1258,7 +1254,7 @@ let start_background ~home ~config_path ~port =
         Unix.dup2 log Unix.stdout; Unix.dup2 log Unix.stderr; Unix.close log;
         Unix.execve executable [|executable;"service";"serve";"--home";home;
           "--config";config_path;"--port";string_of_int port|]
-          (Array.of_list (("MONTY_HOME=" ^ home)::(Unix.environment () |> Array.to_list |> List.filter(fun binding->not(String.starts_with ~prefix:"MONTY_" binding) || List.exists(fun name->String.starts_with ~prefix:(name ^ "=") binding) ("MONTY_WT_COMMAND"::"MONTY_CONTAINER_COMMAND"::auth_names)))))
+          (Array.of_list (("MONTY_HOME=" ^ home)::(Unix.environment () |> Array.to_list |> List.filter(fun binding->not(String.starts_with ~prefix:"MONTY_" binding) || List.exists(fun name->String.starts_with ~prefix:(name ^ "=") binding) ("MONTY_WT_COMMAND"::auth_names)))))
       with _ -> Unix._exit 127)
     | pid ->
         let rec wait () = try snd(Unix.waitpid [] pid) with

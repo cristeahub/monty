@@ -149,28 +149,7 @@ let prepare_fresh ~home ~wt_command ~force record =
   let* linked_task_id = resolve_linked_local_task_id ~home ~repo:record.job.repo record in
   let task_key = task_key_for_archive record linked_task_id in
   let* () = ensure_archive_target record archive_state.worker_dir in
-  let* workspaces =
-    match record.Job_store.container_worker with
-    | Some value ->
-        let* branch =
-          match record.job.Job.branch with
-          | Some branch -> Ok branch
-          | None -> Error "containerized worker has no task branch"
-        in
-        let* worktree =
-          match record.last_known_worktree with
-          | Some worktree
-            when String.equal worktree (Container_worker.guest_worktree branch) ->
-              Ok worktree
-          | _ -> Error "containerized worker has invalid private worktree identity"
-        in
-        let* () =
-          if force then Ok ()
-          else Container_worker.ensure_clean value ~worktree ~branch
-        in
-        Ok []
-    | None -> locate_workspaces ~wt_command record
-  in
+  let* workspaces = locate_workspaces ~wt_command record in
   let* () =
     workspaces
     |> List.fold_left
@@ -205,10 +184,9 @@ let complete_record ~home ~wt_command ~force initial =
     | _ -> Error "completion intent was not persisted"
   in
   let deletes_worktree_and_branch =
-    Option.is_none record.Job_store.container_worker
-    && not
-         (String.equal (String.lowercase_ascii record.Job_store.worktree_mode)
-            "never")
+    not
+      (String.equal (String.lowercase_ascii record.Job_store.worktree_mode)
+         "never")
   in
   let* workspaces =
     if deletes_worktree_and_branch then
@@ -242,11 +220,6 @@ let complete_record ~home ~wt_command ~force initial =
            (Ok ())
     else Ok ()
   in
-  let* () =
-    match record.Job_store.container_worker with
-    | None -> Ok ()
-    | Some value -> Container_worker.remove value
-  in
   let* () = fault "complete-after-cleanup" in
   let* record = Job_store.relocate_transition record Job_store.Complete in
   let* () = fault "complete-after-move" in
@@ -268,8 +241,6 @@ let complete_record ~home ~wt_command ~force initial =
         Fmt.pr "Deleted workspace: %s | %s | %s\n" workspace.repo branch
           (Option.value ~default:"<already absent>" worktree))
       workspaces
-  else if Option.is_some record.Job_store.container_worker then
-    Fmt.pr "Deleted private Apple container and volume.\n"
   else Fmt.pr "Deleted workspaces: <skipped, worktree mode never>\n";
   Ok ()
 
@@ -281,9 +252,4 @@ let complete ?worker ~home ~wt_command ~force () =
     let* current = resolve ~home worker in
     complete_record ~home ~wt_command ~force current
   in
-  match (initial.Job_store.container_worker, force) with
-  | None, _ -> Worker_lock.with_lock ~home ~record:initial operation
-  | Some _, false ->
-      Container_worker.with_worker_lock ~wait:false
-        ~worker_dir:initial.worker_dir operation
-  | Some _, true -> operation ()
+  Worker_lock.with_lock ~home ~record:initial operation

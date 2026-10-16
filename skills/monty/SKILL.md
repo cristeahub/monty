@@ -12,7 +12,7 @@ Do not use `dune exec -- monty` for operations.
 
 The same manual is bundled in [references/workflows.md](references/workflows.md).
 Read only the relevant section, especially when your role has file access but
-no shell, or when running inside a container without a Monty executable.
+no shell.
 The manual covers inventory, launch, headless, lifecycle, projects, workers,
 settings, findings, handoffs, skills, web-client, and client-service.
 

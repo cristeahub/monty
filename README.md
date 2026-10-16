@@ -20,12 +20,6 @@ Monty handles the glue around the terminal, `wt`, worktrees, manifests, agent ha
 - `expect` on `PATH` for interactive Codex terminals (included with macOS).
 - `gh` on `PATH` when using GitHub issues as a project task source.
 
-For isolated Linux ARM64 workers on Apple silicon, see the
-[Apple worker image setup](container/apple-worker/README.md). The current
-container workflow supports headless Pi and Codex with one repository per task; it
-keeps the repository, worktree, caches, and toolchain inside an Apple container.
-Host workers remain the default.
-
 ## Build
 
 ```sh
@@ -345,7 +339,7 @@ Monty invokes Pi with `--print --mode json --no-session`. No subagent extension 
 
 Headless profiles always start fresh phases; `--fork` is supported only for interactive Pi workers.
 
-Codex uses `codex exec --ephemeral --json` and preserves command-local trust and configured permissions. With Codex YOLO disabled, writers use `workspace-write`, while reviewers use `read-only`. The existing `codex-yolo` setting continues to apply to Codex only. Both Pi and Codex support headless execution in [Apple Linux containers](container/apple-worker/README.md), with one repository per worker.
+Codex uses `codex exec --ephemeral --json` and preserves command-local trust and configured permissions. With Codex YOLO disabled, writers use `workspace-write`, while reviewers use `read-only`. The existing `codex-yolo` setting continues to apply to Codex only.
 
 Prompts, JSONL events, phase logs, and final messages live in the worker's durable `artifacts/headless/<attempt-id>/` directory. Background supervisor diagnostics and its final result go to `logs/supervisor.log`. Monty captures phase handoffs into worker memory and publishes the canonical `monty:run-handoff:v1` record and pending notice. Failures include the last known phase and artifact paths. A successful run leaves the task open and all worktrees intact.
 

@@ -43,37 +43,6 @@ with tempfile.TemporaryDirectory(prefix='monty-owned-') as root:
         assert not stat or stat.startswith('Z'),stat
     finally:
         if owner.poll() is None:owner.kill();owner.wait()
-    # A guest/escaped process needs explicit cleanup beyond the host group.
-    guest=root/'guest';cleaned=root/'cleaned'
-    cleanup=[sys.executable,'-c',
-      "import fcntl,os,signal;from pathlib import Path;"
-      "lock=open("+repr(lock)+",'r+');"
-      "\ntry:fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)"
-      "\nexcept BlockingIOError:pass"
-      "\nelse:raise AssertionError('cleanup lost its ownership fence')"
-      "\nos.kill(int(Path("+repr(str(guest))+").read_text()),signal.SIGKILL);"
-      "Path("+repr(str(cleaned))+").touch()"]
-    native=[sys.executable,'-u','-c',
-      "import subprocess,time;from pathlib import Path;"
-      "p=subprocess.Popen(['sleep','60'],start_new_session=True);"
-      "Path("+repr(str(guest))+").write_text(str(p.pid));print('guest ready',flush=True);time.sleep(60)"]
-    mode=json.dumps({'mode':'supervisor','cleanup':cleanup})
-    guarded=subprocess.Popen([sys.executable,'-u',str(HELPER),mode,str(root),lock,*native],
-                             stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
-    try:
-        assert guarded.stdout.readline()==b'guest ready\n'
-        guarded.stdin.close();guarded.wait(timeout=12)
-        assert cleaned.exists(),guarded.stderr.read()
-        stat=subprocess.run(['ps','-o','stat=','-p',guest.read_text()],capture_output=True,text=True).stdout.strip()
-        assert not stat or stat.startswith('Z'),stat
-        cleaned.unlink()
-        normal=subprocess.Popen([sys.executable,'-u',str(HELPER),mode,str(root),lock,
-                                 sys.executable,'-c','pass'],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
-        assert normal.wait(timeout=12)==0,normal.stderr.read()
-        normal.stdin.close()
-        assert not cleaned.exists(), 'normal completion ran cancellation cleanup'
-    finally:
-        if guarded.poll() is None:guarded.kill();guarded.wait()
     target=subprocess.Popen([sys.executable,'-u',str(HELPER),'pipe',str(root),'',
       sys.executable,'-u','-c',"import time;print('runtime ready',flush=True);time.sleep(60)"],
       stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE)

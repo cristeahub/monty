@@ -35,7 +35,7 @@ let detail home key =
   let revision=sha (Yojson.Safe.to_string (`List [raw;record;project_json project])) in
   puts ["key",string key;"revision",string revision;"project_repo",string project.repo;
     "worker",Option.fold ~none:`Null ~some:(fun (r:Job_store.record) -> obj ["id",string r.id;
-      "status",string r.status;"directory",string r.worker_dir;"container",`Bool(Option.is_some r.container_worker)]) worker] raw
+      "status",string r.status;"directory",string r.worker_dir]) worker] raw
 let current home request =
   let key=required "task" request in
   let detail=detail home key in
@@ -86,7 +86,6 @@ let prepare ~home ~profiles ~make_env ~id request =
   let key,before=current home request in
   let p=profile profiles (required "profile" request) in
   let settings=settings home in
-  if settings.container_workers then fail 501 "web launches require host workers; container workers use monty headless";
   let action=required "action" request in
   let task=task home key in
   let record=worker home key task in
@@ -113,7 +112,6 @@ let prepare ~home ~profiles ~make_env ~id request =
         let manifest_text=Yojson.Safe.pretty_to_string json ^ "\n" in
         context,[context_path,context;manifest,manifest_text],["launch-many";"--manifest";manifest]
     | "resume",Some r ->
-        if r.container_worker<>None then fail 501 "container workers must resume through monty headless";
         check_account p r;
         "",[],["resume";key] @ (if String.lowercase_ascii task.status="done" then ["--archived"] else [])
     | "launch",Some _ -> fail 409 "this task already owns a worker; review a resume instead"

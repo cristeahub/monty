@@ -52,7 +52,7 @@ for line in sys.stdin:
         http_error(400,lambda:c.req('commands/foreign-home',{'op':'start','profile':'claude',
             'context':dict(context,environment={'MONTY_HOME':str(repo)})}))
         http_error(404,lambda:c.req('commands/foreign-home'))
-        for key in ('MONTY_WT_COMMAND', 'MONTY_CONTAINER_COMMAND', 'MONTY_CODEX_YOLO', 'MONTY_PI_COMMAND', 'MONTY_CODEX_COMMAND', 'MONTY_CLAUDE_COMMAND', 'MONTY_API_PROFILE'):
+        for key in ('MONTY_WT_COMMAND', 'MONTY_CODEX_YOLO', 'MONTY_PI_COMMAND', 'MONTY_CODEX_COMMAND', 'MONTY_CLAUDE_COMMAND', 'MONTY_API_PROFILE'):
             http_error(400,lambda:c.req('commands/forbidden-command-'+key, {
                 'op':'start','profile':'claude','context':dict(context,environment={key:'/bin/sh -c false'})}))
             http_error(404,lambda:c.req('commands/forbidden-command-'+key))

@@ -23,7 +23,7 @@ with tempfile.TemporaryDirectory(prefix='monty-rex-') as temporary:
            'GIT_CONFIG_SYSTEM': '/dev/null', 'GIT_CONFIG_NOSYSTEM': '1',
            'GIT_CONFIG_COUNT': '0', 'GIT_TEMPLATE_DIR': '/dev/null'}
     for key in ('MANTLE_CONTEXT', '_MANTLE_SELECTED_HOME', 'MONTY_AGENT_PROFILE',
-                'MONTY_TERMINAL', 'MONTY_TARGET', 'MONTY_CONTAINER_WORKERS',
+                'MONTY_TERMINAL', 'MONTY_TARGET',
                 'REX_SESSION', 'REX_BLOCK', 'REX_SERVER', 'REX_CLIENT'):
         env.pop(key, None)
     subprocess.run(['git', 'init', '-q', str(repo)], env=env, check=True)

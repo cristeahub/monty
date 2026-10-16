@@ -129,9 +129,6 @@ let options backend_override target harness_override codex_yolo_override pi_comm
   let* codex_yolo =
     Settings.effective_codex_yolo ~getenv ~home codex_yolo_override
   in
-  let* container_workers =
-    Settings.load ~home |> Result.map (fun settings -> settings.Settings.container_workers)
-  in
   let* branch_prefix =
     Settings.effective_branch_prefix ~getenv ~home branch_prefix_override
   in
@@ -150,7 +147,6 @@ let options backend_override target harness_override codex_yolo_override pi_comm
     harness_command =
       (match harness with Harness.Pi -> pi_command | Harness.Codex -> codex_command | Harness.Claude -> claude_command);
     codex_yolo;
-    container_workers;
     wt_command;
     worktree_mode;
     branch_prefix;
@@ -656,17 +652,11 @@ let resume archived fresh worker options =
   let result =
     let* options = options in
     let find_record () =
-      let* record =
-        if archived then Resume.find_reactivatable ~home:options.Launcher.home worker
-        else Resume.find_resumable ~home:options.Launcher.home worker
-      in
-      if Option.is_some record.Job_store.container_worker then
-        Error "containerized workers are headless-only; use monty headless resume"
-      else Ok record
+      if archived then Resume.find_reactivatable ~home:options.Launcher.home worker
+      else Resume.find_resumable ~home:options.Launcher.home worker
     in
     let execute () =
       let* record = find_record () in
-      let options = { options with Launcher.container_workers = false } in
       let* profile =
         Agent_profile.load_pinned ~home:options.home
           ~worker_dir:record.Job_store.worker_dir record.job.Job.agent_profile
@@ -733,91 +723,6 @@ let complete_term =
     Cmdliner.Arg.(value & flag & info [ "force"; "f" ] ~doc)
   in
   Cmdliner.Term.(const complete $ worker $ force $ home_arg $ wt_command_arg)
- in
-let container_record action worker home =
-  let ( let* ) = Result.bind in
-  let* record = Job_store.find ~home ~scope:Job_store.Active worker in
-  match record.Job_store.container_worker with
-  | Some _ -> Ok record
-  | None -> Error (Printf.sprintf "worker %s is not containerized; cannot %s" record.id action)
- in
-let container_workspace (record : Job_store.record) =
-  let ( let* ) = Result.bind in
-  let* branch =
-    match record.job.Job.branch with
-    | Some branch -> Ok branch
-    | None -> Error (Printf.sprintf "containerized worker %s has no branch" record.id)
-  in
-  let expected = Container_worker.guest_worktree branch in
-  match record.last_known_worktree with
-  | Some worktree when String.equal worktree expected -> Ok (worktree, branch)
-  | Some worktree ->
-      Error
-        (Printf.sprintf
-           "containerized worker %s has unexpected private worktree %S; expected %S"
-           record.id worktree expected)
-  | None ->
-      Error
-        (Printf.sprintf "containerized worker %s has no private worktree" record.id)
- in
-let inspect_worker worker home =
-  match container_record "inspect" worker home with
-  | Error message -> exit_code (Error message)
-  | Ok record -> (
-      match container_workspace record with
-      | Error message -> exit_code (Error message)
-      | Ok (worktree, branch) ->
-      let value = Option.get record.Job_store.container_worker in
-      match Container_worker.inspect value ~worktree ~branch with
-      | Error message -> exit_code (Error message)
-      | Ok inspected ->
-          Fmt.pr "%s%s" inspected.output
-            (if String.ends_with ~suffix:"\n" inspected.output then "" else "\n");
-          flush stdout;
-          Fmt.epr "ready %.3fs, inspection %.3fs\n" inspected.ready_seconds
-            inspected.result_seconds;
-          if inspected.was_running then 0
-          else
-            (match Container_worker.stop value with
-            | Ok seconds ->
-                Fmt.epr "stop %.3fs\n" seconds;
-                0
-            | Error message -> exit_code (Error message)))
- in
-let inspect_worker_term =
-  let worker =
-    let doc = "Containerized worker id, branch, or title slug to inspect." in
-    Cmdliner.Arg.(required & pos 0 (some string) None & info [] ~docv:"WORKER" ~doc)
-  in
-  Cmdliner.Term.(const inspect_worker $ worker $ home_arg)
- in
-let stop_worker worker home =
-  match container_record "stop" worker home with
-  | Error message -> exit_code (Error message)
-  | Ok record -> (
-      let value = Option.get record.Job_store.container_worker in
-      match Container_worker.stop value with
-      | Error message -> exit_code (Error message)
-      | Ok seconds ->
-          Fmt.pr "Stopped %s in %.3fs\n" worker seconds;
-          0)
- in
-let stop_worker_term =
-  let worker =
-    let doc = "Containerized worker id, branch, or title slug to stop." in
-    Cmdliner.Arg.(required & pos 0 (some string) None & info [] ~docv:"WORKER" ~doc)
-  in
-  Cmdliner.Term.(const stop_worker $ worker $ home_arg)
- in
-let register_container_image home =
-  match Container_worker.register_image ~home with
-  | Error message -> exit_code (Error message)
-  | Ok digest ->
-      Fmt.pr "Registered %s@%s\n" Container_worker.image digest;
-      0
- in
-let register_container_image_term =
-  Cmdliner.Term.(const register_container_image $ home_arg)
  in
 let group_arg =
   let doc = "Filter by this project group instead of the active Mantle profile." in
@@ -1119,12 +1024,12 @@ let doctor home harness_override pi_command codex_command claude_command wt_comm
       Settings.effective_terminal ~getenv ~home backend_override )
   with
   | Error message, _, _ | _, Error message, _ | _, _, Error message -> exit_code (Error message)
-  | Ok harness, Ok settings, Ok backend ->
+  | Ok harness, Ok _, Ok backend ->
       let harness_command =
         match harness with Harness.Pi -> pi_command | Harness.Codex -> codex_command | Harness.Claude -> claude_command
       in
       Doctor.run ~home ~harness ~harness_command ~wt_command ~backend
-        ~worktree_mode ~container_workers:settings.container_workers
+        ~worktree_mode
       |> exit_code
  in
 let doctor_term =
@@ -1163,10 +1068,6 @@ let settings_get key home =
           0
       | "codex-yolo" ->
           Fmt.pr "%s\n" (if settings.Settings.codex_yolo then "true" else "false");
-          0
-      | "container-workers" ->
-          Fmt.pr "%s\n"
-            (if settings.Settings.container_workers then "true" else "false");
           0
       | "branch-prefix" ->
           Fmt.pr "%s\n"
@@ -1214,15 +1115,6 @@ let settings_set key value home =
           Settings.set_codex_yolo ~home enabled
           |> Result.map (fun () ->
                  Fmt.pr "codex-yolo = %s\n"
-                   (if enabled then "true" else "false"))
-          |> exit_code)
-  | "container-workers" -> (
-      match Settings.bool_of_string value with
-      | Error message -> exit_code (Error message)
-      | Ok enabled ->
-          Settings.set_container_workers ~home enabled
-          |> Result.map (fun () ->
-                 Fmt.pr "container-workers = %s\n"
                    (if enabled then "true" else "false"))
           |> exit_code)
   | "branch-prefix" ->
@@ -1383,24 +1275,6 @@ let codex_session_capture_cmd =
 let done_cmd =
   let doc = "Mark a worker job done, close its linked local task, delete its worktree and branch, and archive its memory." in
   Cmdliner.Cmd.v (Cmdliner.Cmd.info "done" ~doc) complete_term
- in
-let inspect_cmd =
-  let doc = "Run the fixed read-only helper for a containerized worker." in
-  Cmdliner.Cmd.v (Cmdliner.Cmd.info "inspect" ~doc) inspect_worker_term
- in
-let stop_cmd =
-  let doc = "Stop a containerized worker VM without deleting its private volume." in
-  Cmdliner.Cmd.v (Cmdliner.Cmd.info "stop" ~doc) stop_worker_term
- in
-let container_image_cmd =
-  let register_cmd =
-    let doc = "Register the exact digest of the explicitly built Monty worker image." in
-    Cmdliner.Cmd.v (Cmdliner.Cmd.info "register" ~doc)
-      register_container_image_term
-  in
-  Cmdliner.Cmd.group
-    (Cmdliner.Cmd.info "container-image" ~doc:"Manage the one Monty worker image.")
-    [ register_cmd ]
  in
 let list_cmd =
   let doc = "List Monty tasks from the local task source of truth." in
@@ -1635,9 +1509,6 @@ let main_cmd =
       resume_cmd;
       codex_session_capture_cmd;
       done_cmd;
-      inspect_cmd;
-      stop_cmd;
-      container_image_cmd;
       list_cmd;
       overview_cmd;
       projects_cmd;

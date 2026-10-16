@@ -90,7 +90,7 @@ receipt follows worker claim and prompt preparation. Claude phases use fresh
 print/stream-JSON processes and require exactly one successful terminal result
 with a nonempty handoff and valid native UUID; incomplete streams and permission
 denials fail. Reviewers lose mutation-capable tools, hooks, MCP integrations and
-delegation rather than relying on their prompt. Claude containers are rejected.
+delegation rather than relying on their prompt.
 Completion leaves the task open and worktrees intact.
 
 Reviewer preflight rejects fixed command arguments that enable tools,
@@ -107,11 +107,8 @@ receipts as `outcome_unknown` and clears connection-scoped pending requests.
 It does not automatically replay a turn or recreate a writer. Inspect retained
 history and artifacts before explicitly resuming. Ownership guards hold native
 session locks through cleanup, including client disappearance and server EOF.
-Abnormal container execution shutdown stops only the ownership-checked worker
-container and retains its volume. Cleanup evidence is kept beside the execution
-log. Normal completion leaves the VM available for inspection. Terminal input
-bytes are omitted from command receipts; the request fingerprint still prevents
-duplicate dispatch.
+Terminal input bytes are omitted from command receipts; the request fingerprint
+still prevents duplicate dispatch.
 
 This branch is not ready for rollout. Full regressions and native Pi/Codex/Claude
 checks have passed against isolated local models, including Claude reviewer

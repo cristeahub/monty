@@ -372,7 +372,6 @@ headless phases, and service-managed Codex/Pi sessions. Installation uses the
 selected native profile: `$CODEX_HOME/skills/monty` (default `~/.codex`) or
 `$PI_CODING_AGENT_DIR/skills/monty` (default `~/.pi/agent`). Service sessions use
 their configured native profile rather than the service process's ambient account.
-Container workers receive the same skill in `/monty/home/.agents/skills/monty`.
 Read-only reviewers can read `references/workflows.md` without a shell or host CLI.
 Background source triage remains isolated with skills disabled.
 
@@ -470,8 +469,7 @@ failure and recovery commands. A finished command receipt means the adapter
 finished: inspect the process result. A launch request does not establish that
 implementation succeeded or that the task is complete. Web worker launches use
 host worktrees and the selected terminal (Rex launches from the web land in the
-Monty-owned Rex session because the service has no caller pane); container
-workers keep their existing headless flow.
+Monty-owned Rex session because the service has no caller pane).
 Codex web launches keep approvals and sandboxing enabled even when saved settings
 or the terminal's login environment enable bypass.
 

@@ -36,7 +36,7 @@ let workspace_jsons (job : Job.t) last_known_worktree =
            | 0, Some worktree -> [ ("worktree", `String worktree) ]
            | _ -> []))
 
-let job_json ?(status = "active") ?launch_script ?launch_error ?container_worker
+let job_json ?(status = "active") ?launch_script ?launch_error
     ~worker_dir ~id ~job ~branch ~repo ~context ~worktree_mode
     ~last_known_worktree () =
   `Assoc
@@ -56,19 +56,14 @@ let job_json ?(status = "active") ?launch_script ?launch_error ?container_worker
     @ maybe_assoc "agent_profile" job.Job.agent_profile
     @ maybe_assoc "last_known_worktree" last_known_worktree
     @ maybe_assoc "launch_script" launch_script
-    @ maybe_assoc "launch_error" launch_error
-    @ [ ("containerized", `Bool (Option.is_some container_worker)) ]
-    @
-    match container_worker with
-    | None -> []
-    | Some value -> [ ("container_worker", Container_worker.to_json value) ])
+    @ maybe_assoc "launch_error" launch_error)
 
-let write_job_json_unlocked ?status ?launch_script ?launch_error ?container_worker
+let write_job_json_unlocked ?status ?launch_script ?launch_error
     ~worker_dir ~id ~job ~branch ~repo ~context ~worktree_mode
     ~last_known_worktree () =
   Shell.ensure_dir worker_dir;
   State_store.write_json_atomic ~path:(job_file worker_dir)
-    (job_json ?status ?launch_script ?launch_error ?container_worker ~worker_dir
+    (job_json ?status ?launch_script ?launch_error ~worker_dir
        ~id ~job ~branch ~repo ~context ~worktree_mode ~last_known_worktree ())
 
 let init_memory ~worker_dir ~title =
