@@ -7,6 +7,7 @@ from pathlib import Path
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -54,10 +55,21 @@ with tempfile.TemporaryDirectory(prefix='monty-rex-') as temporary:
         return list(state()['blocks']) if state_file.exists() else []
 
     def cli(*args, code=0, extra=None):
-        result = subprocess.run([binary, *args, '--home', str(home)],
-                                env={**env, **(extra or {})}, text=True, capture_output=True)
-        assert result.returncode == code, (args, result.stdout, result.stderr)
-        return result.stdout + result.stderr
+        with subprocess.Popen([binary, *args, '--home', str(home)],
+                              env={**env, **(extra or {})}, text=True,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              start_new_session=True) as process:
+            try:
+                stdout, stderr = process.communicate(timeout=20)
+            except subprocess.TimeoutExpired as error:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                process.communicate()
+                raise AssertionError(('Monty/Rex command timed out', args)) from error
+            assert process.returncode == code, (args, stdout, stderr)
+            return stdout + stderr
 
     cli('projects', 'add', '--repo', str(repo))
     project = json.loads((home / '.monty' / 'projects.json').read_text())['projects'][0]['id']
@@ -95,8 +107,15 @@ with tempfile.TemporaryDirectory(prefix='monty-rex-') as temporary:
     # ---- doctor ---------------------------------------------------------------
     doctor = cli('doctor', '--terminal', 'rex', '--harness', 'pi', '--worktree', 'never')
     assert re.search(r'PASS +rex ', doctor) and re.search(r'PASS +rex-server +unix:///fake/rex/server.sock', doctor), doctor
-    down = cli('doctor', '--terminal', 'rex', '--harness', 'pi', '--worktree', 'never', code=1, extra={'REX_FAKE_DOWN': '1'})
+    # Rex can fill stderr before producing stdout; JSON and diagnostics stay separate.
+    noisy = {'REX_FAKE_STDERR_BYTES': str(1024 * 1024)}
+    doctor = cli('doctor', '--terminal', 'rex', '--harness', 'pi', '--worktree', 'never', extra=noisy)
+    assert re.search(r'PASS +rex-server +unix:///fake/rex/server.sock', doctor), doctor
+    assert 'diagnostic' not in doctor, 'successful Rex stderr contaminated its JSON response'
+    down = cli('doctor', '--terminal', 'rex', '--harness', 'pi', '--worktree', 'never', code=1,
+               extra={**noisy, 'REX_FAKE_DOWN': '1'})
     assert re.search(r'FAIL +rex-server', down) and 'Open the Rex app' in down, down
+    assert 'connection refused' in down and 'diagnostic' in down, 'Rex failure diagnostics were lost'
     missing = cli('doctor', '--terminal', 'rex', '--harness', 'pi', '--worktree', 'never', code=1,
                   extra={'PATH': '/usr/bin:/bin'})
     assert re.search(r'FAIL +rex ', missing) and 'rex-server' not in missing, missing
@@ -233,7 +252,7 @@ with tempfile.TemporaryDirectory(prefix='monty-rex-') as temporary:
     assert re.search(r'FAIL +rex-session', cli('doctor', '--terminal', 'rex', '--harness', 'pi', '--worktree', 'never', code=1))
     path, worker = manifest('setting-missing')
     before = len(mutations())
-    out = launch(path, code=1)
+    out = launch(path, code=1, extra=noisy)
     assert 'rex-session setting no-such-session is not a live session' in out and "set rex-session ''" in out, out
     assert not worker.exists() and len(mutations()) == before, 'a dead configured session reserved or created state'
     # Inside Rex the caller's own session still wins over the setting.

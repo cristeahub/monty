@@ -97,6 +97,17 @@ let json_of_workspace (workspace : workspace_state) =
 let workspaces_update workspaces =
   ("workspaces", `List (List.map json_of_workspace workspaces))
 
+let materialized_workspace_updates workspaces =
+  let first_worktree =
+    match workspaces with first :: _ -> first.worktree | [] -> None
+  in
+  [ workspaces_update workspaces;
+    ("updated_at", `String (Worker_memory.now_utc ())) ]
+  @
+  match first_worktree with
+  | None -> []
+  | Some path -> [ ("last_known_worktree", `String path) ]
+
 let transition_operation_of_string = function
   | "complete" -> Ok Complete
   | "reopen" -> Ok Reopen

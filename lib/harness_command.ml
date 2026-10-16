@@ -9,7 +9,6 @@ type options = {
 }
 
 let codex_effort_arg = " -c " ^ Shell.quote "model_reasoning_effort=\"xhigh\""
-let codex_vim_arg = " -c " ^ Shell.quote "tui.vim_mode_default=true"
 
 let codex_mode_name = function
   | Codex_session.Fresh -> "fresh"

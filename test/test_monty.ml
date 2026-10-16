@@ -478,7 +478,7 @@ let test_done_refuses_dirty_worktree () =
       assert_contains "dirty error" msg "uncommitted or untracked";
       assert_bool "worker dir remains active" (Sys.file_exists worker_dir));
   must (Wt.force_clean ~worktree);
-  must (Wt.delete_worktree_and_branch ~worktree ~wt_command ~repo ~branch ~force:true ())
+  must (Wt.remove_if_present ~worktree ~wt_command ~repo ~branch ())
 
 let test_done_force_archives () =
   let root = temp_root "done-force" in

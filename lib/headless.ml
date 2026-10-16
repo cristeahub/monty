@@ -639,18 +639,29 @@ let run_pi_phase (options : Launcher.options) (dispatch : dispatch)
         name message events progress) result
 
 let claude_final_message events =
-  let* ()=Run_handoff.require_regular_file events in
+  let* () = Run_handoff.require_regular_file events in
   try
-    let lines=String.split_on_char '\n' (Shell.read_file events) |> List.filter (fun s->String.trim s<>"") in
-    let records=List.map Yojson.Safe.from_string lines in
-    if List.length(List.filter(fun value->Json_fields.field "type" value=`String "result") records)<>1 then Error "Claude stream must contain exactly one terminal result" else
+    let records =
+      Shell.read_file events |> String.split_on_char '\n'
+      |> List.filter (fun line -> String.trim line <> "")
+      |> List.map Yojson.Safe.from_string
+    in
+    let terminal_result value = Json_fields.field "type" value = `String "result" in
+    if List.length (List.filter terminal_result records) <> 1 then
+      Error "Claude stream must contain exactly one terminal result"
+    else
     match List.rev records with
-    | result::_ when Json_fields.s "type" result="result" && Json_fields.s "subtype" result="success"
-      && Json_fields.field "is_error" result=`Bool false
-      && (match Json_fields.field "permission_denials" result with `Null|`List []->true|_->false) ->
-        let text=Json_fields.s "result" result |> String.trim in
-        if text="" || Json_fields.s "session_id" result="" then Error "Claude terminal result is missing handoff or native session identity"
-        else let* _=Native_session.validate ~harness:Harness.Claude (Json_fields.s "session_id" result) in Ok(text ^ "\n")
+    | result :: _ when terminal_result result
+      && Json_fields.field "subtype" result = `String "success"
+      && Json_fields.field "is_error" result = `Bool false
+      && (match Json_fields.field "permission_denials" result with
+          | `Null | `List [] -> true
+          | _ -> false) ->
+        (match Json_fields.field "result" result, Json_fields.field "session_id" result with
+        | `String text, `String session_id when String.trim text <> "" && session_id <> "" ->
+            let* _ = Native_session.validate ~harness:Harness.Claude session_id in
+            Ok (String.trim text ^ "\n")
+        | _ -> Error "Claude terminal result is missing handoff or native session identity")
     | _ -> Error "Claude stream has no valid final result, or contains permission denials; inspect retained events"
   with Sys_error message | Yojson.Json_error message -> Error message
 
@@ -678,10 +689,11 @@ let run_phase options =
 
 type 'a spawned_result = {
   pid : int;
-  channel : in_channel;
+  receive : unit -> ('a, string) result;
 }
 
-let spawn_result operation =
+let spawn_result (type payload) (operation : unit -> (payload, string) result)
+    : payload spawned_result =
   let read_fd, write_fd = Unix.pipe () in
   match Unix.fork () with
   | exception exn ->
@@ -704,7 +716,12 @@ let spawn_result operation =
       Unix._exit 0
   | pid ->
       Unix.close write_fd;
-      { pid; channel = Unix.in_channel_of_descr read_fd }
+      let channel = Unix.in_channel_of_descr read_fd in
+      let receive () =
+        Fun.protect ~finally:(fun () -> close_in_noerr channel) (fun () ->
+            (Marshal.from_channel channel : (payload, string) result))
+      in
+      { pid; receive }
 
 let try_spawn_result operation =
   try Ok (spawn_result operation)
@@ -715,17 +732,15 @@ let try_spawn_result operation =
 
 let await_result child =
   let payload =
-    try Ok (Marshal.from_channel child.channel)
+    try child.receive ()
     with exn ->
       Error
         (Printf.sprintf "headless child returned no result: %s"
            (Printexc.to_string exn))
   in
-  close_in_noerr child.channel;
   let _, status = Process.waitpid [] child.pid in
   match (status, payload) with
-  | Unix.WEXITED 0, Ok result -> result
-  | Unix.WEXITED 0, Error message -> Error message
+  | Unix.WEXITED 0, result -> result
   | Unix.WEXITED code, _ ->
       Error (Printf.sprintf "headless child exited with code %d" code)
   | Unix.WSIGNALED signal, _ ->
@@ -758,8 +773,10 @@ let run_result_json (options : Launcher.options) (dispatch : dispatch)
            (path.review.id ^ "_review", `String path.output))
   in
   `Assoc
-    [ ("schema", `String (if options.harness = Harness.Codex then codex_run_schema
-                          else "monty:headless-pi-run:v1"));
+    [ ("schema", `String (match options.harness with
+                          | Harness.Pi -> "monty:headless-pi-run:v1"
+                          | Harness.Codex -> codex_run_schema
+                          | Harness.Claude -> "monty:headless-claude-run:v1"));
       ("harness", `String (Harness.to_string options.harness));
       ("codex_yolo", `Bool (options.harness = Harness.Codex && options.codex_yolo));
       ("worker_id", `String dispatch.id);
@@ -1100,9 +1117,10 @@ let run_many ~wait options indexed_jobs =
   let json =
     `Assoc
       [ ("schema", `String (if not wait then "monty:headless-start-many:v1"
-                            else if options.Launcher.harness = Harness.Codex then codex_run_many_schema
-                            else if options.Launcher.harness = Harness.Claude then "monty:headless-claude-run-many:v1"
-                            else "monty:headless-pi-run-many:v1"));
+                            else match options.Launcher.harness with
+                              | Harness.Pi -> "monty:headless-pi-run-many:v1"
+                              | Harness.Codex -> codex_run_many_schema
+                              | Harness.Claude -> "monty:headless-claude-run-many:v1"));
         ("harness", `String (Harness.to_string options.Launcher.harness));
         ("codex_yolo", `Bool (options.harness = Harness.Codex && options.codex_yolo));
         ("success", `Bool success);

@@ -15,7 +15,7 @@ let preflight ~env p =
       if status<>Unix.WEXITED 0 || String.trim version<>"0.2.166" then fail 501 "Claude server adapter requires Python 3.10+ with claude-agent-sdk==0.2.166; install helpers/claude-requirements.txt into the configured profile's Python environment")))
     (function Failure _ as error->Lwt.fail error|_->Lwt.fail(Failure(501,"Claude SDK dependency check failed; inspect the configured Python path and helpers/claude-requirements.txt")))
 let start ?(lock="") ?(locks=[]) ~env ~cwd p ~notify () =
-  Pi_rpc.start_unchecked ~lock ~locks ~env ~cwd ~command:(python p) ~args:["-u";"-c";Embedded_claude.text] ~notify ()
+  Native_rpc.start ~lock ~locks ~env ~cwd ~command:(python p) ~args:["-u";"-c";Embedded_claude.text] ~notify ()
 let read ~env ~cwd p command params =
   start ~env ~cwd p ~notify:(fun _ _ -> ()) () >>= fun rpc ->
-  Lwt.finalize (fun () -> Pi_rpc.call rpc command params) (fun () -> Pi_rpc.close rpc)
+  Lwt.finalize (fun () -> Native_rpc.call rpc command params) (fun () -> Native_rpc.close rpc)

@@ -4,7 +4,6 @@ import base64
 import concurrent.futures
 import http.server
 import json
-import os
 from pathlib import Path
 import subprocess
 import shutil
@@ -13,7 +12,7 @@ import tempfile
 import threading
 import time
 
-from test_client_api import BIN, Client, Service, Native, until, http_error
+from test_client_api import BIN, Client, Service, Native, until
 
 FIXTURE=Path(__file__).with_name('fake_pi.py').resolve()
 

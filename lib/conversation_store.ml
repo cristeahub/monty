@@ -90,7 +90,7 @@ let rec public = function
       if key="endpoint" && field "native_id" value<>`Null then None else Some(key,public item)) fields)
   | `List values->`List(List.map public values)
   | value->value
-let within root path = path = root || String.starts_with ~prefix:(root ^ "/") path
+let within root path = State_path.is_contained ~root path
 let store_blob home ~source ~media_type bytes =
   if String.length bytes>8_388_608 then fail 413 "attachment exceeds 8 MiB";
   let hash=sha bytes in

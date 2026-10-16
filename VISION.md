@@ -13,9 +13,9 @@ The head butler and worker agents decide what work should be done.
 Monty makes that work repeatable, inspectable, resumable, and safe.
 
 Monty owns operational mechanics such as terminal launch, repo-scoped worktree selection, durable job state, and lifecycle commands.
-Pi or Codex owns agent interaction and natural language execution. Harness-specific adapters own runtime invocation and orchestration syntax.
+Pi, Codex or Claude owns agent interaction and natural language execution. Monty's server owns their processes and harness-specific adapters.
 The model owns planning, judgment, and implementation choices.
-Monty must not duplicate Pi run state in its durable schema.
+Native runtime IDs and liveness do not belong in the durable worker lifecycle schema.
 
 ## Head butler and worker model
 
@@ -30,25 +30,25 @@ The head butler must be able to inspect current work without entering every work
 
 The head butler may discuss, investigate, or plan a general topic without
 reaching a conclusion and without promoting that discussion into a task.
-Interactive conversation history belongs to the selected harness. Monty exposes
-the harness-native picker, latest-session, and exact-session continuation paths
-instead of duplicating transcripts or introducing a parallel conversation state
-machine.
+Each conversation retains its native harness identity. Monty registers selected
+sessions and keeps an owned history mirror for inspection and recovery. Picker,
+latest-session and exact-session continuation use that registered catalog; older
+native history must be explicitly imported before continuation.
 
 Starting and continuing are intentionally distinct. A bare `monty` invocation
 starts a fresh head-butler conversation, while `monty continue` explicitly
 reopens saved harness history. Continuing a head-butler conversation must not
 create or mutate local tasks, workers, run handoffs, or task inventory. Native
-conversation selectors are harness-specific and are not portable between Pi and
-Codex.
+conversation selectors are harness-specific; transferring context to another
+harness creates an explicitly requested independent branch.
 
 Headless execution is a head-butler-only alternative to terminal workers.
-Monty generates complete arguments for the harness's existing subagent tool and gives every child a Monty-owned repo-scoped worktree rather than requesting a Pi-managed worktree.
-Monty does not need its own Pi extension or a second agent runtime.
+The Monty server starts and supervises native harness processes in Monty-owned repo-scoped worktrees.
+It does not require a parent subagent tool or a Monty-specific Pi extension.
 Each task chain uses a pinned agent profile: a fresh implementer, zero or more mutually isolated fresh reviewers in parallel, and an optional fresh final writer (simplifier or fixer).
 The bundled `simplified` default runs an implementer then a separate editing simplifier. Explicit `reviewed` retains two reviewers plus a fixer, while `solo` provides a single self-validating implementation phase.
 Separate task chains are independent and may run concurrently.
-Reviewers can write their assigned reports outside the worktree but must otherwise remain read-only.
+Reviewers inspect without mutation-capable tools or integrations. Monty captures their responses into reports outside the worktree.
 The chain must not stage, commit, push, post remotely, manage worktrees, or complete the Monty task automatically.
 
 ## A run handoff is not task completion
@@ -116,16 +116,16 @@ Launch-state updates must compare the expected durable source state under the ho
 No durable state claims process liveness.
 
 Headless dispatch uses only `prepared` and `launch-requested` in its normal path.
-Preparation reserves every batch identity before external worktree calls and leaves workers `prepared` until their exact subagent request is ready.
-The head butler must confirm that the harness exposes the subagent tool before preparation mutates Monty state.
-A pre-dispatch failure stays `prepared` and is safe to retry.
-Monty atomically claims one worker as `launch-requested` and emits the complete harness arguments immediately before the head butler invokes that tool.
+Preparation validates the complete batch before reserving identities or invoking `wt`, then leaves workers `prepared`.
+Execution goes through the configured Monty service, which owns each supervisor and its native child processes.
+A failure before the claim leaves the worker `prepared` and safe to retry.
+Monty atomically claims the worker as `launch-requested` and prepares its first phase prompt before returning a startup receipt. That receipt confirms startup, not successful implementation.
 Any later ambiguity requires an explicit successor-chain resume and must never trigger automatic replay.
 A finished headless chain remains open and `launch-requested` until the user intentionally runs the existing completion lifecycle.
-Pi run IDs, backend choice, and runtime status remain ephemeral and never enter `job.json`.
-Interactive Codex workers may keep their exact conversation id in a plain-text
-sidecar beside `job.json`; that durable resume aid is not headless runtime state
-and must never become a `job.json` field.
+Harness process IDs, terminal identities and runtime status never enter `job.json`.
+Interactive workers keep their exact native conversation ID in a harness-specific
+plain-text sidecar beside `job.json`; that durable resume aid is not headless
+runtime state and must never become a `job.json` field.
 
 This avoids duplicate recovery requests.
 `monty resume`, `monty done`, and other lifecycle commands operate from the worker's durable record.
@@ -196,7 +196,7 @@ They are used by humans, the head butler, and worker sessions.
 
 ## Agent harness invocation is a product surface
 
-Monty commands must be easy for Pi and Codex to invoke from natural language instructions.
+Monty commands must be easy for Pi, Codex and Claude to invoke from natural language instructions.
 Generated worker `MONTY.md` files are part of the product.
 They tell worker sessions what Monty commands mean and when to run them.
 
@@ -253,7 +253,7 @@ We need confidence before automation expands.
 ## Configuration should be explicit and environment-friendly
 
 Monty should support both flags and environment variables.
-Important settings include `MONTY_HOME`, `MONTY_BRANCH_PREFIX`, `MONTY_HARNESS`, `MONTY_WT_COMMAND`, `MONTY_PI_COMMAND`, `MONTY_CODEX_COMMAND`, `MONTY_CODEX_YOLO`, and terminal backend options.
+Important settings include `MONTY_HOME`, `MONTY_BRANCH_PREFIX`, `MONTY_HARNESS`, `MONTY_WT_COMMAND`, `MONTY_PI_COMMAND`, `MONTY_CODEX_COMMAND`, `MONTY_CODEX_YOLO`, `MONTY_CLAUDE_COMMAND`, and terminal backend options.
 Persisted user defaults belong in `.monty/settings.json` and are managed through `monty settings`; their mutations use the same one-home lock and atomic replacement path as other Monty JSON state.
 
 Monty is used from development checkouts and installed wrappers.

@@ -1,11 +1,8 @@
 """Private native app-server fixture relaying to the test's fake model endpoint."""
-import json
 import os
 from pathlib import Path
 import select
 import socket
-import subprocess
-import sys
 import threading
 
 

@@ -2,7 +2,7 @@
 
 ![Monty, the head butler](monty.png)
 
-Monty is a small OCaml launcher for running a head agent session that plans work and spins out Pi or Codex worker sessions.
+Monty is a small OCaml launcher for running a head agent session that plans work and launches Pi, Codex or Claude worker sessions.
 Rex is the default execution surface: every tab, split and session is created through the installed `rex` CLI (see [Rex terminal backend](#rex-terminal-backend)).
 Ghostty tabs, windows, and splits remain available with `--terminal ghostty` or `monty settings set terminal ghostty`.
 An optional headless workflow runs server-owned Pi, Codex or Claude processes without opening a terminal.
@@ -14,10 +14,11 @@ Monty handles the glue around the terminal, `wt`, worktrees, manifests, agent ha
 - OCaml with Dune 3.24 or newer.
 - Dune package management, with dependencies declared in `dune-project`.
 - No opam files are used by this repo.
-- `pi` or `codex` on `PATH`, matching the selected harness.
+- The configured `pi`, `codex` or `claude` executable, matching the selected harness.
+- Python 3.9+ on the server PATH for native runtime ownership guards; Claude SDK control additionally needs its configured Python 3.10+ environment and pinned dependency.
+- A configured Monty client service; see [server-owned agents](docs/server-owned-agents.md) for setup and rollout limitations.
 - `wt` on `PATH`.
 - The Rex app with its `rex` CLI on `PATH` for normal launching, or Ghostty on macOS for `--terminal ghostty`.
-- `expect` on `PATH` for interactive Codex terminals (included with macOS).
 - `gh` on `PATH` when using GitHub issues as a project task source.
 
 ## Build
@@ -32,17 +33,17 @@ The lock is generated with Dune 3.24.2 and uses its upstream relocatable OCaml
 5.2.2 compiler packages. Normal builds use this committed lock; no opam files
 or global service installation are required.
 
-Interactive Codex launches use a Monty client service in the
+Interactive and headless launches use a Monty client service in the
 same Monty home and an explicitly configured account profile. See the
 [service workflow](docs/monty-workflows.md#client-service) before rolling out
 this binary. After that one-time setup, plain `monty` starts the service in the
 background when needed and reuses it on later launches; no separate service
 terminal is needed. Use `monty service start` and `monty service stop` to manage
-it explicitly. The same service supports Pi 1.0.2 RPC control and read-only
-mirroring of explicitly selected native Pi session logs. See
-[Pi history and RPC](docs/monty-workflows.md#pi-history-and-rpc) for configuration
-and the native-terminal ownership boundary. Existing native Pi launches and
-headless execution retain their transports.
+it explicitly. The service owns native Pi, Codex and Claude processes, including
+terminal sessions and headless supervisors. It also supports read-only mirroring
+of explicitly selected native history. See [Pi history and RPC](docs/monty-workflows.md#pi-history-and-rpc)
+for the Pi terminal/RPC ownership boundary. An unavailable service never falls
+back to an independent native launch.
 
 ## Install
 
@@ -95,10 +96,10 @@ Preview the commands without changing anything:
 
 ## Start the head butler
 
-Monty automatically installs its CLI skill for both supported harnesses, Codex
-and Pi, using the active native profile. The skill includes the workflow manual;
+Monty automatically installs its CLI skill for Pi, Codex and Claude using the
+active native profile. The skill includes the workflow manual;
 role instructions remain in AGENTS.md / worker MONTY.md. See
-[Skill installation and migration](docs/skills.md). `monty guide` reads the same
+[Skill installation](docs/skills.md). `monty guide` reads the same
 embedded manual without a skill-aware client.
 
 Use the installed `monty` command from any directory:
@@ -107,11 +108,8 @@ Use the installed `monty` command from any directory:
 monty
 ```
 
-With the default Pi harness, this changes to the Monty control-room directory and runs:
-
-```sh
-pi --name "Monty Head Butler"
-```
+With the default Pi harness, this opens a service-owned native Pi terminal in
+the Monty control-room directory, named "Monty Head Butler".
 
 Select Codex for one invocation with `monty --harness codex`, or persist it as
 the Monty default with:
@@ -126,9 +124,8 @@ Inspect settings with `monty settings` or read just this value with
 ## Continue a head-butler conversation
 
 Head-butler conversations may stop without reaching a conclusion or creating a
-Monty task. Codex conversations are registered with Monty's service, which owns
-a durable history mirror; Pi uses its native history. Reopen a saved conversation
-with the corresponding picker:
+Monty task. Conversations are registered with Monty's service, which keeps
+a durable history mirror. Reopen a registered conversation with Monty's picker:
 
 ```sh
 monty continue
@@ -141,8 +138,8 @@ Monty control room:
 monty continue --last
 ```
 
-Or select an exact native session. Pi accepts a session path or id; Codex
-accepts a registered native thread ID:
+Or select an exact registered native session ID. Import a selected older native
+session before continuing it:
 
 ```sh
 monty continue <session>
@@ -150,7 +147,8 @@ monty continue <session>
 
 Continuation is explicit: bare `monty` and `monty start` still create a fresh
 head-butler conversation. Use the same harness that created the conversation,
-selecting it explicitly when needed with `--harness pi` or `--harness codex`.
+selecting it explicitly when needed with `--harness pi`, `--harness codex` or
+`--harness claude`.
 Continuing a conversation does not create a local task, worker, run handoff, or
 entry in `monty list`. The existing `monty resume` and `monty open` commands
 remain worker-task lifecycle commands.
@@ -265,7 +263,7 @@ Use the printed `monty resume <worker-id>` command when you intentionally want a
 
 Agent profiles keep interactive and headless role instructions together with a deliberately limited execution shape: one implementer, zero or more parallel reviewers, and an optional final writer (simplifier or fixer). Monty ships three profiles under `agent-profiles/`:
 
-- `simplified` is the default for new workers: one implementer followed by a separate editing simplifier in the same workspaces. The simplifier answers "can you radically simplify this?", applies useful simplifications, preserves required behavior and safeguards, reruns affected checks, and produces the final handoff. Interactive Pi/Codex instructions arrange the same separate editing agent.
+- `simplified` is the default for new workers: one implementer followed by a separate editing simplifier in the same workspaces. The simplifier answers "can you radically simplify this?", applies useful simplifications, preserves required behavior and safeguards, reruns affected checks, and produces the final handoff. Interactive Pi/Codex/Claude instructions arrange the same separate editing agent.
 - `reviewed` preserves the existing implementer, correctness reviewer, quality reviewer, and fixer behavior.
 - `solo` runs one implementer with self-validation and no reviewer or fixer phases.
 
@@ -305,7 +303,7 @@ monty headless prepare-many \
 Preparation reserves every worker and materializes all of its repo-scoped `wt` worktrees while leaving it `prepared`.
 The output records the effective harness and Codex YOLO setting so the execution mode is visible before a worker is claimed.
 
-### Background Pi and Codex execution
+### Background execution
 
 Run one prepared worker or the entire prepared manifest with the effective harness:
 
@@ -314,7 +312,7 @@ monty headless run issue-123
 monty headless run-many --manifest .monty/runs/run-1/jobs.json
 ```
 
-Both commands start independent background Monty supervisors. A supervisor gets its own process session and file-backed input/output, so closing the calling conversation or terminal does not stop it. The command returns after the supervisor has acquired the worker lock, claimed the task, and written the first phase prompt. The `monty:headless-start:v1` receipt contains the worker and attempt IDs, artifact directory, and the future canonical handoff path. It confirms supervisor startup, not successful model execution. `run-many` performs complete batch preflight first and returns a `monty:headless-start-many:v1` result for every worker; a failed start does not cancel already started workers.
+Both commands submit independent supervisors to the Monty service. Closing the calling conversation or terminal does not stop them; stopping the service shuts down its owned processes. The command returns after the supervisor has acquired the worker lock, claimed the task, and written the first phase prompt. The `monty:headless-start:v1` receipt contains the worker and attempt IDs, artifact directory, and the future canonical handoff path. It confirms supervisor startup, not successful model execution. `run-many` performs complete batch preflight first and returns a `monty:headless-start-many:v1` result for every worker; a failed start does not cancel already started workers.
 
 For a script that needs the final result and exit status, use `--wait`:
 
@@ -329,11 +327,13 @@ Each phase runs in a fresh process with explicit task context, the authoritative
 - `reviewed`: implementer, two isolated reviewers in parallel, then a fixer.
 - `solo`: one implementer with self-validation.
 
-Monty invokes Pi with `--print --mode json --no-session`. No subagent extension or parent Pi session is required. Writer phases use `read,bash,edit,write,grep,find,ls`; reviewers use `read,grep,find,ls` and cannot run shell-based validation. Provider extensions and normal Pi configuration remain available, while the explicit tool allowlist excludes delegation tools. Independent processes and worktrees do not provide a filesystem sandbox. Pi's final event and assistant stop reason are checked as well as its process exit status: a zero exit code with an error or incomplete stream is a failed phase.
+Monty invokes Pi with `--print --mode json --no-session`. No subagent extension or parent Pi session is required. Writer phases use `read,bash,edit,write,grep,find,ls`; reviewers use `read,grep,find,ls` and cannot run shell-based validation. Writer phases retain normal Pi configuration and provider extensions. Reviewers disable extensions, skills and prompt templates as well as mutation-capable tools. Explicit tool allowlists exclude delegation tools. Independent processes and worktrees do not provide a filesystem sandbox. Pi's final event and assistant stop reason are checked as well as its process exit status: a zero exit code with an error or incomplete stream is a failed phase.
 
 Headless profiles always start fresh phases; `--fork` is supported only for interactive Pi workers.
 
 Codex uses `codex exec --ephemeral --json` and preserves command-local trust and configured permissions. With Codex YOLO disabled, writers use `workspace-write`, while reviewers use `read-only`. The existing `codex-yolo` setting continues to apply to Codex only.
+
+Claude uses fresh `--print --verbose --output-format stream-json --no-session-persistence` processes. A phase requires exactly one successful terminal result with a nonempty handoff and valid native UUID; permission denials and incomplete streams fail. Reviewers use restricted/safe modes, read/search tools, empty MCP configuration and disabled hooks. See [server-owned agents](docs/server-owned-agents.md) for native version requirements and remaining validation limits.
 
 Prompts, JSONL events, phase logs, and final messages live in the worker's durable `artifacts/headless/<attempt-id>/` directory. Background supervisor diagnostics and its final result go to `logs/supervisor.log`. Monty captures phase handoffs into worker memory and publishes the canonical `monty:run-handoff:v1` record and pending notice. Failures include the last known phase and artifact paths. A successful run leaves the task open and all worktrees intact.
 
@@ -376,7 +376,7 @@ monty handoff publish issue-123 \
   --risk "Draft PR still requires explicit approval"
 ```
 
-The compact TL;DR is printed directly in that worker's Ghostty session. Because
+The compact handoff is printed directly in that worker's terminal. Because
 the user owns an interactive terminal run, it is not also queued for the head
 butler. Its canonical record remains available for later inspection.
 
@@ -420,9 +420,10 @@ memory.md
 artifacts/
 ```
 
-Interactive Codex workers also get `codex-session-id` after the service registers
-their native thread and before Monty connects the terminal. The plain-text sidecar is durable worker
-memory; the session id never enters `job.json`, and headless Codex runs do not
+Interactive workers also get a harness-specific sidecar: `pi-session-id`,
+`codex-session-id` or `claude-session-id`. The service records the native session
+identity before Monty connects the terminal. The plain-text sidecar is durable
+worker memory; the session ID never enters `job.json`, and headless runs do not
 write it.
 
 Workers are instructed to write important discoveries, blockers, and handoff notes back to this folder.
@@ -756,7 +757,7 @@ monty doctor
 ```
 
 Doctor prints a stable table with `PASS`, `WARN`, and `FAIL` levels plus exact recovery commands.
-The configured command for the selected Pi or Codex harness is required.
+The configured command for the selected Pi, Codex or Claude harness and Python 3.9+ are required.
 The configured wt command is required only when worktree mode is `always`.
 Ghostty and `osascript` are required only for the Ghostty backend.
 The `rex` CLI and a reachable Rex server (`rex-server`, the Rex app normally runs it) are required only for the Rex backend; the recovery names the app or `REX_SERVER`.
@@ -819,8 +820,8 @@ Disable it again with:
 monty settings set codex-yolo false
 ```
 
-Monty also trusts the exact head-butler directory or worker worktree with a
-command-local `-c` override. This only suppresses Codex's initial
+Headless Codex phases trust their exact worker worktrees with command-local
+`-c` overrides. This only suppresses Codex's initial
 directory-trust question; it does not enable YOLO mode or change `config.toml`.
 
 When enabled, Monty creates managed Codex threads with `never` approvals and
@@ -831,13 +832,13 @@ explicitly sets `codex_yolo: true`. Headless Codex still uses its native bypass
 flag. YOLO disables both approval prompts and the Codex sandbox, so only
 enable it when the surrounding environment provides the isolation you need.
 
-Monty also pins `model_reasoning_effort="xhigh"` with a Codex `-c` override for
-every Codex head-butler, launch, and resume command. This takes precedence over
-a lower effort configured in the user's global Codex configuration.
+Monty also pins `model_reasoning_effort="xhigh"` for new managed Codex threads
+and headless phases. This takes precedence over a lower effort configured in
+the user's global Codex configuration.
 Monty likewise sets `tui.vim_mode_default=true`; managed terminals also persist
 it in the selected Codex account's configuration for later sessions. Managed
-terminals enter Vim Normal mode automatically. Codex 0.160.0 forces Insert mode
-at startup, so Monty uses `expect` to send Escape once the native Vim footer
+Codex terminals enter Vim Normal mode automatically. Codex 0.160.0 forces Insert mode
+at startup, so Monty's Python PTY guard sends Escape once the native Vim footer
 appears. Later mode changes remain under your control. Use `/vim` inside Codex
 to toggle Vim bindings for the current session.
 
@@ -847,7 +848,8 @@ Interactive worker launches, retries, and resumes use the invoking shell's
 startup has a different profile. Unset and empty values stay distinct, so
 `mantle off` and a custom `CODEX_HOME` also carry through. Each request captures
 the current environment; it does not pin an account to the task. Start/continue
-and host headless Codex inherit the invoking environment directly.
+and headless execution select the service profile matching the invoking account home;
+native processes receive the service's minimal environment and configured credential references.
 Managed terminals select the configured service profile matching that Codex home.
 Register each Mantle account home in the service configuration once; an explicit
 `MONTY_API_PROFILE` or `monty terminal --profile` must match the same account.
@@ -900,7 +902,7 @@ replacement while remaining separate from lifecycle `job.json` state.
 
 The checkout-binary E2E suite uses a unique temporary `MONTY_HOME` for every scenario.
 It installs fake `wt`, `gh`, pi, Ghostty, `osascript`, and related tools, and uses real temporary Git repositories when repository identity matters.
-The suite covers concurrent mutation, atomic faults, canonical paths, lifecycle recovery, deterministic reconciliation, whole-batch preflight, partial launch recovery, the headless two-phase protocol, generated harness tool arguments, shared run handoffs, pending delivery and acknowledgement, read-only follow-up construction, clean-context chain construction, parser behavior, and doctor exit contracts.
+The suite covers concurrent mutation, atomic faults, canonical paths, lifecycle recovery, deterministic reconciliation, whole-batch preflight, partial launch recovery, headless claim boundaries, native phase arguments, shared run handoffs, pending delivery and acknowledgement, read-only follow-up construction, clean-context chain construction, parser behavior, and doctor exit contracts.
 
 Run the complete validation with:
 

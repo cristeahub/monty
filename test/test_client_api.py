@@ -386,7 +386,8 @@ def fake_suite(home):
     codex.chmod(0o700)
     config=home/'profiles.json';config.write_text(json.dumps({'allow_fixture':True,'profiles':[
         {'id':'default','harness':'codex','command':str(codex),'codex_home':str(native_home),'roots':[str(repo),str(home)]},
-        {'id':'second','harness':'fixture','socket':str(home/'second.sock'),'roots':[str(repo)]}]}))
+        {'id':'second','harness':'fixture','socket':str(home/'second.sock'),'roots':[str(repo)]},
+        {'id':'filesystem-root','harness':'fixture','socket':str(home/'codex.sock'),'roots':['/']}]}))
     service=Service(home,config);c=service.client
     try:
         http_error(401,lambda:c.req('health',headers={'Authorization':'no'}))
@@ -612,6 +613,9 @@ def fake_suite(home):
                  'MONTY_WORKER_DIR':str(job_file.parent),'MONTY_JOB_FILE':str(job_file)}}
         owned=c.cmd('worker-chat',{'op':'start','profile':'default','context':context})
         owned_id=owned['id'];sidecar=job_file.parent/'codex-session-id';saved=sidecar.read_text()
+        rejected=c.cmd('purge-owned-worker',{'op':'purge','conversation':owned_id,'confirm':True},status='rejected')
+        assert rejected['code']==409 and 'owned runtimes' in rejected['message'],rejected
+        assert c.req('conversations/'+owned_id)['sessions'][0]['native_id']==saved
         before=len(server.threads)
         duplicate=c.cmd('duplicate-worker-chat',{'op':'start','profile':'default','context':context},status='rejected')
         assert duplicate['code']==409 and len(server.threads)==before and sidecar.read_text()==saved,duplicate
@@ -619,6 +623,9 @@ def fake_suite(home):
         c.cmd('worker-resume',{'op':'resume','conversation':owned_id,'revision':c.revision(owned_id),'detached':True})
         assert sidecar.read_text()==saved
         c.cmd('worker-release-again',{'op':'release_runtime','conversation':owned_id,'revision':c.revision(owned_id)})
+        c.cmd('purge-released-worker',{'op':'purge','conversation':owned_id,'confirm':True})
+        http_error(410,lambda:c.history(owned_id))
+        assert sidecar.read_text()==saved and json.loads(job_file.read_text())['status']=='launch-requested'
         count=len(server.threads)
         # Exercise the real PTY bridge with a fake TUI: one startup Escape,
         # later Insert left alone, resize forwarding, and native exit status.
@@ -710,6 +717,10 @@ sys.exit(7)
         server.emit(['not-a-json-rpc-object'])
         until(lambda:next(x for x in c.req('conversations') if not x.get('purged'))['sessions'][0]['coverage']['state'],lambda x:x=='unavailable')
         assert tasks_file.read_bytes()==before
+        # Root is a valid explicit workspace boundary; child paths must not be compared with '//'.
+        root_chat = c.cmd('root-workspace', {'op': 'start', 'profile': 'filesystem-root',
+                                           'context': {'workspaces': [str(repo)]}})
+        assert root_chat['sessions'][0]['context']['workspaces'] == [str(repo)]
         print('client API E2E passed')
     finally:
         service.close();server.close()
@@ -913,31 +924,6 @@ def scope_suite(home):
         print('client API account scope passed')
     finally:
         service.close();source.close();other.close()
-
-class Peer:
-    def __init__(self, path):
-        self.sock=socket.socket(socket.AF_UNIX);self.sock.settimeout(10);self.sock.connect(path)
-        self.stream=self.sock.makefile('rb')
-        self.sock.sendall(b'GET / HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n')
-        assert b'101' in self.stream.readline()
-        while self.stream.readline()!=b'\r\n':pass
-        self.counter=0;self.events=[]
-        self.call('initialize',{'clientInfo':{'name':'monty_fixture_peer','version':'1'},'capabilities':{'experimentalApi':True}})
-        self.send({'method':'initialized'})
-    def send(self,value):
-        data=json.dumps(value).encode();mask=os.urandom(4);n=len(data)
-        head=bytes([129,n|128]) if n<126 else b'\x81\xfe'+struct.pack('!H',n)
-        self.sock.sendall(head+mask+bytes(c^mask[i%4] for i,c in enumerate(data)))
-    def call(self,method,params):
-        self.counter+=1;self.send({'id':self.counter,'method':method,'params':params})
-        while True:
-            value=receive(self.stream)
-            if value.get('id')==self.counter:
-                assert 'error' not in value,value
-                return value['result']
-            self.events.append(value)
-    def close(self):
-        self.stream.close();self.sock.close()
 
 class Model(http.server.BaseHTTPRequestHandler):
     def log_message(self,*args):pass

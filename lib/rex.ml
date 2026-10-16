@@ -65,20 +65,56 @@ let argv ?server args =
 
 let render args = args |> List.map Shell.quote |> String.concat " "
 
-let read_all channel = try In_channel.input_all channel with Sys_error _ -> ""
+let read_output stdout stderr =
+  let stdout_fd = Unix.descr_of_in_channel stdout in
+  let stderr_fd = Unix.descr_of_in_channel stderr in
+  let out = Buffer.create 4096 and err = Buffer.create 4096 in
+  let bytes = Bytes.create 4096 in
+  let rec ready descriptors =
+    try let readable, _, _ = Unix.select descriptors [] [] (-1.) in readable
+    with Unix.Unix_error (Unix.EINTR, _, _) -> ready descriptors
+  in
+  let rec read fd =
+    try Unix.read fd bytes 0 (Bytes.length bytes)
+    with Unix.Unix_error (Unix.EINTR, _, _) -> read fd
+  in
+  let rec drain = function
+    | [] -> (Buffer.contents out, Buffer.contents err)
+    | descriptors ->
+        let closed =
+          ready descriptors
+          |> List.filter (fun fd ->
+                 let count = read fd in
+                 if count = 0 then true
+                 else (
+                   Buffer.add_subbytes (if fd = stdout_fd then out else err)
+                     bytes 0 count;
+                   false))
+        in
+        drain (List.filter (fun fd -> not (List.mem fd closed)) descriptors)
+  in
+  drain [ stdout_fd; stderr_fd ]
 
 (* stdout carries JSON, stderr carries diagnostics; they must stay separate.
    rex exits 3 with "... not found" for a missing session, block or client. *)
 let invoke ?server args =
   let args = argv ?server args in
   try
-    let stdout, stdin, stderr =
+    let ((stdout, stdin, stderr) as process) =
       Unix.open_process_args_full (List.hd args) (Array.of_list args) (Unix.environment ())
     in
-    close_out_noerr stdin;
-    let out = read_all stdout in
-    let err = read_all stderr in
-    match Unix.close_process_full (stdout, stdin, stderr) with
+    let out, err =
+      try
+        close_out stdin;
+        read_output stdout stderr
+      with error ->
+        (* A failed read must not leave a child blocked on its remaining pipe. *)
+        (try Unix.kill (Unix.process_full_pid process) Sys.sigkill with
+        | Unix.Unix_error (Unix.ESRCH, _, _) -> ());
+        (try ignore (Unix.close_process_full process) with _ -> ());
+        raise error
+    in
+    match Unix.close_process_full process with
     | Unix.WEXITED 0 -> Ok out
     | status ->
         let detail = String.trim (err ^ out) in

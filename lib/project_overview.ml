@@ -124,20 +124,8 @@ let ensure_task_workspaces ~home ~id ?repo ~wt_command () =
           then Ok ()
           else Error (Printf.sprintf "worker %s workspace identity changed" current.id)
         in
-        let first_worktree =
-          match workspaces with
-          | first :: _ -> first.Job_store.worktree
-          | [] -> None
-        in
-        let updates =
-          [ Job_store.workspaces_update workspaces;
-            Job_store.string "updated_at" (Worker_memory.now_utc ()) ]
-          @
-          match first_worktree with
-          | None -> []
-          | Some path -> [ Job_store.string "last_known_worktree" path ]
-        in
-        Job_store.update_file_unlocked record.path updates)
+        Job_store.update_file_unlocked record.path
+          (Job_store.materialized_workspace_updates workspaces))
   in
   let replace_workspace states replacement =
     states

@@ -1276,20 +1276,8 @@ let persist_materialized_workspaces options (prepared : prepared)
         if same_record prepared current then Ok ()
         else Error (Printf.sprintf "worker %s identity changed during workspace materialization" current.id)
       in
-      let first_worktree =
-        match workspaces with
-        | first :: _ -> first.Job_store.worktree
-        | [] -> None
-      in
-      let updates =
-        [ Job_store.workspaces_update workspaces;
-          Job_store.string "updated_at" (Worker_memory.now_utc ()) ]
-        @
-        match first_worktree with
-        | None -> []
-        | Some path -> [ Job_store.string "last_known_worktree" path ]
-      in
-      Job_store.update_file_unlocked prepared.state_path.job_file updates)
+      Job_store.update_file_unlocked prepared.state_path.job_file
+        (Job_store.materialized_workspace_updates workspaces))
 
 let materialize_workspaces ?expected_statuses options (prepared : prepared) =
   let pending_state (workspace : prepared_workspace) =

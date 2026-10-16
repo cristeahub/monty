@@ -17,7 +17,7 @@ Acknowledgement is idempotent, and reading a pending handoff must never start an
 When the user asks for more detail, use a still-addressable native runner when available; otherwise run `monty handoff follow-up <worker> --question <question>` and inspect only its read-only durable context.
 Use an explicit `monty resume` or `monty headless resume` only when the user asks to continue implementation.
 General head-butler discussions do not need to become tasks merely to remain resumable.
-Use `monty continue`, `monty continue --last`, or `monty continue <session>` only when the user asks to restore a saved head-butler conversation; these commands use harness-native history and do not create a task or resume implementation.
+Use `monty continue`, `monty continue --last`, or `monty continue <session>` only when the user asks to restore a saved head-butler conversation; these commands select registered native sessions and do not create a task or resume implementation. Import selected older native history explicitly before continuation.
 In Monty conversations, a worker job and a task are the same unit of work.
 Do not treat active worker jobs and local tasks as separate concepts in user-facing replies.
 The local task registry is the source of truth for task status.
@@ -175,12 +175,12 @@ Each worker records `rex-terminal.json` (server, session, window, block, client,
 ## Headless
 
 Rex is the default execution surface; Ghostty remains available with `--terminal ghostty`.
-Use the headless harness flow only when the user explicitly requests headless or Pi-subagent execution.
+Use the headless harness flow only when the user explicitly requests headless execution.
 Headless commands must resolve the effective harness through the normal CLI, environment, and persisted-settings precedence.
 When `codex` is persisted as the selected harness, do not add a redundant `--harness codex` flag.
 The Monty server owns native Pi, Codex and Claude processes and their supervisors. Configure the local service before execution; an unavailable service never falls back to an independent native launch. See docs/server-owned-agents.md for current rollout limitations.
-For both harnesses, preflight must confirm the configured executable is available before state mutation.
-No parent subagent tool is needed for standalone execution.
+For every harness, preflight must confirm the configured executable is available before state mutation.
+No parent subagent tool is needed.
 Run headless dry-run first when checking a new batch or when the user asks for a preview:
 
 ```sh
@@ -194,11 +194,11 @@ monty headless prepare-many --manifest .monty/runs/<run-id>/jobs.json
 ```
 
 Headless preparation reserves every job and materializes its Monty-managed `wt` worktree while leaving the job `prepared`.
-Run `monty headless run <worker-id>` or `monty headless run-many --manifest <manifest>` for either harness.
-Both start independent background supervisors and return after the worker is claimed and its first phase prompt is ready.
+Run `monty headless run <worker-id>` or `monty headless run-many --manifest <manifest>` for the selected harness.
+Both submit independent supervisors to the Monty service and return after the worker is claimed and its first phase prompt is ready.
 The startup receipt references the future canonical handoff; it does not assert that model execution succeeded.
-Pi uses non-interactive print/JSON mode; Codex uses non-interactive `codex exec`.
-Neither opens Ghostty. Monty owns phase sequencing, logs, results, and final handoff publication.
+Pi uses non-interactive print/JSON mode, Codex uses `codex exec`, and Claude uses print/stream-JSON mode.
+None opens a terminal. Monty owns phase sequencing, logs, results, and final handoff publication.
 Do not wrap these default background commands in another agent or background shell.
 Use `--wait` only when explicitly waiting for the final result is useful, such as scripts or requested monitoring.
 Independent chains can run concurrently without waiting for earlier tasks to finish.
@@ -212,11 +212,11 @@ The default `simplified` profile runs one implementer followed by one separate e
 Monty captures reviewer reports outside the worktree. Pi reviewers use read-only file tools without bash; Codex reviewers use a read-only sandbox with hooks, MCP integrations and delegation disabled; Claude reviewers expose only read/search tools with those integrations disabled.
 No child may create worktrees, stage, commit, push, open a PR, post remotely, or run `monty done`.
 A successful chain leaves the task open and its worktree intact.
-Never infer completion from Pi runtime status.
+Never infer task completion from native runtime status.
 
 If a process fails after its worker is claimed, leave the worker `launch-requested`.
 Run `monty headless resume <worker-id>` only when the user intentionally requests a fresh successor run.
-Resume directly starts the selected Pi or Codex profile in the background; `--wait` waits for its result.
+Resume submits the selected Pi, Codex or Claude profile to the service in the background; `--wait` waits for its result.
 Never persist a backend, Pi run ID, Codex session ID, async status, or runtime state in `job.json`.
 Interactive Codex workers record their exact conversation only in the durable
 `codex-session-id` sidecar; headless Codex chains must not claim or update it.
@@ -304,7 +304,7 @@ Do not add opam files.
 Rex is the default terminal backend; `monty settings set terminal ghostty|rex` persists another default and `--terminal` or `MONTY_TERMINAL` override it per command. `monty settings set rex-session <session>` names the Rex session (ID or label from `rex ls`) that tabs requested from outside a Rex terminal land in for the active Mantle profile (`rex-session.<profile>` addresses another profile); an empty value clears it, and without a mapping tabs go to a session labelled after the profile. Use `monty settings set harness pi|codex|claude` to persist the default agent harness; `--harness` remains the per-command override. Use `monty settings set branch-prefix <prefix>` to persist the default generated-branch prefix; `--branch-prefix` remains the per-command override.
 Use `monty settings set codex-yolo true|false` to control whether Monty-launched Codex sessions bypass approvals and sandboxing. Treat the enabled value as an explicit high-risk user choice.
 Keep headless state and payload generation in Monty.
-Pi and Codex headless execution use their configured non-interactive commands under Monty's shared background runner.
+Pi, Codex and Claude headless execution use their configured non-interactive commands under Monty's server-owned background runner.
 Do not add a Monty-specific Pi extension or a new persisted backend.
 Use Monty's repo-scoped `ensure-worktree` flow for every workspace's worktree creation and reuse.
 It must use the existing `wt` CLI, validate each selected repo, and automatically answer `wt` repo-selection prompts when branch names collide across repos.
@@ -342,10 +342,11 @@ return their handoff to the supervisor instead; the supervisor publishes.
 ## Skills
 
 Monty automatically installs or refreshes its `monty` CLI skill before starting
-Codex or Pi sessions. This covers head-butler start/continue, worker launch/resume,
-headless phases, and service-managed Codex/Pi sessions. Installation uses the
-selected native profile: `$CODEX_HOME/skills/monty` (default `~/.codex`) or
-`$PI_CODING_AGENT_DIR/skills/monty` (default `~/.pi/agent`). Service sessions use
+Pi, Codex or Claude sessions. This covers head-butler start/continue, worker launch/resume,
+headless phases, and service-managed native sessions. Installation uses the
+selected native profile: `${CODEX_HOME:-$HOME/.codex}/skills/monty`,
+`${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/skills/monty` or
+`${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills/monty`. Service sessions use
 their configured native profile rather than the service process's ambient account.
 Read-only reviewers can read `references/workflows.md` without a shell or host CLI.
 
@@ -558,9 +559,10 @@ Workspace paths must exist inside configured roots, with the first as cwd.
 There must be 1–16 ordered workspaces. Instructions are bounded at 64 KiB.
 Optional `model` and `modelProvider` are separate fields. Optional `task_keys`
 must be exact existing inventory keys. Task links have no lifecycle side effect.
-The response supplies the conversation ID, session ID, exact native thread,
-profile and endpoint. Naming a fresh Codex thread persists its empty rollout so
-another client can resume it before any model work. Starting a conversation by
+The response supplies the conversation ID, session ID, exact native identity
+and profile. Private native endpoints remain server-owned. Naming a fresh Codex
+thread persists its empty rollout so another client can resume it before any model
+work. Starting a conversation by
 itself does not send a model turn.
 
 Other commands use `op` as follows. Stateful conversation commands require its
@@ -570,19 +572,20 @@ a new ID. Repeating an identical accepted command uses its original ID.
 
 | `op` | Additional fields and behavior |
 | --- | --- |
-| `import` | `profile`, `context`, optional `task_keys`; Codex uses `native_id`, Pi uses absolute `session_file`. Pi continues mirroring the selected file without starting a runtime |
+| `import` | `profile`, `context`, optional `task_keys`; Codex and Claude use `native_id`, Pi uses absolute `session_file`. Pi continues mirroring the selected file without starting a runtime |
 | `attach` | Codex only: same fields; verifies the thread is loaded in the selected server, rejoins it and mirrors live activity |
 | `resume` | `conversation`, `revision`, `detached:true`; explicit operator confirmation that prior runtimes were detached, with an idle source check |
 | `send` | `conversation`, `revision` or exact `selected_session`, `text` (at most 8192 bytes); Pi additionally accepts `delivery:"prompt"`, `"steer"` or `"follow_up"` |
 | `interrupt` | `conversation`, `revision` or exact `selected_session`; Codex requires exact `turn_id`; Pi clears queued inputs and aborts active work |
 | `set_model` | Pi only: `conversation`, `revision`, `provider`, `model`; requires idle state and no pending dialogs |
-| `detach` | Pi only: `conversation`, `revision`; closes an idle owned RPC runtime, retains file mirroring |
+| `detach` | `conversation`, `revision`; acknowledges client detachment without cancelling execution or releasing its runtime |
+| `release_runtime` | `conversation`, `revision`; explicitly releases an idle runtime; exit its native terminal first |
 | `respond` | `conversation`, `revision`, `pending_id`, `pending_revision`, native `response` object; reserves exactly one response on that connection |
 | `sync` | `conversation`; explicit snapshot refresh, no model work; no revision required |
 | `switch` | `conversation`, `revision`, destination `profile`, `context`, `mode:"branch"`, optional model/provider |
 | `recover_switch` | `conversation`, `revision`, `transfer`, `confirm_branch:true`; selects an already recorded accepted destination after reading it, without creating/replaying it |
 | `archive` | `conversation`; marks retained archive metadata; no native/task mutation or revision required |
-| `purge` | `conversation`, `confirm:true`; permanent local retention removal, no revision required |
+| `purge` | `conversation`, `confirm:true`; permanent local retention removal, no revision required; rejects owned runtimes or live terminals |
 | `handoff` | Rejected with a precise unsupported-capability explanation; there is no automatic standalone process takeover |
 
 Responses to native approval/user requests preserve the upstream JSON shape;
@@ -612,7 +615,8 @@ Expired or previous-epoch cursors produce HTTP 409 before streaming, or a final
 `resync` event during streaming. Read authoritative snapshots, then reconnect
 using `/health`'s cursor. Provisional token deltas are not durable message copies.
 Disconnecting an HTTP client ends that client's stream; the service keeps
-observing and executing. Cancellation requires `interrupt`.
+observing and executing. Use `interrupt` for a native turn or `cancel_execution`
+with the execution receipt's current `updated_at` to stop a headless supervisor.
 
 ### Pi history and RPC
 
@@ -684,14 +688,16 @@ confirm, `{"value":"answer"}` for select/input/editor, or `{"cancelled":true}`.
 Responses reserve one exact dialog/revision/connection, reject expired replies,
 and can resolve a dialog while its originating prompt is awaiting acknowledgement.
 
-Pi's standalone TUI has no remote attach transport. Existing Ghostty and headless
-Pi launch paths stay native. Keep using the TUI with file mirroring, or stop every
-native writer and explicitly `resume` the imported conversation with
+Pi's standalone TUI has no remote attach transport. Monty-owned terminals run
+that native TUI under the service. To control a session from an unrelated native
+terminal through RPC, stop every native writer and explicitly `resume` the imported conversation with
 `detached:true`. Resume verifies the exact native ID, source path and saved cwd.
 That confirmation is the operator's ownership assertion; Monty cannot prove an
-unrelated native writer stopped. Conversely, `detach` archives a final RPC
-snapshot before closing an idle owned runtime, retaining unflushed setup entries
-even when no native file exists. Native Pi can then continue an existing file.
+unrelated native writer stopped. Conversely, `release_runtime` archives a final
+RPC snapshot before closing an idle owned runtime, retaining unflushed setup
+entries even when no native file exists. `detach` only acknowledges the client's
+detachment and leaves accepted work running. Native Pi can continue an existing
+file after the owned runtime is released.
 Do not run both writers together.
 Service restart resumes file mirroring, clears stale dialog state and leaves RPC
 runtimes disconnected until an explicit resume; uncertain commands are never
@@ -699,9 +705,12 @@ replayed. No Monty-specific Pi extension or second conversation database is used
 
 ### Native terminals and existing chats
 
-`monty terminal` starts a task-free thread on the configured service and execs
-native `codex resume --remote unix://EXACT_SOCKET ... EXACT_THREAD`. It never
-falls back to standalone Codex. By default it selects the configured Codex
+`monty terminal` starts a task-free conversation on the configured service. The
+service opens the native process in an owned PTY and the client forwards bytes
+and terminal size changes. Codex uses
+`codex resume --remote unix://EXACT_SOCKET ... EXACT_THREAD`; Pi and Claude use
+their native session flags. An unavailable service never falls back to an
+independent harness process. By default it selects the configured Codex
 profile matching the terminal's canonical `CODEX_HOME` (or `~/.codex` when unset),
 so Mantle switches select the corresponding account without another environment
 variable. Add each account home to the trusted service configuration once, with
@@ -716,15 +725,14 @@ sessions while their owned history remains readable. Explicit attachment under
 a new name can rebind the same scope; renaming does not bypass purge tombstones.
 `--request-id` permits receipt recovery. `--mode picker|last|exact --session ID`
 selects registered Monty conversations. `--prompt` sends initial native TUI input.
-Worker starts/resumes and Codex head-butler start/continue use this entry point;
+Worker starts/resumes and head-butler start/continue use this entry point;
 Ghostty environment and Monty-managed workspace creation stay in the existing
 launcher. Before attaching, Monty enables `tui.vim_mode_default` in the selected
 Codex account through its native configuration API and passes the same terminal
 override. This also makes Vim the default for later Codex sessions in that account.
-Managed interactive terminals enter Vim Normal mode automatically. Codex 0.160.0
-forces Insert mode during startup despite that setting, so Monty uses `expect`
-(included with macOS) to send Escape once the native Vim footer appears. It
-preserves later user mode changes, terminal resizing and native exit codes.
+Managed Codex terminals enter Vim Normal mode automatically. Codex 0.160.0
+forces Insert mode during startup despite that setting, so the Python PTY guard
+sends Escape once the native Vim footer appears. It preserves later user mode changes, terminal resizing and native exit codes.
 Generated worker commands pass `--worker` to preserve their task link,
 workspace environment and `codex-session-id` sidecar. Task-free/head-butler
 terminals ignore ambient worker identity even when started from a worker shell.
@@ -732,9 +740,9 @@ Every attachment also forwards the caller's `REX_SESSION`, `REX_BLOCK`,
 `REX_SERVER` and `REX_CLIENT` as `terminal_environment`; the service validates
 them and applies them to that native process (and, for Codex, to the thread's
 tool shell environment at start) without storing them in the session context.
-Native runtime IDs are not written to `job.json`. Headless phase supervision and
-Pi launches retain their existing paths. Old authenticated worker scripts are
-recognized for migration and rewritten on explicit resume.
+Native runtime IDs are not written to `job.json`. Interactive workers use
+harness-specific session sidecars. Launch scripts must match the current
+Monty-generated template before resume can rewrite them.
 
 For ad hoc use, invoke `monty terminal --home ...` explicitly. There is no vendor
 binary replacement or shell alias. A stopped service starts from its saved
@@ -792,8 +800,10 @@ records and related receipt content, garbage-collects unshared blobs, and retain
 native-source tombstones preventing immediate reimport. Native deletion never
 implicitly purges Monty's archive. These files are private local storage, not
 end-to-end encrypted remote storage.
-Purge requires owned Pi runtimes to be detached first and never deletes their
-native session files.
+Purge rejects live owned Pi/Claude RPC runtimes, live native terminals and running
+Codex worker leases. Release those runtimes and exit their terminals first; purge
+does not cancel execution. Codex history observed without an owned worker lease
+can still be purged. Native session files are never deleted.
 
 Switching creates a visible independent branch in the same Monty conversation.
 It requires idle source history and no pending requests. It records the exact
@@ -811,8 +821,8 @@ Destination acceptance is recorded before input routing changes. A partially
 accepted transfer remains inspectable; `recover_switch` selects that known session
 without redispatch. If destination identity is unknown, automatic recovery is
 unavailable; do not issue another switch merely because a response was lost.
-Codex and Pi continuations receive the package as explicit user context and may run one
-continuation turn. Bidirectional Pi/Codex switching uses the same archive and
+Native continuations receive the package as explicit user context and may run
+one continuation turn. Cross-harness switching uses the same archive and
 transfer contract. A Pi source with only file mirroring additionally requires
 `detached:true`, since the log cannot prove idle state. The differently shaped
 fixture adapter remains test-only, enabled with `allow_fixture:true`.
@@ -833,8 +843,8 @@ servers. `--real` additionally requires installed Codex and a PTY; it verifies
 the server's private native runtime and terminal, with all inference served by
 a local fixture. The private runtime test passed with Codex 0.162.1.
 The Pi `--real` suite requires Pi 1.0.2, fresh native/system homes and a local
-model fixture; it verifies RPC send/interrupt, shared API observation, native
-file continuation/mirroring and resuming the exact detached native identity.
+model fixture; it verifies RPC send/interrupt, shared API observation, exact
+server-owned PTY resume, native file mirroring and fork identity.
 No private transcript, real provider call, installed-binary replacement or live
 chat migration is needed. Crash injection checkpoints are
 `conversation-after-batch` and `conversation-after-destination` via

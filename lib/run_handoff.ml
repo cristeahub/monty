@@ -23,7 +23,7 @@ type review = {
   summary : string option;
 }
 
-type workspace = {
+type workspace = Job_store.workspace_state = {
   repo : string;
   branch : string option;
   worktree : string option;
@@ -241,16 +241,7 @@ let optional_assoc json name =
   | `Assoc _ as value -> Ok value
   | _ -> Error (Printf.sprintf "run handoff field %S must be an object" name)
 
-let json_of_workspace (workspace : workspace) =
-  `Assoc
-    ([ ("repo", `String workspace.repo) ]
-    @ (match workspace.branch with
-      | None -> []
-      | Some value -> [ ("branch", `String value) ])
-    @
-    match workspace.worktree with
-    | None -> []
-    | Some value -> [ ("worktree", `String value) ])
+let json_of_workspace = Job_store.json_of_workspace
 
 let json_of_workspace_change (change : workspace_change) =
   `Assoc
@@ -648,9 +639,6 @@ let inspect_workspace_change (workspace : Job_store.workspace_state) =
             [] 0 0
       )
 
-let workspace_of_state (workspace : Job_store.workspace_state) =
-  { repo = workspace.repo; branch = workspace.branch; worktree = workspace.worktree }
-
 let ensure_handoff_directories ~home reference =
   let handoffs = handoff_root home in
   let handoff_run = Filename.concat handoffs reference.worker_run_id in
@@ -961,7 +949,7 @@ let publish ~home ~(record : Job_store.record) ?handoff_id ~source ~outcome
                      relative_to_worker;
                    })
           in
-          let workspaces = List.map workspace_of_state current.workspaces in
+          let workspaces = current.workspaces in
           let review =
             { accepted; fixed; rejected; unresolved; summary = review_summary }
           in
@@ -1416,7 +1404,7 @@ let follow_up_json ~home ~(record : Job_store.record) ~(handoff : t) ~question =
            (Ok [])
       |> Result.map List.rev
     in
-    let workspaces = List.map workspace_of_state current.workspaces in
+    let workspaces = current.workspaces in
     let cwd =
       match current.workspaces with
       | first :: _ -> Option.value ~default:first.repo first.worktree

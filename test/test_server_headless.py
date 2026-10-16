@@ -5,6 +5,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import time
 
 from test_client_api import BIN, Service, until
 from test_tasks_api import fixture
@@ -32,6 +33,9 @@ row={'worker':worker,'pid':os.getpid(),'parents':parents,'args':args,
      'yolo':os.environ.get('MONTY_CODEX_YOLO'),'private_nonce_cleared':not os.environ.get('MONTY_SERVER_NONCE'),
      'scoped_auth':os.environ.get('OPENAI_API_KEY')=='scoped-test-key'}
 with open(Path(ROOT)/'phases.jsonl','a') as log:log.write(json.dumps(row)+'\n')
+if worker=='native-failure' and not (Path(ROOT)/'allow-native-failure').exists():sys.exit(7)
+if worker=='cancelled' and not (Path(ROOT)/'allow-cancelled').exists():
+ (Path(ROOT)/'cancelled-started').touch();time.sleep(60)
 if worker in ('wait-a','wait-b'):
  marker=Path(ROOT)/('ready-'+worker)
  if not marker.exists():
@@ -83,13 +87,17 @@ else:
         subset=manifest.parent/'batch.json';subset.write_text(json.dumps({'jobs':jobs[:2]}))
         result=cli('headless','run-many','--wait','--manifest',str(subset),'--harness','claude',
                    '--claude-command',str(actor),env_override={'MONTY_CODEX_YOLO':'false'})
-        assert result['success'],result
+        assert result['success'] and result['schema']=='monty:headless-claude-run-many:v1' and result['harness']=='claude',result
+        for worker in result['results']:
+            assert worker['result']['schema']=='monty:headless-claude-run:v1' and worker['result']['harness']=='claude',worker
         # Run and explicit resume both submit a server-owned process.
         started=cli('headless','run','successor','--harness','claude','--claude-command',str(actor))
         assert started['run_status']=='started' and 'harness_call' not in started,started
         finished=until(lambda:service.client.req('commands/'+started['command']),
                        lambda receipt:receipt['status'] in ('finished','failed'))
         assert finished['status']=='finished' and finished['result']['exit_code']==0,finished
+        completed=json.loads(finished['result']['stdout'])
+        assert completed['schema']=='monty:headless-claude-run:v1' and completed['harness']=='claude',completed
         resumed=cli('headless','resume','successor','--harness','claude','--claude-command',str(actor))
         assert resumed['run_status']=='started' and resumed['attempt_id']!=started['attempt_id'],resumed
         until(lambda:service.client.req('commands/'+resumed['command']),lambda receipt:receipt['status']=='finished')
@@ -108,5 +116,30 @@ else:
           '--strict-mcp-config' in row['args'] and '--setting-sources' in row['args'] for row in reviewers)
         inventory=service.client.req('inventory')['tasks']
         assert inventory and all(task['status']=='open' for task in inventory),inventory
-        print('Headless: server ancestry, fresh phases, permission pinning, reviewer capabilities, concurrent wait batch and still-open tasks passed')
+        failures=manifest.parent/'failures.json'
+        failures.write_text(json.dumps({'jobs':[
+            {**jobs[0],'id':name,'title':name,'branch':'cto/'+name,'agent_profile':'solo'}
+            for name in ('native-failure','cancelled')]}))
+        cli('headless','prepare-many','--manifest',str(failures),'--harness','claude','--claude-command',str(actor))
+        request={'op':'headless_start','profile':'claude','worker':'native-failure'}
+        failure=service.client.cmd('native-failure',request,status='failed')
+        assert failure['exit_code']!=0 and Path(failure['log']).is_file(),failure
+        assert service.process.poll() is None and service.client.req('health')
+        (root/'allow-native-failure').touch()
+        cli('headless','resume','native-failure','--wait','--harness','claude','--claude-command',str(actor))
+        service.client.req('commands/cancelled',{'op':'headless_start','profile':'claude','worker':'cancelled'})
+        started=until(lambda:service.client.req('commands/cancelled'),lambda receipt:
+                      receipt['status']=='running' and receipt.get('result',{}).get('run_status')=='started')
+        until(lambda:(root/'cancelled-started').exists())
+        cancellation=service.client.cmd('cancel-supervisor',{'op':'cancel_execution','command':'cancelled',
+            'updated_at':started['updated_at']})
+        assert cancellation['status']=='outcome_unknown',cancellation
+        # Late startup/exit notifications must preserve the explicit unknown outcome.
+        time.sleep(.1)
+        cancelled=service.client.req('commands/cancelled')
+        assert cancelled['status']=='outcome_unknown' and 'explicitly cancelled' in cancelled['result']['reason'],cancelled
+        assert service.process.poll() is None and service.client.req('health')
+        (root/'allow-cancelled').touch()
+        cli('headless','resume','cancelled','--wait','--harness','claude','--claude-command',str(actor))
+        print('Headless: server ancestry, fresh phases, policy pinning, concurrent batches, failure/cancellation recovery and still-open tasks passed')
     finally:service.close()

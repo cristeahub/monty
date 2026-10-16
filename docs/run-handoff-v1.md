@@ -1,8 +1,8 @@
 # Monty run handoff v1
 
-`monty:run-handoff:v1` is the canonical record for one finished interactive,
-Pi, or Codex worker run. Publishing this record does not change `job.json`, the
-linked task status, or any worktree lifecycle.
+`monty:run-handoff:v1` is the canonical record for one finished interactive or
+headless Pi, Codex or Claude worker run. Publishing this record does not change
+`job.json`, the linked task status, or any worktree lifecycle.
 
 Canonical files use this immutable identity:
 
@@ -17,7 +17,7 @@ record has these fields:
 | --- | --- |
 | `schema` | Always `monty:run-handoff:v1`. |
 | `id`, `finished_at` | Stable idempotency key and UTC publication time. |
-| `source` | `interactive`, `headless-pi`, or `headless-codex`. |
+| `source` | `interactive`, `headless-pi`, `headless-codex`, or `headless-claude`. |
 | `outcome` | `ready-for-review`, `needs-attention`, or `failed`. |
 | `worker` | Canonical worker run id, worker id, title, task key when present, and open job status observed at publication. |
 | `summary` | Dense bounded “what I did” summary. |
@@ -35,7 +35,7 @@ reloads the exact worker identity and atomically writes the canonical record,
 rendering, and notice while holding the one-home lock. Reusing the same handoff
 id returns the existing canonical run and never reopens an acknowledged notice.
 Interactive publication prints the compact rendering directly in the worker's
-Ghostty session and creates an already-acknowledged delivery receipt, so it is
+terminal and creates an already-acknowledged delivery receipt, so it is
 not surfaced again by the head butler. Headless publication leaves its notice
 pending for head-butler delivery.
 
@@ -70,8 +70,8 @@ Changing code requires an explicit `monty resume` or `monty headless resume`.
 Committing, pushing, opening a draft PR, and `monty done` remain separate,
 explicitly approved actions.
 
-## Standalone background runs
+## Server-owned background runs
 
-Pi and Codex process runners publish this same handoff directly. Their startup receipt references its future canonical path; a startup receipt is not a completed run. Process attempts use `monty:headless-attempt:v2`. Per-phase events and `logs/supervisor.log` remain in the attempt directory. `job.json` retains the existing open lifecycle state.
+The server-owned Pi, Codex and Claude supervisors publish this same handoff directly. Their startup receipt references its future canonical path; a startup receipt is not a completed run. Process attempts use `monty:headless-attempt:v2`. Per-phase events and `logs/supervisor.log` remain in the attempt directory. `job.json` retains the existing open lifecycle state.
 
-Claude headless runs use the `headless-claude` source. Native session identity remains in conversation records/sidecars, outside job.json.
+Native session identity remains in conversation records and harness-specific sidecars, outside `job.json`.

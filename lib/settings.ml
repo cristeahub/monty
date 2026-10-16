@@ -132,33 +132,24 @@ let to_json settings =
       ( "rex_sessions",
         `Assoc (List.map (fun (profile, session) -> (profile, `String session)) settings.rex_sessions) ) ]
 
-let set_harness ~home harness =
+let update ~home transform =
   State_store.with_lock ~home (fun () ->
       let ( let* ) = Result.bind in
       let* settings = load ~home in
       State_store.write_json_atomic ~path:(path ~home)
-        (to_json { settings with harness = Some harness }))
+        (to_json (transform settings)))
+
+let set_harness ~home harness =
+  update ~home (fun settings -> { settings with harness = Some harness })
 
 let set_codex_yolo ~home codex_yolo =
-  State_store.with_lock ~home (fun () ->
-      let ( let* ) = Result.bind in
-      let* settings = load ~home in
-      State_store.write_json_atomic ~path:(path ~home)
-        (to_json { settings with codex_yolo }))
+  update ~home (fun settings -> { settings with codex_yolo })
 
 let set_branch_prefix ~home branch_prefix =
-  State_store.with_lock ~home (fun () ->
-      let ( let* ) = Result.bind in
-      let* settings = load ~home in
-      State_store.write_json_atomic ~path:(path ~home)
-        (to_json { settings with branch_prefix = Some branch_prefix }))
+  update ~home (fun settings -> { settings with branch_prefix = Some branch_prefix })
 
 let set_agent_profile ~home agent_profile =
-  State_store.with_lock ~home (fun () ->
-      let ( let* ) = Result.bind in
-      let* settings = load ~home in
-      State_store.write_json_atomic ~path:(path ~home)
-        (to_json { settings with agent_profile = Some agent_profile }))
+  update ~home (fun settings -> { settings with agent_profile = Some agent_profile })
 
 let effective_harness ~getenv ~home override =
   match override with
@@ -200,11 +191,7 @@ let effective_branch_prefix ~getenv ~home override =
                  | _ -> "monty"))
 
 let set_terminal ~home terminal =
-  State_store.with_lock ~home (fun () ->
-      let ( let* ) = Result.bind in
-      let* settings = load ~home in
-      State_store.write_json_atomic ~path:(path ~home)
-        (to_json { settings with terminal = Some terminal }))
+  update ~home (fun settings -> { settings with terminal = Some terminal })
 
 (* --terminal, then a valid MONTY_TERMINAL, then the persisted setting, then
    Rex. An unrecognized environment value falls through, as it always has. *)
@@ -230,19 +217,14 @@ let rex_session_for settings profile =
    session Monty owns for it. *)
 let set_rex_session ~home ~profile value =
   let value = match String.trim value with "" -> None | value -> Some value in
-  State_store.with_lock ~home (fun () ->
-      let ( let* ) = Result.bind in
-      let* settings = load ~home in
-      let settings =
-        match profile with
-        | None -> { settings with rex_session = value }
-        | Some profile ->
-            let others = List.remove_assoc profile settings.rex_sessions in
-            { settings with
-              rex_sessions =
-                (match value with None -> others | Some value -> others @ [ (profile, value) ]) }
-      in
-      State_store.write_json_atomic ~path:(path ~home) (to_json settings))
+  update ~home (fun settings ->
+      match profile with
+      | None -> { settings with rex_session = value }
+      | Some profile ->
+          let others = List.remove_assoc profile settings.rex_sessions in
+          { settings with
+            rex_sessions =
+              (match value with None -> others | Some value -> others @ [ (profile, value) ]) })
 
 let effective_agent_profile ~home override =
   match override with

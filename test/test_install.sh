@@ -27,7 +27,8 @@ same_home_argument=$repo
 mkdir -p "$repo/.monty" "$fake_bin" "$home"
 cp "$installer" "$repo/install.sh"
 cp "$source_version" "$repo/.monty/version"
-cp -R "$(dirname "$installer")/agent-profiles" "$repo/agent-profiles"
+# Dune's sandbox may expose declared inputs as symlinks; materialize the fixture.
+cp -RL "$(dirname "$installer")/agent-profiles" "$repo/agent-profiles"
 chmod 600 "$repo/.monty/version"
 
 cat > "$fake_bin/dune" <<'EOF'

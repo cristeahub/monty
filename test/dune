@@ -5,10 +5,25 @@
  (deps (source_tree ../agent-profiles)))
 
 (test
+ (name test_codex_rpc)
+ (modules test_codex_rpc)
+ (libraries monty lwt.unix cohttp-lwt-unix websocket unix yojson))
+
+(test
+ (name test_native_rpc)
+ (modules test_native_rpc)
+ (libraries monty lwt.unix unix yojson))
+
+(test
  (name test_cli_e2e)
  (modules test_cli_e2e)
  (libraries monty unix yojson)
  (deps ../bin/main.exe (source_tree ../agent-profiles)))
+
+(test
+ (name test_headless_boundaries)
+ (modules test_headless_boundaries)
+ (libraries monty unix yojson))
 
 (rule
  (alias runtest)

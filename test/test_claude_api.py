@@ -4,13 +4,12 @@ import concurrent.futures
 import json
 import os
 from pathlib import Path
-import signal
 import shutil
 import subprocess
 import sys
 import tempfile
 import time
-from test_client_api import Client, Service, until, http_error
+from test_client_api import Service, until, http_error
 
 BIN=str(Path(sys.argv[1]).resolve())
 SDK=Path(__file__).with_name('fake_claude_sdk').resolve()
@@ -73,6 +72,9 @@ for line in sys.stdin:
         assert starts[0]['add_dirs']==[str(second_repo)]
         assert not (other/'calls.jsonl').exists()
         assert (account/'skills/monty/SKILL.md').exists()
+        rejected=c.cmd('purge-owned-rpc',{'op':'purge','conversation':cid,'confirm':True},status='rejected')
+        assert rejected['code']==409 and 'owned runtimes' in rejected['message'],rejected
+        assert c.req('conversations/'+cid)['sessions'][0]['native_id']==native
         c.cmd('send-once',{'op':'send','conversation':cid,'selected_session':sess['id'],'text':'approval'})
         pending=until(lambda:c.req('conversations/'+cid)['sessions'][0].get('pending'))[0]
         c.cmd('detach-busy',{'op':'detach','conversation':cid,'revision':c.revision(cid)})
@@ -117,8 +119,10 @@ for line in sys.stdin:
         assert terminal.returncode==0,terminal.stderr
         record=until(lambda:json.loads((account/'terminal.json').read_text()) if (account/'terminal.json').exists() else None)
         assert record['tty'] and record['pid']!=service.process.pid
-        chat=next(x for x in c.req('conversations') if x['sessions'][0]['native_id']==record['native'])
+        chat=next(x for x in c.req('conversations') if x['sessions'] and x['sessions'][0]['native_id']==record['native'])
         sid=chat['sessions'][0]['id'];cid=chat['id'];os.kill(record['pid'],0)
+        rejected=c.cmd('purge-live-terminal',{'op':'purge','conversation':cid,'confirm':True},status='rejected')
+        assert rejected['code']==409 and c.req('terminals/'+sid)['running'],rejected
         c.cmd('resize',{'op':'terminal_resize','conversation':cid,'selected_session':sid,'rows':37,'cols':99})
         c.cmd('input',{'op':'terminal_input','conversation':cid,'selected_session':sid,'data':base64.b64encode(b'hello\n').decode()})
         assert c.req('commands/input')['request']['data']=='[terminal input omitted]'
@@ -126,6 +130,8 @@ for line in sys.stdin:
         assert out['running']
         c.cmd('exit',{'op':'terminal_input','conversation':cid,'selected_session':sid,'data':base64.b64encode(b'/exit\n').decode()})
         until(lambda:c.req('terminals/'+sid)['running'],lambda x:not x)
+        c.cmd('purge-ended-terminal',{'op':'purge','conversation':cid,'confirm':True})
+        http_error(410,lambda:c.history(cid))
         # A detached client cannot release the worker fence, and an inherited
         # workspace map cannot redirect a worker away from its durable record.
         task_context=root/'context.md';task_context.write_text('Bounded native worker fixture.\n')
@@ -150,7 +156,7 @@ for line in sys.stdin:
         assert run.returncode==0,run.stderr
         record=until(lambda:json.loads((account/'terminal.json').read_text()),lambda r:r['native']!=record['native'])
         native=record['native'];assert (worker_dir/'claude-session-id').read_text().strip()==native
-        chat=next(x for x in c.req('conversations') if x['sessions'][0]['native_id']==native)
+        chat=next(x for x in c.req('conversations') if x['sessions'] and x['sessions'][0]['native_id']==native)
         worker_context=chat['sessions'][0]['context']
         assert worker_context['workspaces']==[str(repo)]
         assert worker_context['environment']['MONTY_WORKSPACE_1']==str(repo)
@@ -176,7 +182,7 @@ for line in sys.stdin:
             run=subprocess.run(attach,cwd=repo,env=env,capture_output=True,text=True,timeout=15)
             assert run.returncode==0,run.stderr
             record=until(lambda:json.loads((account/'terminal.json').read_text()),predicate)
-            chat=next(x for x in c.req('conversations') if x['sessions'][0]['native_id']==record['native'])
+            chat=next(x for x in c.req('conversations') if x['sessions'] and x['sessions'][0]['native_id']==record['native'])
             assert not any(k.startswith('REX_') for k in chat['sessions'][0]['context']['environment']),chat
             c.cmd('rex-exit-'+record['native'],{'op':'terminal_input','conversation':chat['id'],'selected_session':chat['sessions'][0]['id'],'data':base64.b64encode(b'/exit\n').decode()})
             until(lambda:c.req('terminals/'+chat['sessions'][0]['id'])['running'],lambda x:not x)
@@ -207,7 +213,7 @@ for line in sys.stdin:
         run=subprocess.run([BIN,'terminal','--harness','claude','--home',str(root)],cwd=repo,env=env,capture_output=True,text=True,timeout=15)
         assert run.returncode==0,run.stderr
         crashed=until(lambda:json.loads((account/'terminal.json').read_text()),lambda r:r['native']!=native)
-        chat=next(x for x in c.req('conversations') if x['sessions'][0]['native_id']==crashed['native'])
+        chat=next(x for x in c.req('conversations') if x['sessions'] and x['sessions'][0]['native_id']==crashed['native'])
         sid=chat['sessions'][0]['id']
         service.process.kill();service.process.wait(timeout=5)
         service.start();c=service.client
@@ -219,5 +225,10 @@ for line in sys.stdin:
         assert not retained['running'] and retained['code']=='outcome_unknown'
         assert ('NATIVE CLAUDE '+crashed['native']).encode() in base64.b64decode(retained['data'])
         assert c.req('conversations/'+chat['id'])['sessions'][0]['terminal'] is False
+        released=c.cmd('purge-candidate-start',{'op':'start','profile':'claude','context':context})
+        released_id=released['id']
+        c.cmd('purge-candidate-release',{'op':'release_runtime','conversation':released_id,'revision':c.revision(released_id)})
+        c.cmd('purge-released-rpc',{'op':'purge','conversation':released_id,'confirm':True})
+        http_error(410,lambda:c.history(released_id))
         print('Claude API: scoped SDK, ordered workspaces, receipts, approvals/questions, detach, exact resume, restart and server-owned PTY passed')
     finally:service.close()

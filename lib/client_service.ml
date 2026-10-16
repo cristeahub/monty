@@ -742,6 +742,13 @@ let terminal_command t op request =
     (fun () -> if terminal.Owned_terminal.alive then Owned_terminal.send terminal control else Lwt.return_unit)
     (fun error -> if terminal.Owned_terminal.alive then Lwt.fail error else Lwt.return_unit)
    else Owned_terminal.send terminal control) >|= fun () -> obj ["submitted",`Bool true]
+let finish_headless t id status result =
+  locked t.home (fun () ->
+    let r=receipt t.home id in
+    if List.mem (s "status" r) ["accepted";"running"] then
+      write (receipt_path t.home id)
+        (puts ["status",string status;"result",redact result;"updated_at",now ()] r));
+  event t(obj["type",string "command_changed";"command",string id])
 let headless_start t id request =
   let p=profile t (required "profile" request) in
   let harness=get(Harness.of_string(s "harness" p) |> Result.map_error(fun (`Msg m)->m)) in
@@ -791,28 +798,70 @@ let headless_start t id request =
   let log=file t.home ["conversation-executions";component id ^ ".log"] in
   locked t.home(fun ()->get(State_store.ensure_real_directory ~label:"execution artifacts" ~mode:0o700 (Filename.dirname log)));
   let fd=get(State_store.open_verified_lock log [Unix.O_WRONLY;Unix.O_CREAT;Unix.O_APPEND]) in
-  Unix.fchmod fd 0o600;
-  let child=Owned_process.start ~mode:"supervisor" ~locks:[worker_lock] ~env ~cwd:t.home args in
+  let channel=try
+    Unix.fchmod fd 0o600;
+    Lwt_io.of_fd ~mode:Lwt_io.output (Lwt_unix.of_unix_file_descr fd)
+    with error->Unix.close fd;raise error in
+  Lwt.catch (fun () -> Lwt.return(Owned_process.start ~mode:"supervisor" ~locks:[worker_lock] ~env ~cwd:t.home args))
+    (fun error -> Lwt_io.close channel >>= fun () -> Lwt.fail error) >>= fun child ->
   Hashtbl.add t.active_workers record.path id;
-  let channel=Lwt_io.of_fd ~mode:Lwt_io.output (Lwt_unix.of_unix_file_descr fd) in
   Hashtbl.add t.executions id child;
   Hashtbl.add t.supervisors id (nonce,child#pid);
-  Lwt.async(fun () -> Lwt.finalize (fun () ->
-    let buffer=Buffer.create 4096 in
-    let rec stdout () = Lwt_io.read_line_opt child#stdout >>= function None->Lwt.return(Buffer.contents buffer)|Some line->
-      if String.starts_with ~prefix:"MONTY_STARTED " line then (
-        let value=Yojson.Safe.from_string(String.sub line 14 (String.length line-14)) in
-        ignore(finish t.home id "running" (put "command" (string id) value));
-        event t(obj["type",string "command_changed";"command",string id]))
-      else Buffer.add_string buffer (line ^ "\n");
-      if Buffer.length buffer>16_777_216 then fail 413 "supervisor result exceeds 16 MiB";
-      stdout () in
-    Lwt.both (stdout ()) (Lwt_io.read child#stderr) >>= fun (out,err) ->
-    Lwt_io.write channel (out ^ err) >>= fun () -> child#status >|= fun status ->
-    let result=obj["exit_code",`Int(match status with Unix.WEXITED n->n|_->1);"stdout",string out;"stderr",string err;"log",string log] in
-    ignore(finish t.home id (if status=Unix.WEXITED 0 then "finished" else "failed") result);
-    event t(obj["type",string "command_changed";"command",string id]))
-    (fun () -> Owned_process.close child >>= fun () -> Hashtbl.remove t.supervisors id;Hashtbl.remove t.active_workers record.path;Lwt_io.close channel));
+  let out=Buffer.create 4096 and err=Buffer.create 4096 in
+  let result code extra=obj(["exit_code",code;"stdout",string(Buffer.contents out);
+    "stderr",string(Buffer.contents err);"log",string log] @ extra) in
+  let monitor () =
+    let line=Buffer.create 4096 in
+    let deliver () =
+      let value=Buffer.contents line in Buffer.clear line;
+      if String.starts_with ~prefix:"MONTY_STARTED " value then
+        finish_headless t id "running"
+          (put "command" (string id) (Yojson.Safe.from_string(String.sub value 14 (String.length value-14))))
+      else Buffer.add_string out (value ^ "\n") in
+    let read source accept eof =
+      let chunk=Bytes.create 4096 and size=ref 0 in
+      let rec loop () = Lwt_io.read_into source chunk 0 (Bytes.length chunk) >>= fun count ->
+        if count=0 then (eof ();Lwt.return_unit) else (
+          size:= !size+count;
+          if !size>16_777_216 then fail 413 "supervisor stream exceeds 16 MiB";
+          Lwt_io.write_from_exactly channel chunk 0 count >>= fun () -> Lwt_io.flush channel >>= fun () ->
+          accept chunk count;loop ()) in
+      loop () in
+    let failed,wake=Lwt.wait () in
+    let watch promise=Lwt.on_failure promise (fun error ->
+      if Lwt.is_sleeping failed then Lwt.wakeup_later_exn wake error);promise in
+    let stdout=watch(read child#stdout (fun chunk count ->
+      for index=0 to count-1 do
+        let value=Bytes.get chunk index in
+        if value='\n' then deliver () else Buffer.add_char line value
+      done) (fun () -> if Buffer.length line>0 then deliver ())) in
+    let stderr=watch(read child#stderr (fun chunk count -> Buffer.add_subbytes err chunk 0 count) (fun () -> ())) in
+    (* A rejected reader must stop the supervisor even when the other pipe is
+       still open; Lwt.both alone waits for both readers to settle. *)
+    Lwt.pick [(Lwt.both stdout stderr >|= fun _ -> ());failed] >>= fun () ->
+    child#status >|= fun status ->
+    finish_headless t id (if status=Unix.WEXITED 0 then "finished" else "failed")
+      (result (`Int(match status with Unix.WEXITED n->n|_->1)) []) in
+  let cleanup () = Lwt.finalize (fun () -> Owned_process.close child)
+    (fun () ->
+      Hashtbl.remove t.executions id;
+      Hashtbl.remove t.supervisors id;
+      Hashtbl.remove t.active_workers record.path;
+      Lwt_io.close channel) in
+  Lwt.async(fun () -> Lwt.catch (fun () ->
+    Lwt.finalize (fun () -> Lwt.catch monitor (fun error ->
+      let reason="supervisor monitoring failed; inspect retained output before retrying" in
+      Lwt.catch (fun () -> Lwt_io.write_line channel (reason ^ ": " ^ Printexc.to_string error) >>= fun () -> Lwt_io.flush channel)
+        (fun _ -> Lwt.return_unit) >|= fun () ->
+      finish_headless t id "outcome_unknown" (result `Null ["reason",string reason]))) cleanup)
+    (fun error ->
+      let reason="supervisor cleanup or receipt finalization failed; inspect execution artifacts before retrying" in
+      let report error = Lwt.catch (fun () ->
+        Lwt_io.eprintf "Monty execution %s: %s (%s); log: %s\n%!" id reason (Printexc.to_string error) log)
+        (fun _ -> Lwt.return_unit) in
+      Lwt.catch (fun () ->
+        finish_headless t id "outcome_unknown" (result `Null ["reason",string reason]);
+        Lwt.return_unit) report >>= fun () -> report error));
   Lwt.return(obj["worker_id",string record.id;"status",string "submitted";"command",string id;"log",string log])
 let execute t ~id request =
   if t.stopping then fail 503 "Monty service is shutting down; inspect receipts before retrying";
@@ -825,7 +874,8 @@ let execute t ~id request =
       let receipt=receipt t.home target in
       if field "updated_at" request<>field "updated_at" receipt || s "status" receipt<>"running" then fail 409 "execution receipt changed; refresh before cancelling";
       let child=match Hashtbl.find_opt t.executions target with Some child->child|None->fail 409 "execution ownership is unavailable; inspect recovery evidence" in
-      Owned_process.close child >|= fun () -> finish t.home target "outcome_unknown" (obj["reason",string "explicitly cancelled; inspect artifacts before any fresh execution"])
+      finish_headless t target "outcome_unknown" (obj["reason",string "explicitly cancelled; inspect artifacts before any fresh execution"]);
+      Owned_process.close child >|= fun () -> Conversation_store.receipt t.home target
   | "headless_start" -> headless_start t id request
   | "terminal_open"|"terminal_input"|"terminal_resize" -> terminal_command t op request
   | "start"|"import"|"attach" -> register t request ~mode:op
@@ -850,8 +900,19 @@ let execute t ~id request =
   | "archive" -> Lwt.return (archive t.home (required "conversation" request))
   | "purge" -> if field "confirm" request<>`Bool true then fail 400 "purge requires confirm=true";
       let cid=required "conversation" request in
-      if xs "sessions" (load t.home cid) |> List.exists (fun sess -> s "harness" sess="pi" && pi_find t sess<>None) then
-        fail 409 "detach owned Pi runtimes before purging their archive";
+      let owns_runtime sess =
+        let sid=s "id" sess in
+        (match Hashtbl.find_opt t.terminals sid with
+        | Some terminal -> terminal.Owned_terminal.alive | None -> false)
+        || List.exists (fun clients ->
+          match Hashtbl.find_opt clients sid with
+          | Some rpc -> rpc.Native_rpc.alive | None -> false) [t.pi_clients;t.claude_clients]
+        || Hashtbl.fold (fun _ fence owned ->
+          owned || (fence.session_id=sid && fence.process#state=Lwt_process.Running)) t.worker_fences false
+      in
+      (* Runtime callbacks and worker leases still need the retained session identity. *)
+      if List.exists owns_runtime (xs "sessions" (load t.home cid)) then
+        fail 409 "release owned runtimes and exit native terminals before purging their archive";
       Lwt.return (purge t.home cid)
   | "handoff" -> Lwt.fail (Failure (501,"0.160.0 cannot verify standalone runtime release or fence old terminal clients; detach manually, then explicitly resume through the selected service"))
   | "detach" -> let cid,c,_=current t request in ensure_revision c request;Lwt.return(obj["conversation",string cid;"detached",`Bool true])
@@ -914,7 +975,11 @@ let submit t id request =
     let run f=if List.mem (s "op" request) ["respond";"interrupt";"cancel_execution"] then f () else Lwt_mutex.with_lock t.commands f in
     run (fun () ->
     ignore (finish t.home id "running" `Null);
-    Lwt.catch (fun () -> execute t ~id request >|= fun result -> if s "op" request<>"headless_start" || s "status" (receipt t.home id)<>"finished" then ignore(finish t.home id (if s "op" request="headless_start" then "running" else "finished") result))
+    Lwt.catch (fun () -> execute t ~id request >|= fun result ->
+      if s "op" request="headless_start" then (
+        if field "run_status" (field "result" (receipt t.home id))<>string "started" then
+          finish_headless t id "running" result)
+      else ignore(finish t.home id "finished" result))
       (fun e -> let code,message=match e with Failure(c,m)->c,m|_->500,"command outcome could not be established" in
         let status=if code<500 || code=501 then "rejected" else "outcome_unknown" in
         ignore(finish t.home id status (obj ["code",`Int code;"message",string message]));Lwt.return_unit)

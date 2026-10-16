@@ -76,12 +76,17 @@ ordered workspace identity before starting a terminal and writes its sidecar.
 Absence is reported; explicit `--fresh` creates a distinct session. Selecting a
 registered older session uses a receipt and conversation revision.
 
-`detach` removes a client association without cancelling accepted work.
+`detach` acknowledges client detachment without cancelling accepted work.
 `release_runtime` explicitly releases an idle runtime's ownership. Codex worker
 sessions hold the worker fence until release or native cleanup, including server
 loss; their shared account adapter remains server-owned. `interrupt` requests
 native interruption; `cancel_execution` targets an execution receipt and checks
 its `updated_at` value. These are separate from disconnecting a client or closing a terminal.
+
+Purging retained history rejects live owned Pi/Claude RPC runtimes, live native
+terminals and running Codex worker leases. Release the runtime and exit its
+terminal first. Purge never cancels execution or deletes native session files;
+Codex history observed without an owned worker lease remains purgeable.
 
 Headless commands submit a server-owned supervisor, retaining the existing worker
 locks, pinned profiles, phase sequencing, artifacts and handoffs. The startup

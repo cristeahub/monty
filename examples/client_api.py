@@ -8,7 +8,6 @@ A receipt is polled; an unknown outcome is never automatically resubmitted.
 import argparse
 import json
 import pathlib
-import sys
 import time
 import urllib.request
 

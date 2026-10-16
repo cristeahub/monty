@@ -10,6 +10,7 @@ Environment knobs:
                     (a lost or garbled response after a successful creation).
   REX_FAKE_NO_APP=1 / REX_FAKE_TWO_APPS=1  app client inventory variants.
   REX_FAKE_NO_SELECT=1  the app offers no session.select action.
+  REX_FAKE_STDERR_BYTES=N  write N diagnostic bytes before any command output.
 """
 import json
 import os
@@ -68,6 +69,11 @@ while i < len(args):
 args = rest
 command = args[0] if args else ''
 sub = args[1] if len(args) > 1 else ''
+
+diagnostic_bytes = int(os.environ.get('REX_FAKE_STDERR_BYTES', '0'))
+if diagnostic_bytes:
+    sys.stderr.write('diagnostic ' * (diagnostic_bytes // 11) + '\n')
+    sys.stderr.flush()
 
 if os.environ.get('REX_FAKE_DOWN'):
     fail('Error: connect to %s: connection refused' % ENDPOINT, 1)

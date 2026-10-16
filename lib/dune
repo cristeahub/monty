@@ -1,7 +1,7 @@
 (library
  (name monty)
  (foreign_stubs (language c) (names worker_lock_stubs))
- (libraries cmdliner fmt fpath unix yojson cohttp-lwt-unix websocket digestif))
+ (libraries cmdliner fmt fpath unix yojson base64 eqaf uri lwt.unix cohttp-lwt-unix websocket digestif))
 
 (rule
  (target embedded_manual.ml)

@@ -362,6 +362,3 @@ let remove_if_present ?worktree ~wt_command ~repo ~branch () =
                 (Printf.sprintf
                    "wt reported multiple worktrees for %S, but Monty could not select repo %s:\n%s"
                    branch repo stdout)))
-
-let delete_worktree_and_branch ?worktree ~wt_command ~repo ~branch ~force:_ () =
-  remove_if_present ?worktree ~wt_command ~repo ~branch ()
