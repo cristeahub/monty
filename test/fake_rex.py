@@ -111,10 +111,22 @@ def output(value):
 state = load()
 
 
+def resolve_session(target):
+    """Like rex: a full ID, else a unique label, else a unique ID suffix."""
+    if target in state['sessions']:
+        return target
+    for key in ('label', None):
+        matches = [s for s, v in state['sessions'].items()
+                   if (v['label'] == target if key else s.endswith(target))]
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            fail('Error: session target "%s" is ambiguous' % target, 3)
+    not_found('session', target)
+
+
 def session_or_die(session):
-    if session not in state['sessions']:
-        not_found('session', session)
-    return state['sessions'][session]
+    return state['sessions'][resolve_session(session)]
 
 
 def new_block(session, window, label, cwd, cmd):
@@ -139,8 +151,9 @@ if command == 'whoami':
 elif command == 'ls':
     output({'sessions': [{'session_id': k, 'label': v['label']} for k, v in state['sessions'].items()]})
 elif command == 'session' and sub == 'inspect':
-    session = session_or_die(positional()[1])
-    output({'session_id': positional()[1], 'label': session['label'],
+    session_id = resolve_session(positional()[1])
+    session = state['sessions'][session_id]
+    output({'session_id': session_id, 'label': session['label'],
             'windows': [{'window_id': w, 'label': state['windows'][w]['label']} for w in session['windows']]})
 elif command == 'block' and sub == 'inspect':
     session = option('-s')

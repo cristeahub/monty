@@ -734,7 +734,7 @@ Rex terminology differs from Ghostty, so `--target` maps deliberately:
 Placement never follows moving UI focus. Rex sets `REX_SESSION`, `REX_BLOCK` and `REX_SERVER` in every terminal it opens; Monty pins the whole batch to those exact IDs before reserving any worker:
 
 - Inside a Rex terminal, `tab` lands in the caller's session and `split` beside the caller's pane. `REX_SERVER` selects the server; `REX_CLIENT` selects the app when several are connected.
-- Outside Rex (a plain shell, the web client, a service-owned chat), `tab` lands in one Monty-owned session labelled `monty`, recorded in `.monty/rex-session.json` and verified live before reuse; `split` is refused in preflight because there is no pane to split; `window` always creates a session.
+- Outside Rex (a plain shell, the web client, a service-owned chat), `tab` lands in the session named by `monty settings set rex-session <session>` (an ID or label from `rex ls`, resolved through `rex session inspect` on every launch and refused in preflight when it is not live), else in one Monty-owned session labelled `monty`, recorded in `.monty/rex-session.json` and verified live before reuse; `split` is refused in preflight because there is no pane to split; `window` always creates a session.
 - Showing a new session needs exactly one connected Rex app (or `REX_CLIENT`) that offers `session.select`; otherwise preflight fails before any reservation and explains what is missing. Creating the session succeeds server-side regardless, so a display failure after creation leaves the worker `launch-requested` with the error and `monty resume` recovers it.
 
 Each worker keeps `rex-terminal.json` beside its `job.json` with the server endpoint, session, window and block IDs, the app client, the target and the launch attempt. Nothing about Rex is written to `job.json`. `monty resume`/`monty open` asks Rex whether that block's child process is still running: live means focus it (and show its session) without a second writer; exited or vanished means the normal resume flow opens a new tab for the same conversation, account and branches. An unreachable server stops resume rather than guessing. `monty rex status <worker>` prints the recorded reference, its liveness and the program-status records; it is read-only.
@@ -834,6 +834,14 @@ Choose the terminal backend for launches that pass no `--terminal` and no `MONTY
 monty settings get terminal
 monty settings set terminal ghostty
 monty settings set terminal rex
+```
+
+Tabs requested from outside a Rex terminal (the head butler in another app, the web client, a service-owned chat) land in the Monty-owned `monty` session unless a session is persisted; `monty doctor --terminal rex` reports whether it resolves:
+
+```sh
+rex ls                                   # session labels and IDs
+monty settings set rex-session hyre      # tabs go to this session
+monty settings set rex-session ''        # back to the Monty-owned session
 ```
 
 The web client's task preflight and apply use the same setting, show it in the plan, and refuse an apply whose terminal changed since preflight.

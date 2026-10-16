@@ -240,8 +240,25 @@ let checks ?(find_command = Process.command_exists_with_arguments)
         let server =
           match cli.level with
           | Pass -> (
-              match Rex.endpoint ?server:(Rex.context_of_env ()).Rex.server () with
-              | Ok endpoint -> [ { name = "rex-server"; level = Pass; message = endpoint; recovery = [] } ]
+              let server = (Rex.context_of_env ()).Rex.server in
+              match Rex.endpoint ?server () with
+              | Ok endpoint ->
+                  (* A persisted rex-session must resolve on this server, or
+                     every tab requested from outside Rex fails in preflight. *)
+                  let session =
+                    match Settings.load ~home with
+                    | Ok { Settings.rex_session = Some setting; _ } -> (
+                        match Rex.resolve_session ?server ~endpoint setting with
+                        | Ok session ->
+                            [ { name = "rex-session"; level = Pass;
+                                message = Printf.sprintf "%s (%s)" setting session; recovery = [] } ]
+                        | Error message ->
+                            [ { name = "rex-session"; level = Fail; message;
+                                recovery =
+                                  [ "Run `rex ls`, then `monty settings set rex-session <session>` or clear it with `monty settings set rex-session ''`." ] } ])
+                    | Ok _ | Error _ -> []
+                  in
+                  { name = "rex-server"; level = Pass; message = endpoint; recovery = [] } :: session
               | Error message ->
                   [ { name = "rex-server"; level = Fail; message;
                       recovery = [ "Open the Rex app, or set REX_SERVER to a running server, or use --terminal dry-run." ] } ])

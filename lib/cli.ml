@@ -1174,6 +1174,9 @@ let settings_get key home =
             (settings.Settings.terminal
             |> Option.value ~default:Terminal.Rex |> Terminal.backend_to_string);
           0
+      | "rex-session" ->
+          Fmt.pr "%s\n" (Option.value ~default:"" settings.Settings.rex_session);
+          0
       | _ -> exit_code (Error (Printf.sprintf "unknown setting %S" key)))
  in
 let settings_get_term =
@@ -1228,6 +1231,16 @@ let settings_set key value home =
       | Ok ((Terminal.Ghostty | Terminal.Rex) as terminal) ->
           Settings.set_terminal ~home terminal
           |> Result.map (fun () -> Fmt.pr "terminal = %s\n" (Terminal.backend_to_string terminal))
+          |> exit_code)
+  | "rex-session" -> (
+      let value = String.trim value in
+      match Rex.validate_session_setting value with
+      | Error message -> exit_code (Error message)
+      | Ok () ->
+          Settings.set_rex_session ~home value
+          |> Result.map (fun () ->
+                 if value = "" then Fmt.pr "rex-session cleared; tabs from outside Rex use the Monty-owned session\n"
+                 else Fmt.pr "rex-session = %s\n" value)
           |> exit_code)
   | _ -> exit_code (Error (Printf.sprintf "unknown setting %S" key))
  in

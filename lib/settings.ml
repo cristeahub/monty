@@ -6,11 +6,12 @@ type t = {
   branch_prefix : string option;
   agent_profile : string option;
   terminal : Terminal.backend option;
+  rex_session : string option;  (* Rex session (ID or label) for tabs requested outside Rex *)
 }
 
 let empty =
   { harness = None; context_enabled = false; codex_yolo = false; container_workers = false;
-    branch_prefix = None; agent_profile = None; terminal = None }
+    branch_prefix = None; agent_profile = None; terminal = None; rex_session = None }
 let path ~home = Filename.concat (Filename.concat home ".monty") "settings.json"
 
 let parse json =
@@ -67,7 +68,15 @@ let parse json =
           |> Result.map Option.some
       | _ -> Error "settings field \"terminal\" must be a string"
     in
-    Ok { harness; context_enabled; codex_yolo; container_workers; branch_prefix; agent_profile; terminal })
+    let* rex_session =
+      match member "rex_session" json with
+      | `Null -> Ok None
+      | `String value when String.trim value = "" -> Ok None
+      | `String value -> Ok (Some value)
+      | _ -> Error "settings field \"rex_session\" must be a string"
+    in
+    Ok { harness; context_enabled; codex_yolo; container_workers; branch_prefix; agent_profile; terminal;
+         rex_session })
 
 let load ~home =
   let settings_path = path ~home in
@@ -114,7 +123,11 @@ let to_json settings =
       ( "terminal",
         match settings.terminal with
         | None -> `Null
-        | Some terminal -> `String (Terminal.backend_to_string terminal) ) ]
+        | Some terminal -> `String (Terminal.backend_to_string terminal) );
+      ( "rex_session",
+        match settings.rex_session with
+        | None -> `Null
+        | Some rex_session -> `String rex_session ) ]
 
 let set_harness ~home harness =
   State_store.with_lock ~home (fun () ->
@@ -210,6 +223,18 @@ let effective_terminal ~getenv ~home override =
           |> Result.map (fun settings ->
                  Option.value ~default:Terminal.Rex settings.terminal))
 
+(* The Rex session that tabs requested from outside Rex should land in. An
+   empty value clears it, which returns tabs to the Monty-owned session. *)
+let set_rex_session ~home rex_session =
+  let rex_session =
+    match String.trim rex_session with "" -> None | value -> Some value
+  in
+  State_store.with_lock ~home (fun () ->
+      let ( let* ) = Result.bind in
+      let* settings = load ~home in
+      State_store.write_json_atomic ~path:(path ~home)
+        (to_json { settings with rex_session }))
+
 let effective_agent_profile ~home override =
   match override with
   | Some agent_profile -> Ok agent_profile
@@ -234,7 +259,8 @@ let render settings =
       ^ Option.value ~default:Agent_profile.default_id settings.agent_profile;
       "terminal      "
       ^ Terminal.backend_to_string
-          (Option.value ~default:Terminal.Rex settings.terminal) ]
+          (Option.value ~default:Terminal.Rex settings.terminal);
+      "rex-session   " ^ Option.value ~default:"(monty-owned session)" settings.rex_session ]
   ^ "\n"
 
 let set_context_enabled ~home context_enabled =

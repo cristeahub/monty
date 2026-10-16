@@ -134,6 +134,28 @@ let session_live ?server session =
   | Error (Not_found _) -> Ok false
   | Error (Failed message) -> Error message
 
+(* A persisted `rex-session` setting names a session by ID or label; rex
+   resolves it, and Monty records only the full ID it reports. *)
+let validate_session_setting value =
+  if value = "" then Ok ()
+  else if String.length value > 1024
+          || not (String.for_all (fun c -> Char.code c > 0x20 && Char.code c < 0x7f) value)
+  then Error "rex-session must be a Rex session ID or label without spaces"
+  else Ok ()
+
+let resolve_session ?server ~endpoint setting =
+  match invoke_json ?server [ "session"; "inspect"; setting; "--json" ] with
+  | Ok json -> (
+      match string_member "session_id" json with
+      | Some session -> Ok session
+      | None -> Error (Printf.sprintf "rex session inspect %s reported no session ID" setting))
+  | Error (Not_found _) ->
+      Error
+        (Printf.sprintf
+           "the rex-session setting %s is not a live session on %s; point it at a session from `rex ls` with `monty settings set rex-session <session>`, or clear it with `monty settings set rex-session ''`"
+           setting endpoint)
+  | Error (Failed message) -> Error message
+
 (* A usable split anchor is a placed block; its window is recorded with the worker. *)
 let block_window ?server ~session block =
   match invoke_json ?server [ "block"; "inspect"; "-s"; session; block; "--json" ] with
@@ -263,7 +285,8 @@ type placement =
 type plan = { server : string option; endpoint : string; placement : placement }
 
 (* Runs before any worker reservation and makes no Rex mutation except the
-   Monty-owned session a context-less tab launch needs. *)
+   Monty-owned session a context-less tab launch needs. Outside Rex, a tab goes
+   to the persisted rex-session setting when one is set, else to that session. *)
 let preflight ~home ~target =
   let context = context_of_env () in
   let server = context.server in
@@ -294,7 +317,12 @@ let preflight ~home ~target =
             else Error (Printf.sprintf "REX_SESSION %s is not a live session on %s; unset it or run from a live Rex terminal" session endpoint)
         | None ->
             let* client = need_client () in
-            let* session = ensure_home_session ~home ?server ~endpoint () in
+            let* settings = Settings.load ~home in
+            let* session =
+              match settings.Settings.rex_session with
+              | Some setting -> resolve_session ?server ~endpoint setting
+              | None -> ensure_home_session ~home ?server ~endpoint ()
+            in
             Ok (Tab { session; show = Some client }))
   in
   Ok { server; endpoint; placement }

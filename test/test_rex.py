@@ -209,6 +209,44 @@ with tempfile.TemporaryDirectory(prefix='monty-rex-') as temporary:
     replaced = json.loads((home / '.monty' / 'rex-session.json').read_text())
     assert replaced['session_id'] != home_session['session_id'] and reference(worker_c)['session_id'] == replaced['session_id']
 
+    # ---- tab outside Rex honours a persisted rex-session (label or ID) -------------------
+    assert cli('settings', 'get', 'rex-session').strip() == '' and 'rex-session   (monty-owned session)' in cli('settings')
+    assert 'without spaces' in cli('settings', 'set', 'rex-session', 'two words', code=1)
+    assert cli('settings', 'set', 'rex-session', 'caller').strip() == 'rex-session = caller'
+    assert cli('settings', 'get', 'rex-session').strip() == 'caller' and 'rex-session   caller' in cli('settings')
+    doctor = cli('doctor', '--terminal', 'rex', '--harness', 'pi', '--worktree', 'never')
+    assert re.search(r'PASS +rex-session +caller \(' + re.escape(caller_session) + r'\)', doctor), doctor
+    news = len([row for row in calls() if 'new' in row])
+    path, worker = manifest('setting-session')
+    launch(path)
+    assert len([row for row in calls() if 'new' in row]) == news, 'a configured session must never be created'
+    ref = reference(worker)
+    assert ref['session_id'] == caller_session, 'the tab must land in the configured session, recorded by full ID'
+    assert ref['client_id'] == 'client:01a1-app' and state()['selected'][-1]['window_id'] == ref['window_id']
+    assert state()['blocks'][ref['block_id']]['session'] == caller_session
+    # A full ID works the same way; a vanished or mistyped session fails before reservation.
+    cli('settings', 'set', 'rex-session', caller_session)
+    path, worker = manifest('setting-session-id')
+    launch(path)
+    assert reference(worker)['session_id'] == caller_session
+    cli('settings', 'set', 'rex-session', 'no-such-session')
+    assert re.search(r'FAIL +rex-session', cli('doctor', '--terminal', 'rex', '--harness', 'pi', '--worktree', 'never', code=1))
+    path, worker = manifest('setting-missing')
+    before = len(mutations())
+    out = launch(path, code=1)
+    assert 'rex-session setting no-such-session is not a live session' in out and "set rex-session ''" in out, out
+    assert not worker.exists() and len(mutations()) == before, 'a dead configured session reserved or created state'
+    # Inside Rex the caller's own session still wins over the setting.
+    path, worker = manifest('setting-inside')
+    launch(path, extra=inside)
+    assert reference(worker)['session_id'] == caller_session and len(mutations()) == before + 1
+    # Clearing the setting returns to the Monty-owned session.
+    assert 'cleared' in cli('settings', 'set', 'rex-session', '')
+    assert cli('settings', 'get', 'rex-session').strip() == ''
+    path, worker = manifest('setting-cleared')
+    launch(path)
+    assert reference(worker)['session_id'] == json.loads((home / '.monty' / 'rex-session.json').read_text())['session_id']
+
     # ---- lost or garbled responses keep launch-requested without replay ------------------
     for name, extra in [('invalid', {'REX_FAKE_INVALID': 'run'}), ('failed', {'REX_FAKE_FAIL': 'run'})]:
         path, worker = manifest(name)
