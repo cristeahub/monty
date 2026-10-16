@@ -36,6 +36,6 @@ Sources: [Codex skills](https://learn.chatgpt.com/docs/build-skills) and
 probe; the Pi loader reads its native agent directory's `skills` directory.
 
 Validation: `dune runtest` uses fake harnesses and isolated native homes. The
-opt-in `python3 test/test_skills_native.py _build/default/bin/main.exe` checks
+opt-in `_build/default/test/test_skills_native.exe _build/default/bin/main.exe` checks
 real Codex and Pi discovery in both profile and shared skill directories without
 sending a prompt or making model calls.

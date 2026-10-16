@@ -22,11 +22,15 @@ let released_lock directory =
   let fd=Unix.openfile (Filename.concat directory "runtime.lock") [Unix.O_RDWR] 0 in
   Fun.protect ~finally:(fun () -> Unix.close fd) (fun () -> Worker_lock.try_lock fd)
 
-let native_command directory body =
-  let python=Conversation_store.get(Process.command_exists_with_arguments "python3") in
-  [python;"-u";"-c";
-   "import os,sys,time;from pathlib import Path;Path(sys.argv[1]).write_text(str(os.getpid()));" ^ body;
-   Filename.concat directory "native.pid"]
+let native_command directory mode =
+  [Unix.realpath Sys.executable_name;"--fixture";mode;Filename.concat directory "native.pid"]
+
+let fixture mode path =
+  Shell.write_file path (string_of_int (Unix.getpid ()));
+  match mode with
+  | "exit" -> print_endline "retained output";exit 7
+  | "running" -> print_endline "running terminal";Unix.sleepf 60.
+  | _ -> failwith "invalid terminal fixture"
 
 let exited_native directory =
   let pid=Shell.read_file(Filename.concat directory "native.pid") |> int_of_string in
@@ -44,7 +48,7 @@ let wait_closed closed = Lwt_unix.with_timeout 8. (fun () -> closed)
 
 let test_exit_result () = with_directory (fun directory ->
   let closed,notify=closed_notice () in
-  with_terminal directory notify (native_command directory "print('retained output',flush=True);sys.exit(7)") (fun terminal ->
+  with_terminal directory notify (native_command directory "exit") (fun terminal ->
     wait_closed closed >>= fun notice ->
     assert_true "terminal exit code was lost" (field "code" notice=`Int 7 && terminal.code=`Int 7);
     assert_true "terminal remains available after closure" (not terminal.alive);
@@ -59,7 +63,7 @@ let test_throwing_notifications () = with_directory (fun directory ->
     record_closed json;
     if List.mem (s "type" json) ["output";"terminal_closed"] then
       failwith "fixture terminal notification failed" in
-  with_terminal directory notify (native_command directory "print('running terminal',flush=True);time.sleep(60)") (fun terminal ->
+  with_terminal directory notify (native_command directory "running") (fun terminal ->
     wait_closed closed >>= fun notice ->
     assert_true "broken output stream was treated as a known exit"
       (field "code" notice=`String "outcome_unknown" && terminal.code=`String "outcome_unknown");
@@ -82,7 +86,7 @@ let test_eof_without_exit () = with_directory (fun directory ->
         (field "code" notice=`String "outcome_unknown" && terminal.code=`String "outcome_unknown")))
     (fun () -> Unix.putenv "PATH" previous_path;Lwt.return_unit))
 
-let () =
+let suite () =
   let unexpected=ref [] and previous= !Lwt.async_exception_hook in
   Lwt.async_exception_hook:=(fun error -> unexpected:=error :: !unexpected);
   Fun.protect ~finally:(fun () -> Lwt.async_exception_hook:=previous) (fun () ->
@@ -93,3 +97,7 @@ let () =
       Lwt.pause () >|= fun () ->
       assert_true "terminal cleanup escaped its async boundary" (!unexpected=[]));
     print_endline "Owned terminals: exit results, retained output, throwing notifications, process/lock cleanup and incomplete EOF passed")
+
+let () = match Array.to_list Sys.argv with
+  | [_;"--fixture";mode;path] -> fixture mode path
+  | _ -> suite ()

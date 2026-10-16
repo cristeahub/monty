@@ -80,8 +80,7 @@ class ClaudeSDKClient:
         p=path(self.native);raw=json.loads(p.read_text());entry={'type':role,'uuid':str(uuid.uuid4()),'message':{'role':role,'content':content}}
         raw['entries'].append(entry);p.write_text(json.dumps(raw));return entry
     async def query(self,text,session_id=None):
-        assert session_id==self.native
-        self.text=text;self.stopped.clear();self.append('user',[{'type':'text','text':text}]);log({'prompt':text,'session':self.native})
+        self.text=text;self.stopped.clear();self.append('user',[{'type':'text','text':text}]);log({'prompt':text,'session':self.native,'requested_session':session_id})
     async def receive_response(self):
         yield SystemMessage('init',{'session_id':self.native})
         if self.text in ('approval','question'):

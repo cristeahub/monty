@@ -904,6 +904,10 @@ replacement while remaining separate from lifecycle `job.json` state.
 
 ## Tests
 
+All test suites, runners and assertions are OCaml and run through Dune. Python
+remains for the production Claude bridge and ownership guard, and for the fake
+Claude SDK protocol fixture used to test that bridge.
+
 The checkout-binary E2E suite uses a unique temporary `MONTY_HOME` for every scenario.
 It installs fake `wt`, `gh`, pi, Ghostty, `osascript`, and related tools, and uses real temporary Git repositories when repository identity matters.
 The suite covers concurrent mutation, atomic faults, canonical paths, lifecycle recovery, deterministic reconciliation, whole-batch preflight, partial launch recovery, headless claim boundaries, native phase arguments, shared run handoffs, pending delivery and acknowledgement, read-only follow-up construction, clean-context chain construction, parser behavior, and doctor exit contracts.

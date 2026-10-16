@@ -840,15 +840,21 @@ For development validation:
 ```sh
 dune build @all
 dune runtest
-python3 test/test_client_api.py _build/default/bin/main.exe --real
-python3 test/test_pi_api.py _build/default/bin/main.exe --real
+_build/default/test/test_client_native.exe _build/default/bin/main.exe
+_build/default/test/test_pi_native.exe _build/default/bin/main.exe
+# Optional installed native CLI/SDK protocol checks, with local model fixtures:
+_build/default/test/test_codex_native.exe _build/default/bin/main.exe /path/to/codex
+_build/default/test/test_claude_native.exe _build/default/bin/main.exe /path/to/claude /path/to/sdk-python
+_build/default/test/test_skills_native.exe _build/default/bin/main.exe
 ```
 
-The default suite uses isolated homes, temporary Git repositories and fake native
-servers. `--real` additionally requires installed Codex and a PTY; it verifies
+All suites and assertions are OCaml. The Python fake Claude SDK is a protocol
+fixture for the production bridge. The default suite uses isolated homes,
+temporary Git repositories and fake native servers. `test_client_native.exe`
+additionally requires installed Codex and a PTY; it verifies
 the server's private native runtime and terminal, with all inference served by
 a local fixture. The private runtime test passed with Codex 0.162.1.
-The Pi `--real` suite requires Pi 1.0.2, fresh native/system homes and a local
+The opt-in Pi suite requires Pi 1.0.2, fresh native/system homes and a local
 model fixture; it verifies RPC send/interrupt, shared API observation, exact
 server-owned PTY resume, native file mirroring and fork identity.
 No private transcript, real provider call, installed-binary replacement or live

@@ -94,9 +94,11 @@ doctor failures before relying on launch or lifecycle mutation.
 ## Development conventions
 
 Monty is OCaml built with Dune. Dependencies belong in `dune-project`; do not add
-opam files. Reuse existing Monty operations from every interface. Keep headless
-state and payload generation in Monty; do not add a Monty-specific Pi extension
-or persist a new backend. Runtime harness IDs/status do not belong in job.json;
+opam files. Test suites, runners and assertions must be OCaml; required external
+protocol fixtures may use their SDK's language. Reuse existing Monty operations
+from every interface. Keep headless state and payload generation in Monty; do not
+add a Monty-specific Pi extension or persist a new backend. Runtime harness
+IDs/status do not belong in job.json;
 interactive Codex session identity uses its existing sidecar.
 
 All JSON mutations use Monty's one-home lock and atomic replacement path. Never

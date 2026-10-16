@@ -4,17 +4,16 @@ open Json_fields
 
 let assert_true label value = if not value then failwith label
 
-let fixture = {python|
-import json,sys,time
-for line in sys.stdin:
-    request=json.loads(line)
-    if request['type']=='break_transport':
-        print('invalid JSON',flush=True)
-        time.sleep(60)
-    response=json.dumps({'type':'response','id':request['id'],'success':True,'data':request['type']})+'\n'
-    sys.stdout.write(response*(2 if request['type']=='duplicate' else 1))
-    sys.stdout.flush()
-|python}
+let fixture () =
+  try while true do
+    let request=read_line () |> Yojson.Safe.from_string in
+    let kind=s "type" request in
+    if kind="break_transport" then (print_endline "invalid JSON";Unix.sleepf 60.);
+    let response=Yojson.Safe.to_string (`Assoc ["type",`String "response";
+      "id",field "id" request;"success",`Bool true;"data",`String kind]) in
+    print_endline response;
+    if kind="duplicate" then print_endline response
+  done with End_of_file -> ()
 
 let close_safely rpc = Lwt.catch (fun () -> Native_rpc.close rpc) (fun _ -> Lwt.return_unit)
 
@@ -24,7 +23,7 @@ let with_runtime notify run =
   let lock=Filename.concat directory "runtime.lock" in
   Lwt.finalize (fun () ->
     Native_rpc.start ~lock ~env:(Unix.environment ()) ~cwd:directory
-      ~command:"python3" ~args:["-u";"-c";fixture] ~notify () >>= fun rpc ->
+      ~command:(Unix.realpath Sys.executable_name) ~args:["--fixture"] ~notify () >>= fun rpc ->
     Lwt.finalize (fun () ->
       Native_rpc.call rpc "ready" (`Assoc[]) >>= fun ready ->
       assert_true "fixture did not become ready" (ready=`String "ready");
@@ -64,7 +63,7 @@ let test_duplicate_response () = with_runtime (fun _ _ -> ()) (fun rpc ->
   assert_true "duplicate response interrupted next request" (next=`String "next");
   Native_rpc.close rpc)
 
-let () = Lwt_main.run (
+let () = if Array.to_list Sys.argv |> List.mem "--fixture" then fixture () else Lwt_main.run (
   test_explicit_close () >>= fun () ->
   test_async_close () >>= fun () ->
   test_duplicate_response () >|= fun () ->

@@ -1,3 +1,149 @@
+(library
+ (name monty_test_support)
+ (wrapped false)
+ (modules test_support test_pty fake_native fake_rex task_fixture test_native_model test_native_headless)
+ (foreign_stubs (language c) (names test_pty_stubs))
+ (libraries monty unix yojson base64 uri lwt.unix cohttp-lwt-unix websocket))
+
+(executable
+ (name owned_fake_appserver)
+ (modules owned_fake_appserver)
+ (libraries monty unix yojson lwt.unix))
+
+(executable
+ (name fake_task_tools)
+ (modules fake_task_tools)
+ (libraries monty_test_support monty unix yojson))
+
+(test
+ (name test_owned_runtime)
+ (modules test_owned_runtime)
+ (libraries monty_test_support monty unix yojson base64 lwt.unix)
+ (deps ../bin/main.exe ../helpers/owned_runtime.py)
+ (action (run %{test} %{dep:../bin/main.exe} %{dep:../helpers/owned_runtime.py})))
+
+(test
+ (name test_install)
+ (modules test_install)
+ (libraries monty_test_support monty unix)
+ (deps ../bin/main.exe ../install.sh ../.monty/version (source_tree ../agent-profiles))
+ (action (run %{test} %{dep:../bin/main.exe} %{dep:../install.sh} %{dep:../.monty/version})))
+
+(test
+ (name test_rex)
+ (modules test_rex)
+ (libraries monty_test_support monty unix yojson)
+ (deps ../bin/main.exe (source_tree ../agent-profiles))
+ (action (run %{test} %{dep:../bin/main.exe})))
+
+(test
+ (name test_skills)
+ (modules test_skills)
+ (libraries monty_test_support monty unix yojson)
+ (deps ../bin/main.exe owned_fake_appserver.exe)
+ (action (run %{test} %{dep:../bin/main.exe})))
+
+(executable
+ (name fake_pi)
+ (modules fake_pi)
+ (libraries monty unix yojson))
+
+(executable
+ (name fake_claude_cli)
+ (modules fake_claude_cli)
+ (libraries monty unix yojson))
+
+(executable
+ (name fake_codex_cli)
+ (modules fake_codex_cli)
+ (libraries monty unix yojson))
+
+(executable
+ (name fake_headless)
+ (modules fake_headless)
+ (libraries monty unix yojson))
+
+(test
+ (name test_pi_api)
+ (modules test_pi_api)
+ (libraries monty_test_support monty unix yojson base64 lwt.unix)
+ (deps ../bin/main.exe owned_fake_appserver.exe (source_tree ../agent-profiles) fake_pi.exe fake_codex_cli.exe)
+ (action (run %{test} %{dep:../bin/main.exe} %{dep:fake_pi.exe} %{dep:fake_codex_cli.exe})))
+
+(test
+ (name test_claude_api)
+ (modules test_claude_api)
+ (libraries monty_test_support monty unix yojson base64 lwt.unix)
+ (deps ../bin/main.exe owned_fake_appserver.exe (source_tree ../agent-profiles) fake_claude_cli.exe (source_tree fake_claude_sdk))
+ (action (run %{test} %{dep:../bin/main.exe} %{dep:fake_claude_cli.exe})))
+
+(test
+ (name test_server_headless)
+ (modules test_server_headless)
+ (libraries monty_test_support monty unix yojson base64 lwt.unix)
+ (deps ../bin/main.exe owned_fake_appserver.exe (source_tree ../agent-profiles) fake_headless.exe fake_task_tools.exe)
+ (action (run %{test} %{dep:../bin/main.exe} %{dep:fake_headless.exe})))
+
+(test
+ (name test_terminal_selectors)
+ (modules test_terminal_selectors)
+ (libraries monty_test_support monty unix yojson base64 lwt.unix)
+ (deps ../bin/main.exe owned_fake_appserver.exe (source_tree ../agent-profiles) fake_codex_cli.exe)
+ (action (run %{test} %{dep:../bin/main.exe} %{dep:fake_codex_cli.exe})))
+
+(test
+ (name test_sync_purge)
+ (modules test_sync_purge)
+ (libraries monty_test_support monty unix yojson base64 lwt.unix)
+ (deps ../bin/main.exe owned_fake_appserver.exe (source_tree ../agent-profiles) (source_tree fake_claude_sdk))
+ (action (run %{test} %{dep:../bin/main.exe})))
+
+(test
+ (name test_discovery_api)
+ (modules test_discovery_api)
+ (libraries monty_test_support monty unix yojson base64 lwt.unix)
+ (deps ../bin/main.exe owned_fake_appserver.exe (source_tree ../agent-profiles))
+ (action (run %{test} %{dep:../bin/main.exe})))
+
+(test
+ (name test_tasks_api)
+ (modules test_tasks_api)
+ (libraries monty_test_support monty unix yojson)
+ (deps ../bin/main.exe owned_fake_appserver.exe fake_task_tools.exe (source_tree ../agent-profiles))
+ (action (run %{test} %{dep:../bin/main.exe})))
+
+(test
+ (name test_client_api)
+ (modules test_client_api)
+ (libraries monty_test_support monty unix yojson base64 lwt.unix digestif)
+ (deps ../bin/main.exe owned_fake_appserver.exe (source_tree ../agent-profiles))
+ (action (run %{test} %{dep:../bin/main.exe})))
+
+(executable
+ (name test_pi_native)
+ (modules test_pi_native)
+ (libraries monty_test_support monty unix yojson))
+
+(executable
+ (name test_skills_native)
+ (modules test_skills_native)
+ (libraries monty_test_support monty unix yojson lwt.unix))
+
+(executable
+ (name test_codex_native)
+ (modules test_codex_native)
+ (libraries monty_test_support monty unix yojson))
+
+(executable
+ (name test_claude_native)
+ (modules test_claude_native)
+ (libraries monty_test_support monty unix yojson))
+
+(executable
+ (name test_client_native)
+ (modules test_client_native)
+ (libraries monty_test_support monty unix yojson lwt.unix))
+
 (test
  (name test_monty)
  (modules test_monty)
@@ -29,70 +175,3 @@
  (name test_headless_boundaries)
  (modules test_headless_boundaries)
  (libraries monty unix yojson))
-
-(rule
- (alias runtest)
- (deps test_rex.py fake_rex.py ../bin/main.exe (source_tree ../agent-profiles))
- (action (run python3 %{dep:test_rex.py} %{dep:../bin/main.exe} %{dep:fake_rex.py})))
-
-(rule
- (alias runtest)
- (deps test_install.sh ../install.sh ../.monty/version ../bin/main.exe
-  (source_tree ../agent-profiles))
- (action
-  (run
-   sh
-   %{dep:test_install.sh}
-   %{dep:../install.sh}
-   %{dep:../.monty/version}
-   %{dep:../bin/main.exe})))
-
-(rule
- (alias runtest)
- (deps test_skills.py ../bin/main.exe)
- (action (run python3 %{dep:test_skills.py} %{dep:../bin/main.exe})))
-
-(rule
- (alias runtest)
- (deps test_client_api.py owned_fake_appserver.py ../bin/main.exe (source_tree ../agent-profiles))
- (action (run python3 %{dep:test_client_api.py} %{dep:../bin/main.exe})))
-
-(rule
- (alias runtest)
- (deps test_pi_api.py fake_pi.py test_client_api.py owned_fake_appserver.py ../bin/main.exe)
- (action (run python3 %{dep:test_pi_api.py} %{dep:../bin/main.exe})))
-
-(rule
- (alias runtest)
- (deps test_discovery_api.py test_client_api.py owned_fake_appserver.py ../bin/main.exe)
- (action (run python3 %{dep:test_discovery_api.py} %{dep:../bin/main.exe})))
-
-(rule
- (alias runtest)
- (deps test_tasks_api.py test_client_api.py owned_fake_appserver.py fake_rex.py ../bin/main.exe (source_tree ../agent-profiles))
- (action (run python3 %{dep:test_tasks_api.py} %{dep:../bin/main.exe})))
-
-(rule
- (alias runtest)
- (deps test_owned_runtime.py ../helpers/owned_runtime.py)
- (action (run python3 %{dep:test_owned_runtime.py} %{dep:../helpers/owned_runtime.py})))
-
-(rule
- (alias runtest)
- (deps test_claude_api.py test_client_api.py owned_fake_appserver.py ../bin/main.exe (source_tree fake_claude_sdk) (source_tree ../agent-profiles))
- (action (run python3 %{dep:test_claude_api.py} %{dep:../bin/main.exe})))
-
-(rule
- (alias runtest)
- (deps test_server_headless.py test_tasks_api.py test_client_api.py owned_fake_appserver.py ../bin/main.exe (source_tree ../agent-profiles))
- (action (run python3 %{dep:test_server_headless.py} %{dep:../bin/main.exe})))
-
-(rule
- (alias runtest)
- (deps test_terminal_selectors.py test_client_api.py owned_fake_appserver.py ../bin/main.exe)
- (action (run python3 %{dep:test_terminal_selectors.py} %{dep:../bin/main.exe})))
-
-(rule
- (alias runtest)
- (deps test_sync_purge.py test_client_api.py owned_fake_appserver.py ../bin/main.exe (source_tree fake_claude_sdk))
- (action (run python3 %{dep:test_sync_purge.py} %{dep:../bin/main.exe})))
