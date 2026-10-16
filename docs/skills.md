@@ -30,22 +30,6 @@ Read-only CLI queries and dry-run preflight do not install anything. Claude
 receives Monty instructions, task context and every ordered workspace explicitly;
 it is not expected to discover AGENTS.md or MONTY.md automatically.
 
-The former documentation MCP server and setup commands have been removed.
-The old `monty mcp guide` spelling remains a CLI alias so saved worker and native
-session instructions can still read the manual without rewriting their context.
-Current workflow and installation commands are documented under `monty guide skills`. Monty no
-longer injects an MCP server into new Codex threads or headless tool lists.
-Pi installation removes the previous automatically installed entry only when
-its command matches the current Monty executable and its arguments are exactly
-`mcp serve`. Other entries and all unrelated preferences are preserved.
-Manually configured MCP servers and entries pointing at another Monty path are
-left for the owner to remove. A live native session can retain old loaded tools
-until restarted; migration never interrupts it automatically.
-
-Existing worker scripts are authenticated against the old template before
-explicit resume replaces them with current launch instructions. Worker/task
-identity, session sidecars, selected profiles, and lifecycle are unchanged.
-
 Sources: [Codex skills](https://learn.chatgpt.com/docs/build-skills) and
 [Pi skills](https://pi.dev/docs/latest/skills). The installed Codex account-local
 `CODEX_HOME/skills` discovery is also verified with an isolated `skills/list`

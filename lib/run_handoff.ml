@@ -1004,16 +1004,7 @@ let publish ~home ~(record : Job_store.record) ?handoff_id ~source ~outcome
           | Ok (Some { Unix.st_kind = Unix.S_REG; _ }) ->
               let* existing = read_handoff_file ~path:json_path in
               let* existing = validate_loaded_reference ~home reference existing in
-              if existing.source = Headless_pi
-                 && existing.outcome = Needs_attention
-                 && source = Headless_pi
-                 && (outcome = Ready_for_review || outcome = Failed)
-              then
-                (* Discovery is provisional; the authenticated Pi callback is final. *)
-                let handoff = build () in
-                let* () = State_store.write_json_atomic ~path:json_path (to_json handoff) in
-                Ok (handoff, true)
-              else Ok (existing, false)
+              Ok (existing, false)
           | Ok (Some _) ->
               Error (Printf.sprintf "canonical handoff path is not a file: %s" json_path)
           | Ok None ->

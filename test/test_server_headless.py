@@ -59,7 +59,7 @@ else:
     context=root/'context.md';context.write_text('Implement the isolated fixture. No remote actions.\n')
     manifest=root/'.monty/runs/headless-check/jobs.json';manifest.parent.mkdir(parents=True)
     jobs=[{'id':name,'title':name,'branch':'cto/'+name,'repo':str(repo),'context':str(context),'agent_profile':profile}
-          for name,profile in [('wait-a','reviewed'),('wait-b','reviewed'),('policy','solo'),('begin','solo')]]
+          for name,profile in [('wait-a','reviewed'),('wait-b','reviewed'),('policy','solo'),('successor','solo')]]
     manifest.write_text(json.dumps({'jobs':jobs}))
     def cli(*args,env_override=None):
         result=subprocess.run([BIN,*args,'--home',str(root)],cwd=repo,env=dict(env,**(env_override or {})),
@@ -84,14 +84,13 @@ else:
         result=cli('headless','run-many','--wait','--manifest',str(subset),'--harness','claude',
                    '--claude-command',str(actor),env_override={'MONTY_CODEX_YOLO':'false'})
         assert result['success'],result
-        # Public begin submits a server-owned process; historical dispatch
-        # serialization is exercised separately by the legacy fixture.
-        started=cli('headless','begin','begin','--harness','claude','--claude-command',str(actor))
+        # Run and explicit resume both submit a server-owned process.
+        started=cli('headless','run','successor','--harness','claude','--claude-command',str(actor))
         assert started['run_status']=='started' and 'harness_call' not in started,started
         finished=until(lambda:service.client.req('commands/'+started['command']),
                        lambda receipt:receipt['status'] in ('finished','failed'))
         assert finished['status']=='finished' and finished['result']['exit_code']==0,finished
-        resumed=cli('headless','begin','--resume','begin','--harness','claude','--claude-command',str(actor))
+        resumed=cli('headless','resume','successor','--harness','claude','--claude-command',str(actor))
         assert resumed['run_status']=='started' and resumed['attempt_id']!=started['attempt_id'],resumed
         until(lambda:service.client.req('commands/'+resumed['command']),lambda receipt:receipt['status']=='finished')
         rows=phases()
@@ -100,7 +99,7 @@ else:
         for job in jobs:
             snapshot=json.loads((manifest.parent/'workers'/job['id']/'agent-profile.json').read_text())
             profile=snapshot.get('headless',snapshot)
-            expected=(1+len(profile.get('reviews',[]))+(profile.get('fix') is not None))*(2 if job['id']=='begin' else 1)
+            expected=(1+len(profile.get('reviews',[]))+(profile.get('fix') is not None))*(2 if job['id']=='successor' else 1)
             assert len([row for row in rows if row['worker']==job['id']])==expected,(job,rows,snapshot)
         reviewers=[row for row in rows if '--tools' in row['args']]
         assert all(not row['scoped_auth'] for row in rows if row['worker']!='policy')

@@ -65,7 +65,7 @@ let test_servers : (string * string array) list ref = ref []
 let env_value env name = Array.to_list env |> List.find_map(fun value ->
   let prefix=name ^ "=" in if String.starts_with ~prefix value then Some(String.sub value (String.length prefix)(String.length value-String.length prefix)) else None)
 let prepare_test_server ~root ~env args =
-  if List.exists(fun command->List.mem command ["run";"resume";"run-many";"begin"]) args && List.hd args="headless" then (
+  if List.exists(fun command->List.mem command ["run";"resume";"run-many"]) args && List.hd args="headless" then (
     let home=Option.value ~default:(Filename.concat root "home")(env_value env "MONTY_HOME") in
     let account harness variable fallback =
       let directory=Option.value ~default:(Filename.concat root fallback)(env_value env variable) in
@@ -232,41 +232,6 @@ let await child =
   }
 
 let run ?cwd ?program ~root ~env index args = spawn ?cwd ?program ~root ~env index args |> await
-
-(* Historical Pi dispatch artifacts still need finish/recovery coverage. This
-   fixture cannot execute agents; the public CLI uses the server-owned runner. *)
-let legacy_dispatch_fixture ~root ~env index args =
-  run ~program:(Shell.abs_path Sys.executable_name) ~root ~env index ("--legacy-dispatch-fixture" :: args)
-
-let legacy_dispatch_main args =
-  let option name =
-    let rec find = function key::value::_ when key=name->Some value|_::rest->find rest|[]->None in
-    find args in
-  let get = function Ok value->value|Error message->failwith message in
-  let home=Option.value ~default:(Sys.getenv "MONTY_HOME") (option "--home") in
-  let harness=Settings.effective_harness ~getenv:Sys.getenv_opt ~home
-    (Option.map (fun value -> get(Harness.of_string value |> Result.map_error(fun (`Msg message)->message))) (option "--harness")) |> get in
-  let rec worker = function
-    | "headless"::"begin"::rest->worker rest
-    | "--resume"::rest->worker rest
-    | key::_ when not(String.starts_with ~prefix:"--" key)->key
-    | _->failwith "invalid historical dispatch fixture" in
-  let options=Launcher.{backend=Terminal.Dry_run;target=Terminal.Tab;harness;
-    harness_command=Option.value ~default:(Harness.to_string harness)
-      (Sys.getenv_opt ("MONTY_" ^ String.uppercase_ascii(Harness.to_string harness) ^ "_COMMAND"));
-    codex_yolo=false;
-    wt_command=Option.value ~default:"wt" (Sys.getenv_opt "MONTY_WT_COMMAND");
-    worktree_mode=Always;branch_prefix=get(Settings.effective_branch_prefix ~getenv:Sys.getenv_opt ~home None);
-    agent_profile=get(Settings.effective_agent_profile ~home None);fork=None;home;
-    script_dir=Home.runtime_script_dir ~home ();monty_command=executable} in
-  match Headless.begin_worker ~explicit_resume:(List.mem "--resume" args) options (worker args) with
-  | Ok json->print_endline(Yojson.Safe.to_string json);exit 0
-  | Error message->prerr_endline message;exit 1
-
-let run_with_stdin ~root ~env index input args =
-  let stdin_path = Filename.concat root (Printf.sprintf "stdin-%d" index) in
-  Shell.write_file stdin_path input;
-  spawn ~stdin_path ~root ~env index args |> await
 
 let command result = result.argv |> Array.to_list |> String.concat " "
 
@@ -1005,6 +970,23 @@ let install_repo_scoped_wt ~root ~log =
          "esac";
          "" ]);
   Shell.chmod_executable wt
+
+let install_pi_exec ~root ~log =
+  let pi = Filename.concat root "fake-bin/pi" in
+  Shell.write_file pi
+    ("#!/bin/sh\nset -eu\nprintf '%s\n' \"$0 $*\" >> " ^ Shell.quote log ^ "\n" ^ {|prompt=$(cat)
+case "$prompt" in
+  *'Independently review Monty worker'*)
+    case "$*" in *'--tools read,grep,find,ls'*) ;; *) exit 81 ;; esac
+    ;;
+  *'Finalize Monty worker'*)
+    case "$prompt" in *'PI IMPLEMENTATION HANDOFF'*) ;; *) exit 82 ;; esac
+    ;;
+esac
+printf '%s\n' '{"type":"message_end","message":{"role":"assistant","stopReason":"stop","content":[{"type":"text","text":"PI IMPLEMENTATION HANDOFF: affected checks passed."}]}}'
+printf '%s\n' '{"type":"agent_end"}'
+|});
+  Shell.chmod_executable pi
 
 let install_codex_exec ~root ~log =
   let codex = Filename.concat root "fake-bin/codex" in
@@ -2063,7 +2045,7 @@ let replace_assoc_field name value = function
       `Assoc ((name, value) :: List.remove_assoc name fields)
   | _ -> failwith "expected a JSON object"
 
-let test_codex_session_capture_and_resume_modes () =
+let test_codex_session_resume_modes () =
   with_temp_root "codex-session-resume" (fun root ->
       let home, log, env = setup_environment root in
       let repo = Filename.concat root "repo" in
@@ -2097,7 +2079,7 @@ let test_codex_session_capture_and_resume_modes () =
       let job_file = Filename.concat worker_dir "job.json" in
       let sidecar = Filename.concat worker_dir "codex-session-id" in
       if Sys.file_exists sidecar then
-        failwith "initial Codex launch wrote a session id before SessionStart";
+        failwith "initial Codex launch wrote a session id before the native session starts";
       let launch_script =
         Yojson.Safe.from_file job_file |> json_string "launch_script"
       in
@@ -2106,34 +2088,12 @@ let test_codex_session_capture_and_resume_modes () =
       require_contains "initial Codex service fresh mode" initial_script "--mode fresh";
       require_contains "initial Codex prompt" initial_script
         "Read the files below before acting";
-      let capture_env = replace_env env [ ("MONTY_WORKER_DIR", worker_dir) ] in
-      let payload source session_id =
-        `Assoc
-          [ ("session_id", `String session_id);
-            ("cwd", `String repo);
-            ("hook_event_name", `String "SessionStart");
-            ("source", `String source) ]
-        |> Yojson.Safe.to_string
-      in
+      let capture session_id =
+        match Native_session.write ~home ~harness:Harness.Codex ~worker_dir session_id with
+        | Ok () -> () | Error message -> failwith message in
       let exact_one = "-thread/name with spaces" in
-      let captured =
-        run_with_stdin ~root ~env:capture_env 879 (payload "startup" exact_one)
-          [ "codex-session-capture"; "--home"; home ]
-      in
-      require_code 0 captured;
-      if captured.stdout <> "" then failwith "successful Codex hook printed output";
-      if Shell.read_file sidecar <> exact_one then
-        failwith "Codex hook did not persist the exact session id";
-      let before_invalid = Shell.read_file sidecar in
-      let invalid =
-        run_with_stdin ~root ~env:capture_env 880 (payload "compact" "wrong")
-          [ "codex-session-capture"; "--home"; home ]
-      in
-      if invalid.code = 0 then failwith "invalid Codex hook source was accepted";
-      require_contains "invalid Codex hook source" invalid.stderr
-        "startup or resume";
-      if Shell.read_file sidecar <> before_invalid then
-        failwith "invalid Codex hook payload changed the sidecar";
+      capture exact_one;
+      if Shell.read_file sidecar <> exact_one then failwith "native capture changed the session id";
       let exact_dry =
         run ~root ~env 881
           ([ "resume"; id ] @ codex_options "dry-run")
@@ -2172,7 +2132,7 @@ let test_codex_session_capture_and_resume_modes () =
       in
       require_code 0 fresh_resume;
       if Shell.read_file sidecar <> exact_one then
-        failwith "fresh resume erased the old Codex session before SessionStart";
+        failwith "fresh resume erased the old Codex session before the native session starts";
       require_contains "fresh Codex resume prompt" (Shell.read_file launch_script)
         "Read the files below before acting";
       Sys.remove sidecar;
@@ -2187,10 +2147,7 @@ let test_codex_session_capture_and_resume_modes () =
          || string_contains picker_script "Read the files below before acting"
       then failwith "Codex picker used --last or resent the original prompt";
       let exact_two = "thread's-second" in
-      require_code 0
-        (run_with_stdin ~root ~env:capture_env 886
-           (payload "resume" exact_two)
-           [ "codex-session-capture"; "--home"; home ]);
+      capture exact_two;
       require_code 0
         (run ~root ~env 887
            ([ "resume"; id ] @ codex_options "ghostty"));
@@ -2206,10 +2163,7 @@ let test_codex_session_capture_and_resume_modes () =
         missing_sidecar_script " --mode picker";
       if string_contains missing_sidecar_script exact_two then
         failwith "missing sidecar retained the old exact Codex selector";
-      require_code 0
-        (run_with_stdin ~root ~env:capture_env 889
-           (payload "resume" exact_two)
-           [ "codex-session-capture"; "--home"; home ]);
+      capture exact_two;
       require_code 0
         (run ~root ~env 890
            ([ "resume"; id ] @ codex_options "ghostty"));
@@ -2236,10 +2190,7 @@ let test_codex_session_capture_and_resume_modes () =
            ([ "open"; "--fresh"; id ] @ codex_options "ghostty"));
       if Shell.read_file sidecar <> "invalid\n" then
         failwith "fresh resume mutated the invalid old sidecar";
-      require_code 0
-        (run_with_stdin ~root ~env:capture_env 894
-           (payload "resume" exact_two)
-           [ "codex-session-capture"; "--home"; home ]);
+      capture exact_two;
       let job_json = Yojson.Safe.from_file job_file in
       [ "codex_session_id"; "backend"; "session_id" ]
       |> List.iter (fun field ->
@@ -2261,77 +2212,7 @@ let test_codex_session_capture_and_resume_modes () =
       require_contains "archived exact Codex resume" archived_dry.stdout
         ("[dry-run] Codex session: exact " ^ exact_two);
       if not (Sys.file_exists archived_dir) || Sys.file_exists worker_dir then
-        failwith "archived resume dry-run moved durable worker memory";
-      let legacy_id = "legacy-codex-worker" in
-      let legacy_title = "Legacy Codex worker" in
-      let legacy_branch = "cto/legacy-codex-worker" in
-      let legacy_run_dir = Filename.concat home ".monty/runs/legacy" in
-      let legacy_worker_dir =
-        Filename.concat legacy_run_dir ("workers/" ^ legacy_id)
-      in
-      let legacy_script =
-        Filename.concat (Home.runtime_script_dir ~home ())
-          ("monty-" ^ legacy_id ^ "-launch.sh")
-      in
-      Shell.ensure_dir legacy_worker_dir;
-      Shell.write_file (Filename.concat legacy_worker_dir "MONTY.md")
-        "# Legacy worker instructions\n";
-      let legacy_worker_path = Unix.realpath legacy_worker_dir in
-      let legacy_context = Unix.realpath context in
-      let legacy_job =
-        Job.make ~id:legacy_id ~title:legacy_title ~repo
-          ~branch:legacy_branch ~worker_dir:legacy_worker_path ~context ()
-      in
-      let harness_options =
-        Harness_command.
-          { harness = Harness.Codex;
-            command = "codex --fixed value";
-            codex_yolo = false;
-            fork = None;
-            script_dir = Home.runtime_script_dir ~home ();
-            branch_prefix = "monty";
-            monty_command = executable }
-      in
-      let old_path = Sys.getenv_opt "PATH" in
-      let legacy_contents =
-        Fun.protect
-          ~finally:(fun () ->
-            Unix.putenv "PATH" (Option.value ~default:"" old_path))
-          (fun () ->
-            Unix.putenv "PATH"
-              (Filename.concat root "fake-bin" ^ ":/usr/bin:/bin");
-            Harness_command.launch_script_contents ~legacy_mcp:false ~skills:false ~profile_environment:[] ~codex_hook:false
-              ~codex_mode:Codex_session.Fresh ~codex_trusted_paths:[]
-              ~options:harness_options ~job:legacy_job ~id:legacy_id
-              ~branch:legacy_branch ~source_repo:repo ~initial_workdir:repo ~home
-              ~context:legacy_context
-              ~instructions:(Filename.concat legacy_worker_path "MONTY.md")
-              ~worker_dir:legacy_worker_path ~worktree_mode:"never"
-              ~wt_command:"wt" ())
-      in
-      Shell.write_file legacy_script legacy_contents;
-      let legacy_json =
-        match
-          lifecycle_job_json ~id:legacy_id ~title:legacy_title
-            ~branch:legacy_branch ~repo ~context ~worker_dir:legacy_worker_dir
-            ~run_dir:legacy_run_dir ()
-        with
-        | `Assoc fields ->
-            `Assoc (("launch_script", `String legacy_script) :: fields)
-        | _ -> assert false
-      in
-      Yojson.Safe.to_file (Filename.concat legacy_worker_dir "job.json")
-        legacy_json;
-      let legacy_resume =
-        run ~root ~env 897
-          ([ "resume"; legacy_id ] @ codex_options "ghostty")
-      in
-      require_code 0 legacy_resume;
-      let rewritten_legacy = Shell.read_file legacy_script in
-      require_contains "legacy Codex worker gained capture hook" rewritten_legacy
-        "terminal --home";
-      require_contains "legacy Codex worker opened picker" rewritten_legacy
-        " --mode picker")
+        failwith "archived resume dry-run moved durable worker memory")
 
 let test_invalid_links_duplicate_ids_and_ambiguous_workers () =
   with_temp_root "invalid-links" (fun root ->
@@ -3146,7 +3027,7 @@ let test_codex_launch_preserves_mantle_environment () =
       require_code 1 failed;
       require_code 0 (cli private_profile retry_args);
       execute (script_for "retry-profile") private_profile (Some "private");
-      (* Genuine pre-profile template: remove the complete, simple empty block. *)
+      (* A script missing the current environment or ownership markers is rejected. *)
       require_code 0 (cli [] (resume "ghostty"));
       let current = Shell.read_file script in
       List.iter (fun markerless ->
@@ -3160,9 +3041,14 @@ let test_codex_launch_preserves_mantle_environment () =
             |> String.concat "\n"
           in
           Shell.write_file script legacy;
-          require_code 0 (cli work (resume "dry-run"));
-          require_code 0 (cli work (resume "ghostty"));
-          execute script work (Some "work")) [ false; true ];
+          List.iter (fun terminal ->
+              let rejected = cli work (resume terminal) in
+              require_code 1 rejected;
+              require_contains "incomplete script rejected" rejected.stderr "Monty-owned";
+              if read_file script <> legacy then failwith "rejected script was overwritten")
+            [ "dry-run"; "ghostty" ];
+          Shell.write_file script current) [ false; true ];
+      require_code 0 (cli work (resume "ghostty"));
       let valid = Shell.read_file script in
       let replace_line replacement =
         valid |> String.split_on_char '\n'
@@ -3247,13 +3133,19 @@ let test_retry_uses_recorded_script_and_absolute_commands () =
       let recorded_script = json_string "launch_script" json in
       if not (Sys.file_exists recorded_script) then
         failwith "failed launch did not leave its owned script";
+      let current_script = Shell.read_file recorded_script in
       let legacy_script =
-        Shell.read_file recorded_script |> String.split_on_char '\n'
+        current_script |> String.split_on_char '\n'
         |> List.filter (fun line ->
                not (String.equal line "# monty-launch-script-v1"))
         |> String.concat "\n"
       in
       Shell.write_file recorded_script legacy_script;
+      let rejected = run ~root ~env 13201 args in
+      require_code 1 rejected;
+      require_contains "markerless script rejected" rejected.stderr "Monty-owned";
+      if read_file recorded_script <> legacy_script then failwith "rejected script was overwritten";
+      Shell.write_file recorded_script current_script;
       let unrelated_dir = Filename.concat root "unrelated-scripts" in
       let unrelated =
         Filename.concat unrelated_dir "monty-script-worker-launch.sh"
@@ -4008,9 +3900,10 @@ let test_legacy_multi_workspace_branches () =
       assert_identity job_file;
       require_code 0 (cli [ "task"; "workspace"; "ensure"; task_id ]);
       assert_identity job_file;
-      require_code 0 (legacy_dispatch_fixture ~root ~env 2211 [ "headless"; "begin"; "legacy"; "--harness"; "pi"; "--home"; home ]);
+      install_pi_exec ~root ~log;
+      require_code 0 (cli [ "headless"; "run"; "--wait"; "legacy"; "--harness"; "pi" ]);
       assert_identity job_file;
-      require_code 0 (legacy_dispatch_fixture ~root ~env 2212 [ "headless"; "begin"; "--resume"; "legacy"; "--harness"; "pi"; "--home"; home ]);
+      require_code 0 (cli [ "headless"; "resume"; "--wait"; "legacy"; "--harness"; "pi" ]);
       require_code 0 (cli [ "resume"; "legacy"; "--terminal"; "ghostty" ]);
       require_code 0 (cli [ "tasks"; "sync" ]);
       assert_identity job_file;
@@ -4374,7 +4267,7 @@ let test_multi_workspace_sonnet_task_lifecycle () =
       if count_lines_containing log "/wt " < 6 then
         failwith "the repo-scoped wt fake did not observe both workspace lifecycles")
 
-let test_headless_prepare_begin_and_resume () =
+let test_headless_prepare_run_and_resume () =
   with_temp_root "headless" (fun root ->
       let home, log, env = setup_environment root in
       let repo = Filename.concat root "repo" in
@@ -4503,305 +4396,59 @@ let test_headless_prepare_begin_and_resume () =
       if string_contains (read_file log) "osascript"
          || string_contains (read_file log) "/pi "
       then failwith "headless prepare invoked Pi or Ghostty";
-      let premature_resume =
-        legacy_dispatch_fixture ~root ~env 1952
-          [ "headless"; "begin"; "--resume"; "headless-two"; "--home"; home ]
-      in
-      if premature_resume.code = 0 then
-        failwith "headless resume accepted a worker without a predecessor chain";
-      require_contains "headless successor guard" premature_resume.stderr
-        "launch-requested";
-      let fault_env =
-        replace_env env [ ("MONTY_FAULT_INJECT", "launch-before-request-state") ]
-      in
-      let faulted =
-        legacy_dispatch_fixture ~root ~env:fault_env 1953
-          [ "headless"; "begin"; "headless-two"; "--home"; home ]
-      in
-      if faulted.code = 0 then failwith "headless begin ignored its injected fault";
-      if job_status (job_file "headless-two") <> "prepared" then
-        failwith "a pre-dispatch headless failure was not retryable as prepared";
-      let begun =
-        legacy_dispatch_fixture ~root ~env 1954
-          [ "headless"; "begin"; "headless-one"; "--home"; home ]
-      in
+      install_pi_exec ~root ~log;
+      let cli args = run ~root ~env 1952 (args @ [ "--home"; home ]) in
+      let premature_resume = cli [ "headless"; "resume"; "--wait"; "headless-two" ] in
+      require_code 1 premature_resume;
+      require_contains "headless successor guard" premature_resume.stderr "launch-requested";
+      let begun = cli [ "headless"; "run"; "--wait"; "headless-one" ] in
       require_code 0 begun;
-      let dispatch = Yojson.Safe.from_string begun.stdout in
-      if
-        Yojson.Safe.Util.(dispatch |> member "schema" |> to_string)
-        <> Headless.dispatch_schema
-      then failwith "headless begin returned the wrong schema";
-      let begun_worktree =
-        Yojson.Safe.Util.(dispatch |> member "worker" |> member "worktree" |> to_string)
-      in
-      if not (List.mem begun_worktree worktrees) then
-        failwith "headless begin returned an unexpected worktree";
-      let harness_call = Yojson.Safe.Util.(dispatch |> member "harness_call") in
-      if Yojson.Safe.Util.(harness_call |> member "tool" |> to_string) <> "subagent"
-      then failwith "headless begin did not target the harness subagent tool";
-      let completion = Yojson.Safe.Util.(dispatch |> member "completion") in
-      if
-        Yojson.Safe.Util.(completion |> member "schema" |> to_string)
-        <> Headless.completion_schema
-      then failwith "headless begin omitted the versioned completion contract";
-      require_contains "Pi success finalizer"
-        Yojson.Safe.Util.(completion |> member "success_command" |> to_string)
-        "headless finish";
-      require_contains "Pi failure finalizer"
-        Yojson.Safe.Util.(completion |> member "failure_command" |> to_string)
-        "--error <MESSAGE>";
-      let chain =
-        Yojson.Safe.Util.(harness_call |> member "arguments" |> member "chain" |> to_list)
-      in
-      let implementation = List.nth chain 0 in
-      let implementation_task =
-        Yojson.Safe.Util.(implementation |> member "task" |> to_string)
-      in
-      let worktree_setup =
-        "You are in a new worktree. Install the project in this worktree before starting the task. Do not create or use symlinks into the main repository."
-      in
-      if not (String.starts_with ~prefix:worktree_setup implementation_task) then
-        failwith "headless implementation task did not start with worktree setup";
-      let reviewers =
-        Yojson.Safe.Util.(List.nth chain 1 |> member "parallel" |> to_list)
-      in
-      let children = implementation :: reviewers @ [ List.nth chain 2 ] in
-      List.iter
-        (fun child ->
-          let acceptance = Yojson.Safe.Util.member "acceptance" child in
-          if Yojson.Safe.Util.(acceptance |> member "level" |> to_string) <> "none"
-          then failwith "headless child did not explicitly disable inferred acceptance";
-          if
-            Yojson.Safe.Util.(acceptance |> member "reason" |> to_string)
-            <> Headless.acceptance_reason
-          then failwith "headless child acceptance reason did not identify the review gate")
-        children;
-      if job_status (job_file "headless-one") <> "launch-requested" then
-        failwith "headless begin did not claim its worker";
-      if job_status (job_file "headless-two") <> "prepared" then
-        failwith "headless begin changed another worker";
-      (match
-         Launcher.reserve_batch ~reject_requested:true stale_options
-           stale_preflight
-       with
-      | Ok _ ->
-          failwith
-            "headless reservation accepted a worker claimed after stale preflight"
-      | Error message ->
-          require_contains "headless post-lock claim guard" message
-            "became launch-requested");
-      if job_status (job_file "headless-one") <> "launch-requested" then
-        failwith "stale headless reservation reset a claimed worker";
-      if job_status (job_file "headless-two") <> "prepared" then
-        failwith "stale headless reservation mutated another worker";
-      let duplicate =
-        legacy_dispatch_fixture ~root ~env 1955
-          [ "headless"; "begin"; "headless-one"; "--home"; home ]
-      in
-      if duplicate.code = 0 then failwith "headless begin replayed a requested worker";
-      require_contains "headless begin replay recovery" duplicate.stderr
-        "headless resume";
-      let resumed =
-        legacy_dispatch_fixture ~root ~env 1956
-          [ "headless"; "begin"; "--resume"; "headless-one"; "--home"; home ]
-      in
+      let result = Yojson.Safe.from_string begun.stdout in
+      if json_string "harness" result <> "pi" then failwith "Pi run used the wrong harness";
+      let first_attempt = json_string "attempt_id" result in
+      let artifact_dir = json_string "artifact_dir" result in
+      let descriptor = Yojson.Safe.from_file (Filename.concat artifact_dir "attempt.json") in
+      if json_string "schema" descriptor <> "monty:headless-attempt:v2" then
+        failwith "Pi run did not use a process attempt";
+      List.iter (fun path ->
+          if not (Sys.file_exists (Filename.concat artifact_dir path)) then
+            failwith ("missing Pi run artifact " ^ path))
+        [ "implementation.md"; "reviews/correctness.md"; "reviews/quality.md"; "final.md" ];
+      if job_status (job_file "headless-one") <> "launch-requested"
+         || job_status (job_file "headless-two") <> "prepared" then
+        failwith "headless run claimed the wrong workers";
+      (match Launcher.reserve_batch ~reject_requested:true stale_options stale_preflight with
+       | Ok _ -> failwith "headless reservation accepted a worker claimed after stale preflight"
+       | Error message -> require_contains "headless post-lock claim guard" message "became launch-requested");
+      let duplicate = cli [ "headless"; "run"; "--wait"; "headless-one" ] in
+      require_code 1 duplicate;
+      require_contains "headless replay recovery" duplicate.stderr "headless resume";
+      let resumed = cli [ "headless"; "resume"; "--wait"; "headless-one" ] in
       require_code 0 resumed;
-      let first_attempt =
-        Yojson.Safe.Util.(completion |> member "attempt_id" |> to_string)
-      in
-      let first_attempt_root =
-        Filename.concat
-          (Filename.dirname (job_file "headless-one"))
-          ("artifacts/headless/" ^ first_attempt)
-      in
-      Shell.write_file (Filename.concat first_attempt_root "final.md")
-        "Pi successfully implemented and reviewed the task.\n";
-      let finished =
-        run ~root ~env 19561
-          [ "headless"; "finish"; "headless-one"; "--attempt";
-            first_attempt; "--outcome"; "success"; "--home"; home ]
-      in
-      require_code 0 finished;
-      if
-        Yojson.Safe.Util.(
-          Yojson.Safe.from_string finished.stdout |> member "outcome" |> to_string)
-        <> "ready-for-review"
-      then failwith "Pi success did not publish a ready run handoff";
-      let conflicting_finish =
-        run ~root ~env 195611
-          [ "headless"; "finish"; "headless-one"; "--attempt";
-            first_attempt; "--outcome"; "failed"; "--error";
-            "Contradictory replay"; "--home"; home ]
-      in
-      if conflicting_finish.code = 0 then
-        failwith "Pi finalization accepted a conflicting canonical outcome";
-      require_contains "conflicting Pi finalization" conflicting_finish.stderr
-        "refusing conflicting outcome";
-      let resumed_json = Yojson.Safe.from_string resumed.stdout in
-      let second_attempt =
-        Yojson.Safe.Util.(
-          resumed_json |> member "completion" |> member "attempt_id" |> to_string)
-      in
-      let failed_finish =
-        let outside_final = Filename.concat root "outside-final.md" in
-        Shell.write_file outside_final "forged final handoff\n";
-        let linked_final = Filename.concat
-            (Filename.concat
-               (Filename.dirname (job_file "headless-one"))
-               ("artifacts/headless/" ^ second_attempt))
-            "final.md"
-        in
-        Unix.symlink outside_final linked_final;
-        let rejected_link =
-          run ~root ~env 195621
-            [ "headless"; "finish"; "headless-one"; "--attempt";
-              second_attempt; "--outcome"; "success"; "--home"; home ]
-        in
-        if rejected_link.code = 0 then
-          failwith "Pi finish followed a symlinked final artifact";
-        require_contains "Pi final symlink rejection" rejected_link.stderr "symlink";
-        Unix.unlink linked_final;
-        run ~root ~env 19562
-          [ "headless"; "finish"; "headless-one"; "--attempt";
-            second_attempt; "--outcome"; "failed"; "--last-phase"; "review";
-            "--error"; "Pi callback failed"; "--home"; home ]
-      in
-      require_code 0 failed_finish;
-      if
-        Yojson.Safe.Util.(
-          Yojson.Safe.from_string failed_finish.stdout |> member "outcome"
-          |> to_string)
-        <> "failed"
-      then failwith "Pi failure did not publish a failed run handoff";
-      let pending =
-        run ~root ~env 19563
-          [ "handoff"; "pending"; "--format"; "json"; "--home"; home ]
-      in
+      let second_attempt = json_string "attempt_id" (Yojson.Safe.from_string resumed.stdout) in
+      if first_attempt = second_attempt then failwith "resume reused its predecessor attempt";
+      let pending = cli [ "handoff"; "pending"; "--format"; "json" ] in
       require_code 0 pending;
-      if
-        Yojson.Safe.Util.(
-          Yojson.Safe.from_string pending.stdout |> member "pending" |> to_list
-          |> List.length)
-        <> 2
-      then failwith "Pi finished-run notices were not durably recoverable";
-      let missed_callback =
-        legacy_dispatch_fixture ~root ~env 19564
-          [ "headless"; "begin"; "--resume"; "headless-one"; "--home"; home ]
-      in
-      require_code 0 missed_callback;
-      let missed_attempt =
-        Yojson.Safe.Util.(
-          Yojson.Safe.from_string missed_callback.stdout |> member "completion"
-          |> member "attempt_id" |> to_string)
-      in
-      let missed_root =
-        Filename.concat
-          (Filename.dirname (job_file "headless-one"))
-          ("artifacts/headless/" ^ missed_attempt)
-      in
-      Shell.write_file (Filename.concat missed_root "final.md")
-        "Pi finished while the original head-butler callback was unavailable.\n";
-      let recovered_after_restart =
-        run ~root ~env 19565
-          [ "handoff"; "pending"; "--format"; "json"; "--home"; home ]
-      in
-      require_code 0 recovered_after_restart;
-      if
-        Yojson.Safe.Util.(
-          Yojson.Safe.from_string recovered_after_restart.stdout
-          |> member "pending" |> to_list |> List.length)
-        <> 3
-      then
-        failwith
-          "pending discovery did not recover a Pi final artifact after callback loss";
-      let recovered_entries =
-        Yojson.Safe.Util.(
-          Yojson.Safe.from_string recovered_after_restart.stdout
-          |> member "pending" |> to_list)
-      in
-      let recovered_outcome =
-        recovered_entries
-        |> List.find_map (fun entry ->
-               let handoff = Yojson.Safe.Util.member "handoff" entry in
-               if
-                 Yojson.Safe.Util.(handoff |> member "id" |> to_string)
-                 = missed_attempt
-               then
-                 Some
-                   Yojson.Safe.Util.(handoff |> member "outcome" |> to_string)
-               else None)
-      in
-      if recovered_outcome <> Some "needs-attention" then
-        failwith "missed Pi callback recovery inferred a successful outcome";
-      let recovered_entry = List.find (fun entry ->
-          json_string "id" (Yojson.Safe.Util.member "handoff" entry) = missed_attempt)
-          recovered_entries in
-      let notice = json_string "id" (Yojson.Safe.Util.member "notice" recovered_entry) in
-      require_code 0 (run ~root ~env 19566
-          [ "handoff"; "acknowledge"; notice; "--home"; home ]);
-      let finish_after_discovery outcome extras =
-        run ~root ~env 19567
-          ([ "headless"; "finish"; "headless-one"; "--attempt"; missed_attempt;
-             "--outcome"; outcome; "--home"; home ] @ extras)
-      in
-      let finished_after_discovery = finish_after_discovery "success" [] in
-      require_code 0 finished_after_discovery;
-      if json_string "outcome" (Yojson.Safe.from_string finished_after_discovery.stdout)
-          <> "ready-for-review" then
-        failwith "pending discovery shadowed the successful Pi callback";
-      require_code 0 (finish_after_discovery "success" []);
-      require_code 1 (finish_after_discovery "failed" [ "--error"; "contradiction" ]);
-      let pending_after_finish = run ~root ~env 19568
-          [ "handoff"; "pending"; "--format"; "json"; "--home"; home ] in
-      require_code 0 pending_after_finish;
-      if Yojson.Safe.Util.(Yojson.Safe.from_string pending_after_finish.stdout
-          |> member "pending" |> to_list |> List.length) <> 2 then
-        failwith "late callback reopened an acknowledged notice";
-      let failed_attempt = legacy_dispatch_fixture ~root ~env 19569
-          [ "headless"; "begin"; "--resume"; "headless-one"; "--home"; home ] in
-      require_code 0 failed_attempt;
-      let attempt_id = Yojson.Safe.Util.(Yojson.Safe.from_string failed_attempt.stdout
-          |> member "completion" |> member "attempt_id" |> to_string) in
-      let attempt_root = Filename.concat (Filename.dirname (job_file "headless-one"))
-          ("artifacts/headless/" ^ attempt_id) in
-      Shell.write_file (Filename.concat attempt_root "final.md") "Pi final artifact\n";
-      require_code 0 (run ~root ~env 19570
-          [ "handoff"; "pending"; "--format"; "json"; "--home"; home ]);
-      let failure_args =
-        [ "headless"; "finish"; "headless-one"; "--attempt"; attempt_id;
-          "--outcome"; "failed"; "--last-phase"; "review"; "--error";
-          "Late failure callback"; "--home"; home ] in
-      let fault_env = replace_env env
-          [ ("MONTY_FAULT_INJECT", "run-handoff-after-canonical") ] in
-      require_code 1 (run ~root ~env:fault_env 19571 failure_args);
-      require_code 0 (run ~root ~env 19572
-          [ "handoff"; "pending"; "--format"; "json"; "--home"; home ]);
-      let final_failure = run ~root ~env 19573 failure_args in
-      require_code 0 final_failure;
-      let final_json = Yojson.Safe.from_string final_failure.stdout in
-      if json_string "outcome" final_json <> "failed" then
-        failwith "pending discovery shadowed the failed Pi callback";
-      let rendering = Filename.concat home
-          (".monty/handoffs/run-headless/headless-one/" ^ attempt_id ^ ".md") in
-      require_contains "repaired late callback rendering" (read_file rendering)
-        "Late failure callback";
-      if job_status (job_file "headless-one") <> "launch-requested" then
-        failwith "explicit headless resume changed the open launch state";
-      require_no_terminal_script "headless-one";
-      require_no_terminal_script "headless-two";
+      let pending_count output = Yojson.Safe.Util.(Yojson.Safe.from_string output
+          |> member "pending" |> to_list |> List.length) in
+      if pending_count pending.stdout <> 2 then failwith "Pi runs did not publish two durable notices";
+      (* Discovery no longer interprets retired callback artifacts. *)
+      let retired = Filename.concat (Filename.dirname (job_file "headless-one"))
+          "artifacts/headless/retired-callback" in
+      Shell.ensure_dir retired;
+      Yojson.Safe.to_file (Filename.concat retired "attempt.json")
+        (`Assoc [ "schema", `String "monty:headless-attempt:v1";
+          "attempt_id", `String "retired-callback"; "worker_id", `String "headless-one";
+          "source", `String "headless-pi" ]);
+      Shell.write_file (Filename.concat retired "final.md") "Retired callback artifact\n";
+      let rediscovered = cli [ "handoff"; "pending"; "--format"; "json" ] in
+      require_code 0 rediscovered;
+      if pending_count rediscovered.stdout <> 2 then failwith "pending revived a retired callback attempt";
+      List.iter require_no_terminal_script [ "headless-one"; "headless-two" ];
       let tasks = local_tasks_json home in
-      if List.length tasks <> 2 then failwith "headless workers did not retain two local tasks";
-      if
-        List.exists
-          (fun task ->
-            not
-              (String.equal
-                 Yojson.Safe.Util.(task |> member "status" |> to_string)
-                 "open"))
-          tasks
-      then failwith "headless execution completed a local task automatically";
-      if string_contains (read_file log) "osascript" then
-        failwith "headless begin or resume opened Ghostty")
+      if List.length tasks <> 2 || List.exists (fun task -> json_string "status" task <> "open") tasks then
+        failwith "headless execution changed task lifecycle";
+      if string_contains (read_file log) "osascript" then failwith "headless run opened Ghostty")
 
 let test_agent_profiles_selection_snapshot_and_solo () =
   with_temp_root "agent-profiles" (fun root ->
@@ -4908,69 +4555,34 @@ let test_agent_profiles_selection_snapshot_and_solo () =
           [ "settings"; "set"; "agent-profile"; "solo"; "--home"; home ]
       in
       require_code 0 set_solo;
-      let reviewed_begin =
-        legacy_dispatch_fixture ~root ~env 1976
-          [ "headless"; "begin"; "profile-reviewed"; "--home"; home ]
+      install_pi_exec ~root ~log;
+      let run_pi id expected_phases =
+        let before = count_lines_containing log "/pi " in
+        let result = run ~root ~env 1976
+            [ "headless"; "run"; "--wait"; id; "--home"; home ] in
+        require_code 0 result;
+        if count_lines_containing log "/pi " - before <> expected_phases then
+          failwith ("wrong pinned phase count for " ^ id);
+        Yojson.Safe.from_string result.stdout
       in
-      require_code 0 reviewed_begin;
-      let reviewed_chain =
-        Yojson.Safe.Util.(
-          Yojson.Safe.from_string reviewed_begin.stdout |> member "harness_call"
-          |> member "arguments" |> member "chain" |> to_list)
-      in
-      if List.length reviewed_chain <> 3 then
-        failwith "reviewed worker did not resume with its pinned 1-2-1 profile";
-      let legacy_begin =
-        legacy_dispatch_fixture ~root ~env 19765
-          [ "headless"; "begin"; "profile-legacy"; "--home"; home ]
-      in
-      require_code 0 legacy_begin;
-      let legacy_chain =
-        Yojson.Safe.Util.(
-          Yojson.Safe.from_string legacy_begin.stdout |> member "harness_call"
-          |> member "arguments" |> member "chain" |> to_list)
-      in
-      if List.length legacy_chain <> 3 then
-        failwith "legacy worker without profile metadata did not use reviewed";
-      let legacy_dispatch = Yojson.Safe.from_string legacy_begin.stdout in
-      let legacy_attempt = Yojson.Safe.Util.(legacy_dispatch |> member "completion"
-        |> member "attempt_id" |> to_string) in
-      let legacy_final = Yojson.Safe.Util.(List.nth legacy_chain 2 |> member "output" |> to_string) in
-      let descriptor = Filename.concat (Filename.dirname legacy_final) "attempt.json" in
-      let legacy_descriptor = match Yojson.Safe.from_file descriptor with
-        | `Assoc fields -> `Assoc (List.remove_assoc "agent_profile" fields)
-        | _ -> failwith "legacy attempt was not an object" in
-      Yojson.Safe.to_file descriptor legacy_descriptor;
-      Shell.write_file legacy_final "Historical reviewed attempt completed.\n";
-      let legacy_finished = run ~root ~env 19766
-        [ "headless"; "finish"; "profile-legacy"; "--attempt"; legacy_attempt;
-          "--outcome"; "success"; "--home"; home ] in
-      require_code 0 legacy_finished;
-      let legacy_handoff = Yojson.Safe.Util.(Yojson.Safe.from_string legacy_finished.stdout
-        |> member "handoff" |> to_string) |> read_file in
-      require_contains "legacy attempt retains review semantics" legacy_handoff
-        "2 independent reviewers completed and the fixer verified their reports";
+      let reviewed = run_pi "profile-reviewed" 4 in
+      if json_string "agent_profile" reviewed <> "reviewed" then
+        failwith "setting changed a pinned reviewed profile";
+      let legacy = run_pi "profile-legacy" 4 in
+      if json_string "agent_profile" legacy <> "reviewed" then
+        failwith "worker without profile metadata did not use reviewed";
       let set_reviewed =
         run ~root ~env 1977
           [ "settings"; "set"; "agent-profile"; "reviewed"; "--home"; home ]
       in
       require_code 0 set_reviewed;
-      let solo_begin =
-        legacy_dispatch_fixture ~root ~env 1978
-          [ "headless"; "begin"; "profile-solo"; "--home"; home ]
-      in
-      require_code 0 solo_begin;
-      let solo_chain =
-        Yojson.Safe.Util.(
-          Yojson.Safe.from_string solo_begin.stdout |> member "harness_call"
-          |> member "arguments" |> member "chain" |> to_list)
-      in
-      if List.length solo_chain <> 1 then
-        failwith "solo worker did not resume with its pinned single phase";
-      if
-        Yojson.Safe.Util.(List.hd solo_chain |> member "output" |> to_string)
-        |> Filename.basename <> "final.md"
-      then failwith "solo Pi phase did not write the final handoff artifact";
+      let solo = run_pi "profile-solo" 1 in
+      if json_string "agent_profile" solo <> "solo" then
+        failwith "setting changed a pinned solo profile";
+      let artifacts = json_string "artifact_dir" solo in
+      if not (Sys.file_exists (Filename.concat artifacts "final.md"))
+         || Sys.file_exists (Filename.concat artifacts "reviews") then
+        failwith "solo Pi run produced the wrong artifacts";
       install_codex_exec ~root ~log;
       let set_codex =
         run ~root ~env 1979
@@ -5064,27 +4676,17 @@ let test_simplified_default_and_headless_writers () =
       install_profile home { simplified with interactive = "CHANGED PROFILE";
         fix_role = Agent_profile.Fixer; fix = Some "CHANGED FINAL WRITER" };
       ignore (ok [ "headless"; "prepare-many"; "--manifest"; manifest ]);
-      let legacy = legacy_dispatch_fixture ~root ~env 19831 [ "headless"; "begin"; "simple-pi"; "--home"; home ] in
-      require_code 0 legacy;
-      let dispatch = Yojson.Safe.from_string legacy.stdout in
-      let chain = Yojson.Safe.Util.(dispatch |> member "harness_call"
-        |> member "arguments" |> member "chain" |> to_list) in
-      if List.length chain <> 2 then failwith "Pi default did not have two sequential writers";
-      let first = List.hd chain and final = List.nth chain 1 in
-      List.iter (fun child ->
-          if Yojson.Safe.Util.(child |> member "agent" |> to_string) <> "worker" ||
-             Yojson.Safe.Util.(child |> member "parallel") <> `Null then
-            failwith "Pi simplified chain included a reviewer";
-          if Yojson.Safe.Util.member "cwd" child <> Yojson.Safe.Util.member "cwd" first then
-            failwith "Pi writers did not share their worktree") chain;
-      require_contains "Pi final role" (Yojson.Safe.to_string final) "Simplification";
-      require_contains "Pi implementation handoff" (Yojson.Safe.to_string final)
-        "{outputs.implementation}";
-      let attempt = Yojson.Safe.Util.(dispatch |> member "completion" |> member "attempt_id" |> to_string) in
-      let final_output = Yojson.Safe.Util.(final |> member "output" |> to_string) in
-      Shell.write_file final_output "Simplification complete; affected checks passed.\n";
-      let finished = ok [ "headless"; "finish"; "simple-pi"; "--attempt"; attempt;
-        "--outcome"; "success" ] |> Yojson.Safe.from_string in
+      install_pi_exec ~root ~log;
+      let before_pi = count_lines_containing log "/pi " in
+      let finished = ok [ "headless"; "run"; "--wait"; "simple-pi" ] |> Yojson.Safe.from_string in
+      if count_lines_containing log "/pi " - before_pi <> 2 then
+        failwith "Pi default did not run two sequential writers";
+      let pi_artifacts = json_string "artifact_dir" finished in
+      let simplifier_prompt = read_file (Filename.concat pi_artifacts "prompts/simplifier.md") in
+      require_contains "Pi final role" simplifier_prompt "can you radically simplify this?";
+      require_contains "Pi implementation handoff" simplifier_prompt "PI IMPLEMENTATION HANDOFF";
+      if string_contains simplifier_prompt "CHANGED FINAL WRITER" then
+        failwith "Pi run ignored its pinned simplifier";
       let assert_handoff result =
         let path = Yojson.Safe.Util.(result |> member "handoff" |> to_string) in
         let handoff = Yojson.Safe.from_file path in
@@ -5187,29 +4789,10 @@ printf '%s %s\n' "$phase" "$worktree" >> |} ^ Shell.quote log ^ "\n");
       Shell.chmod_executable osascript;
       ignore (ok [ "resume"; "--archived"; "simple-pi"; "--harness"; "pi" ]);
       assert_pinned (worker_dir "simple-pi");
-      (* An MCP-era Pi launch script is accepted only as a complete known
-         template, then replaced before any terminal request. *)
       let script = Yojson.Safe.Util.(Yojson.Safe.from_file (job_file "simple-pi")
         |> member "launch_script" |> to_string) in
-      let contents = read_file script in
-      let record = match Job_store.find ~home ~scope:Job_store.Active "simple-pi" with
-        | Ok record->record|Error message->failwith message in
-      let legacy = Harness_command.build_command_with_transport ~pin_policy:true ~managed:false
-        ~legacy_mcp:true ~skills:false ~codex_hook:true ~codex_mode:Codex_session.Picker
-        ~codex_trusted_paths:[] ~options:Harness_command.{harness=Harness.Pi;command="pi";
-          codex_yolo=false;fork=None;script_dir=Home.runtime_script_dir ~home ();branch_prefix="monty";monty_command=executable}
-        ~home ~instructions:(Some(Filename.concat record.worker_dir "MONTY.md")) ~context:record.job.context ~job:record.job in
-      let replace_command replacement = contents |> String.split_on_char '\n' |> List.map (fun line ->
-          if String.starts_with ~prefix:"exec " line then replacement
-          else line) |> String.concat "\n" in
-      Shell.write_file script (replace_command legacy);
-      ignore (ok [ "resume"; "simple-pi"; "--harness"; "pi" ]);
       require_contains "resume routes skill installation through server" (read_file script)
-        (Shell.quote executable ^ " terminal --home ");
-      if string_contains (read_file script) "mcp setup-pi" then failwith "resume retained MCP setup";
-      Shell.write_file script (replace_command (legacy ^ "; touch /tmp/forged-monty-skill"));
-      let rejected = cli [ "resume"; "simple-pi"; "--harness"; "pi" ] in
-      require_code 1 rejected)
+        (Shell.quote executable ^ " terminal --home "))
 
 let test_standalone_background_harnesses () =
   with_temp_root "background-harnesses" (fun root ->
@@ -5471,16 +5054,6 @@ let test_codex_headless_uses_effective_settings_without_ghostty () =
         Filename.concat home
           (Printf.sprintf ".monty/runs/%s/workers/%s/job.json" run id)
       in
-      let rejected_begin =
-        legacy_dispatch_fixture ~root ~env 1963
-          [ "headless"; "begin"; "codex-one"; "--home"; home ]
-      in
-      if rejected_begin.code = 0 then
-        failwith "Codex-selected headless begin emitted a Pi subagent call";
-      require_contains "Codex begin routing" rejected_begin.stderr
-        "monty headless run";
-      if job_status (job_file "run-codex-one" "codex-one") <> "prepared" then
-        failwith "rejected Pi begin claimed the Codex worker";
       let first_run =
         run ~root ~env 1964
           [ "headless"; "run"; "--wait"; "codex-one"; "--home"; home ]
@@ -6986,9 +6559,6 @@ let run_named name test =
   with exn -> failwith (Printf.sprintf "%s: %s" name (Printexc.to_string exn))
 
 let () =
-  if Array.length Sys.argv>1 && Sys.argv.(1)="--legacy-dispatch-fixture" then
-    (try legacy_dispatch_main (Array.to_list Sys.argv |> List.tl |> List.tl)
-     with exn->prerr_endline(Printexc.to_string exn);exit 1);
   Unix.putenv "GIT_CONFIG_NOSYSTEM" "1";
   Unix.putenv "GIT_CONFIG_SYSTEM" "/dev/null";
   Unix.putenv "GIT_CONFIG_GLOBAL" "/dev/null";
@@ -7016,8 +6586,8 @@ let () =
       test_external_terminal_request_runs_without_state_lock );
     ( "cli_codex_launch_uses_command_local_trust",
       test_codex_launch_uses_command_local_trust );
-    ( "cli_codex_session_capture_and_resume_modes",
-      test_codex_session_capture_and_resume_modes );
+    ( "cli_codex_session_resume_modes",
+      test_codex_session_resume_modes );
     ( "cli_lifecycle_faults_recover_from_both_locations",
       test_lifecycle_faults_recover_from_both_locations );
     ( "cli_completion_persists_force_and_never_creates_worktree",
@@ -7081,8 +6651,8 @@ let () =
       test_legacy_multi_workspace_reservations );
     ( "cli_legacy_multi_workspace_branches",
       test_legacy_multi_workspace_branches );
-    ( "cli_headless_prepare_begin_and_resume",
-      test_headless_prepare_begin_and_resume );
+    ( "cli_headless_prepare_run_and_resume",
+      test_headless_prepare_run_and_resume );
     ( "cli_simplified_default_and_headless_writers",
       test_simplified_default_and_headless_writers );
     ( "cli_agent_profiles_selection_snapshot_and_solo",

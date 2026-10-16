@@ -217,7 +217,6 @@ Never infer completion from Pi runtime status.
 If a process fails after its worker is claimed, leave the worker `launch-requested`.
 Run `monty headless resume <worker-id>` only when the user intentionally requests a fresh successor run.
 Resume directly starts the selected Pi or Codex profile in the background; `--wait` waits for its result.
-`headless begin` now submits server-owned execution. `headless finish` remains for recovery of already persisted legacy callback attempts; it does not authorize new direct native execution.
 Never persist a backend, Pi run ID, Codex session ID, async status, or runtime state in `job.json`.
 Interactive Codex workers record their exact conversation only in the durable
 `codex-session-id` sidecar; headless Codex chains must not claim or update it.
@@ -364,16 +363,6 @@ untouched, generated files are refreshed atomically, and unmanaged files or
 unsafe symlinks are rejected instead of overwritten. Read-only inventory, help,
 and dry-run commands do not install skills. Skills do not grant new permissions
 or override role instructions. Native settings that disable skills remain in effect.
-
-Monty's documentation MCP has been removed. Existing generated worker scripts
-are recognized and replaced on explicit resume. The old `monty mcp guide`
-spelling remains a CLI alias for saved instructions; it starts no MCP server.
-Pi setup removes only a legacy
-`monty` server entry matching this executable and `mcp serve`, preserving other
-servers/settings. Manually registered MCP entries using another executable path
-must be removed from that client's configuration by its owner. Existing running
-native sessions may retain loaded MCP tools until they are restarted; installing
-skills does not interrupt a live session. See `docs/skills.md` for details.
 
 ## Web client
 

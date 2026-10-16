@@ -66,7 +66,7 @@ Run state and task state must remain distinct:
 Interactive finished-run delivery prints directly in the worker terminal because
 the user has taken responsibility for that session. Headless delivery uses a
 durable home-level inbox with idempotent acknowledgement and at-least-once
-semantics. Live harness callbacks and restarted head-butler sessions reference
+semantics. Native runners and restarted head-butler sessions reference
 the same canonical handoff rather than creating competing summaries. The head
 butler surfaces pending headless results at the next safe message boundary and
 must not interrupt an unrelated response in progress.
@@ -186,10 +186,10 @@ monty done
 monty done --force
 ```
 
-The `monty headless prepare-many`, `begin`, `finish`, and `resume` commands form a versioned harness protocol rather than a second public lifecycle.
-`begin` and `resume` emit complete arguments for the existing subagent tool, so the head butler does not reconstruct chain JSON by hand.
-`finish` converts a Pi callback into the same canonical run handoff produced directly by Codex and published explicitly by interactive workers.
-Ghostty remains the default behavior of the existing public commands.
+The `monty headless prepare-many`, `run`, `run-many`, and `resume` commands use
+server-owned runners and the same worker lifecycle as interactive execution.
+Monty sequences each pinned agent profile and publishes its canonical run handoff.
+Rex is the default terminal; Ghostty remains available explicitly.
 
 Lifecycle commands should be designed as stable product surfaces.
 They are used by humans, the head butler, and worker sessions.

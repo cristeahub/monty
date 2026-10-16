@@ -34,10 +34,6 @@ Git inspection happens before Monty takes its state lock. Publication then
 reloads the exact worker identity and atomically writes the canonical record,
 rendering, and notice while holding the one-home lock. Reusing the same handoff
 id returns the existing canonical run and never reopens an acknowledged notice.
-The sole exception is a provisional `headless-pi` / `needs-attention` record
-from callback-loss recovery: a late explicit Pi callback replaces its outcome
-and rendering with `ready-for-review` or `failed`, preserving the receipt and
-any acknowledgement. Confirmed final outcomes still reject conflicting callbacks.
 Interactive publication prints the compact rendering directly in the worker's
 Ghostty session and creates an already-acknowledged delivery receipt, so it is
 not surfaced again by the head butler. Headless publication leaves its notice
@@ -55,10 +51,8 @@ handoff hierarchy.
 `monty handoff pending` is at-least-once for headless delivery. It repairs a
 canonical publication interrupted before rendering or its correctly classified
 delivery receipt. Recovered interactive receipts remain acknowledged and are
-not displayed by the head butler. When a legacy v1 Pi extension attempt has a durable
-`final.md` but its live callback was missed, it publishes a `needs-attention`
-receipt without inferring success from the artifact alone. It never launches or
-resumes work and never changes task status. The head butler displays
+not displayed by the head butler. Discovery never launches or resumes work and
+never changes task status. The head butler displays
 the referenced handoff at a safe message boundary and then calls
 `monty handoff acknowledge <notice-id>`. Repeating acknowledgement succeeds
 without changing the run or task.
@@ -78,6 +72,6 @@ explicitly approved actions.
 
 ## Standalone background runs
 
-Pi and Codex process runners publish this same handoff directly. Their startup receipt references its future canonical path; a startup receipt is not a completed run. Process attempts use `monty:headless-attempt:v2` and are excluded from legacy Pi callback-loss recovery, including the interval between writing final.md and publishing the handoff. Per-phase events and `logs/supervisor.log` remain in the attempt directory. `job.json` retains the existing open lifecycle state.
+Pi and Codex process runners publish this same handoff directly. Their startup receipt references its future canonical path; a startup receipt is not a completed run. Process attempts use `monty:headless-attempt:v2`. Per-phase events and `logs/supervisor.log` remain in the attempt directory. `job.json` retains the existing open lifecycle state.
 
 Claude headless runs use the `headless-claude` source. Native session identity remains in conversation records/sidecars, outside job.json.

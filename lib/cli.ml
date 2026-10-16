@@ -317,14 +317,6 @@ let print_headless_result = function
       0
  in
 
-let headless_begin worker explicit_resume options =
-  match options with
-  | Error message -> exit_code (Error message)
-  | Ok options ->
-      Client_terminal.headless ~wait:false ~resume:explicit_resume options worker
-      |> print_headless_result
- in
-
 let server_child ~home =
   match Sys.getenv_opt "MONTY_SERVER_EPOCH",Sys.getenv_opt "MONTY_SERVER_PARENT_PID",Sys.getenv_opt "MONTY_SERVER_EXECUTION",Sys.getenv_opt "MONTY_SERVER_NONCE" with
   | Some epoch,Some pid,Some execution,Some nonce ->
@@ -351,18 +343,12 @@ let headless_wait_arg =
   let doc = "Wait for the final run result. By default, return once the server-owned supervisor has claimed the worker and prepared its first phase." in
   Cmdliner.Arg.(value & flag & info [ "wait" ] ~doc)
  in
-let headless_worker_term ?(legacy = false) command =
+let headless_worker_term command =
   let worker =
     let doc = "Worker id, branch leaf, branch, or title slug." in
     Cmdliner.Arg.(required & pos 0 (some string) None & info [] ~docv:"WORKER" ~doc)
   in
-  let mode =
-    if legacy then
-      Cmdliner.Arg.(value & flag & info [ "resume" ]
-        ~doc:"Intentionally start a successor server-owned execution.")
-    else headless_wait_arg
-  in
-  Cmdliner.Term.(const command $ worker $ mode $ headless_options_term)
+  Cmdliner.Term.(const command $ worker $ headless_wait_arg $ headless_options_term)
  in
 let headless_run_many manifest wait options =
   match options with
@@ -498,7 +484,6 @@ let handoff_publish_term =
 let handoff_pending format home =
   let result =
     let ( let* ) = Result.bind in
-    let* _recovered = Headless.recover_finished_pi ~home in
     let* _repaired = Run_handoff.recover_orphaned_notices ~home in
     Run_handoff.pending ~home
   in
@@ -607,46 +592,6 @@ let handoff_follow_up_term =
   in
   Cmdliner.Term.(const handoff_follow_up $ worker $ run_id $ question $ home_arg)
  in
-let headless_finish worker attempt outcome last_phase error home =
-  let success =
-    match String.lowercase_ascii outcome with
-    | "success" | "succeeded" -> Ok true
-    | "failed" | "failure" -> Ok false
-    | value ->
-        Error
-          (Printf.sprintf
-             "unknown headless finish outcome %S; expected success or failed" value)
-  in
-  match success with
-  | Error message -> exit_code (Error message)
-  | Ok success ->
-      Headless.finish_pi_worker ~home ~worker ~attempt_id:attempt ~success
-        ?last_phase ?error ()
-      |> print_headless_result
- in
-let headless_finish_term =
-  let worker =
-    let doc = "Pi worker whose asynchronous chain returned." in
-    Cmdliner.Arg.(required & pos 0 (some string) None & info [] ~docv:"WORKER" ~doc)
-  in
-  let attempt =
-    let doc = "Attempt id from the versioned completion contract." in
-    Cmdliner.Arg.(required & opt (some string) None & info [ "attempt" ] ~docv:"ID" ~doc)
-  in
-  let outcome =
-    let doc = "Harness callback outcome: success or failed." in
-    Cmdliner.Arg.(required & opt (some string) None & info [ "outcome" ] ~docv:"OUTCOME" ~doc)
-  in
-  let last_phase =
-    let doc = "Last known chain phase for a failure." in
-    Cmdliner.Arg.(value & opt (some string) None & info [ "last-phase" ] ~docv:"PHASE" ~doc)
-  in
-  let error =
-    let doc = "Harness failure message." in
-    Cmdliner.Arg.(value & opt (some string) None & info [ "error" ] ~docv:"MESSAGE" ~doc)
-  in
-  Cmdliner.Term.(const headless_finish $ worker $ attempt $ outcome $ last_phase $ error $ home_arg)
- in
 let resume archived fresh worker options =
   let ( let* ) = Result.bind in
   let result =
@@ -703,12 +648,6 @@ let resume_term =
     Cmdliner.Arg.(value & flag & info [ "fresh" ] ~doc)
   in
   Cmdliner.Term.(const resume $ archived $ fresh $ worker $ options_term)
- in
-let codex_session_capture home =
-  In_channel.input_all stdin |> Codex_session.capture ~home |> exit_code
- in
-let codex_session_capture_term =
-  Cmdliner.Term.(const codex_session_capture $ home_arg)
  in
 let complete worker force home wt_command =
   Done.complete ?worker ~home ~wt_command ~force () |> exit_code
@@ -1267,11 +1206,6 @@ let open_cmd =
   let doc = "Open a worker agent session from durable Monty memory. Alias for resume." in
   Cmdliner.Cmd.v (Cmdliner.Cmd.info "open" ~doc) resume_term
  in
-let codex_session_capture_cmd =
-  let doc = "Record a Codex SessionStart hook payload for the current worker." in
-  Cmdliner.Cmd.v (Cmdliner.Cmd.info "codex-session-capture" ~doc)
-    codex_session_capture_term
- in
 let done_cmd =
   let doc = "Mark a worker job done, close its linked local task, delete its worktree and branch, and archive its memory." in
   Cmdliner.Cmd.v (Cmdliner.Cmd.info "done" ~doc) complete_term
@@ -1379,11 +1313,6 @@ let headless_cmd =
     let doc = "Reserve jobs and materialize their Monty-owned worktrees for headless dispatch." in
     Cmdliner.Cmd.v (Cmdliner.Cmd.info "prepare-many" ~doc) headless_prepare_many_term
   in
-  let begin_cmd =
-    let doc = "Start server-owned execution; --resume intentionally starts a successor attempt." in
-    Cmdliner.Cmd.v (Cmdliner.Cmd.info "begin" ~doc)
-      (headless_worker_term ~legacy:true headless_begin)
-  in
   let run_cmd =
     let doc = "Start a server-owned Pi, Codex or Claude worker using its pinned agent profile." in
     Cmdliner.Cmd.v (Cmdliner.Cmd.info "run" ~doc)
@@ -1398,13 +1327,9 @@ let headless_cmd =
     Cmdliner.Cmd.v (Cmdliner.Cmd.info "resume" ~doc)
       (headless_worker_term headless_resume)
   in
-  let finish_cmd =
-    let doc = "Finalize a returned Pi chain through the shared durable run-handoff contract." in
-    Cmdliner.Cmd.v (Cmdliner.Cmd.info "finish" ~doc) headless_finish_term
-  in
   let doc = "Prepare and run headless Pi or Codex worker chains." in
   Cmdliner.Cmd.group (Cmdliner.Cmd.info "headless" ~doc)
-    [ prepare_cmd; begin_cmd; run_cmd; run_many_cmd; resume_cmd; finish_cmd ]
+    [ prepare_cmd; run_cmd; run_many_cmd; resume_cmd ]
  in
 let handoff_cmd =
   let publish_cmd =
@@ -1507,7 +1432,6 @@ let main_cmd =
       launch_many_cmd;
       open_cmd;
       resume_cmd;
-      codex_session_capture_cmd;
       done_cmd;
       list_cmd;
       overview_cmd;
@@ -1522,8 +1446,7 @@ let main_cmd =
       doctor_cmd;
       rex_cmd;
       Guide.command;
-      Cmdliner.Cmd.group (Cmdliner.Cmd.info "mcp" ~doc:"Legacy CLI guide alias; the MCP server has been removed.") [Guide.command];
-      Skill.command ~home_arg ~harness_arg ~getenv ~monty_command:(monty_command ());
+      Skill.command ~home_arg ~harness_arg ~getenv;
     ]
  in
 main_cmd

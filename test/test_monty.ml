@@ -1059,9 +1059,9 @@ let test_codex_harness_command () =
         monty_command = "monty" }
   in
   let command =
-    Harness_command.build_command ~codex_hook:true
+    Harness_command.build_command
       ~codex_mode:Codex_session.Fresh
-      ~codex_trusted_paths:[ "/repo" ] ~options ~home:"/monty"
+      ~options ~home:"/monty"
       ~instructions:(Some "/monty/MONTY.md") ~job ~context:job.context
   in
   assert_contains "managed terminal pins its approval policy" command "exec env MONTY_CODEX_YOLO=false 'monty' terminal";
@@ -1076,9 +1076,9 @@ let test_codex_harness_command () =
   assert_not_contains "Codex YOLO defaults off" command
     "--dangerously-bypass-approvals-and-sandbox";
   let picker_command =
-    Harness_command.build_command ~codex_hook:true
+    Harness_command.build_command
       ~codex_mode:Codex_session.Picker
-      ~codex_trusted_paths:[] ~options ~home:"/monty"
+      ~options ~home:"/monty"
       ~instructions:(Some "/monty/MONTY.md") ~job ~context:job.context
   in
   assert_contains "Codex worker native picker" picker_command " --mode picker";
@@ -1086,9 +1086,9 @@ let test_codex_harness_command () =
     "Read the files below before acting";
   assert_not_contains "Codex picker never uses last" picker_command "--last";
   let exact_command =
-    Harness_command.build_command ~codex_hook:true
+    Harness_command.build_command
       ~codex_mode:(Codex_session.Exact "thread's exact id")
-      ~codex_trusted_paths:[] ~options ~home:"/monty"
+      ~options ~home:"/monty"
       ~instructions:(Some "/monty/MONTY.md") ~job ~context:job.context
   in
   assert_contains "Codex worker exact resume" exact_command
@@ -1097,9 +1097,9 @@ let test_codex_harness_command () =
     "Read the files below before acting";
   assert_not_contains "Codex exact resume never uses last" exact_command "--last";
   let single_always_script =
-    Harness_command.launch_script_contents ~codex_hook:true
+    Harness_command.launch_script_contents
       ~codex_mode:Codex_session.Fresh
-      ~codex_trusted_paths:[] ~options ~job ~id:"task-1"
+      ~options ~job ~id:"task-1"
       ~branch:"cto/task-1" ~source_repo:"/repo" ~initial_workdir:"/repo"
       ~home:"/monty" ~context:job.context ~instructions:"/monty/MONTY.md"
       ~worker_dir:"/monty/workers/task-1" ~worktree_mode:"always"
@@ -1120,17 +1120,17 @@ let test_codex_harness_command () =
       ~context:"/monty/context.md" ~task_key:"local:local-005" ()
   in
   let multi_command =
-    Harness_command.build_command ~codex_hook:true
+    Harness_command.build_command
       ~codex_mode:Codex_session.Fresh
-      ~codex_trusted_paths:[] ~options ~home:"/monty"
+      ~options ~home:"/monty"
       ~instructions:(Some "/monty/MONTY.md") ~job:multi_job
       ~context:multi_job.context
   in
   assert_contains "Codex service receives workspace environment" multi_command "terminal";
   let never_script =
-    Harness_command.launch_script_contents ~codex_hook:true
+    Harness_command.launch_script_contents
       ~codex_mode:Codex_session.Fresh
-      ~codex_trusted_paths:[] ~options ~job:multi_job ~id:"task-1"
+      ~options ~job:multi_job ~id:"task-1"
       ~branch:"cto/task-1" ~source_repo:"/repo" ~initial_workdir:"/repo"
       ~home:"/monty" ~context:multi_job.context ~instructions:"/monty/MONTY.md"
       ~worker_dir:"/monty/workers/task-1" ~worktree_mode:"never"
@@ -1141,9 +1141,9 @@ let test_codex_harness_command () =
   assert_contains "multi never second workspace" never_script
     "MONTY_WORKSPACE_2='/admin'";
   let always_script =
-    Harness_command.launch_script_contents ~codex_hook:true
+    Harness_command.launch_script_contents
       ~codex_mode:Codex_session.Fresh
-      ~codex_trusted_paths:[] ~options ~job:multi_job ~id:"task-1"
+      ~options ~job:multi_job ~id:"task-1"
       ~branch:"cto/task-1" ~source_repo:"/repo" ~initial_workdir:"/repo"
       ~home:"/monty" ~context:multi_job.context ~instructions:"/monty/MONTY.md"
       ~worker_dir:"/monty/workers/task-1" ~worktree_mode:"always"
@@ -1161,9 +1161,9 @@ let test_codex_harness_command () =
       ~context:"/monty/context.md" ()
   in
   let unlinked_always_script =
-    Harness_command.launch_script_contents ~codex_hook:true
+    Harness_command.launch_script_contents
       ~codex_mode:Codex_session.Fresh
-      ~codex_trusted_paths:[] ~options ~job:unlinked_multi_job
+      ~options ~job:unlinked_multi_job
       ~id:"task-1" ~branch:"cto/task-1" ~source_repo:"/repo"
       ~initial_workdir:"/repo" ~home:"/monty"
       ~context:unlinked_multi_job.context ~instructions:"/monty/MONTY.md"
@@ -1177,9 +1177,8 @@ let test_codex_harness_command () =
     unlinked_always_script
     "ensure-worktree --repo '/admin' --branch 'cto/admin-task-1' --home";
   let yolo_command =
-    Harness_command.build_command ~codex_hook:true
+    Harness_command.build_command
       ~codex_mode:Codex_session.Fresh
-      ~codex_trusted_paths:[]
       ~options:{ options with codex_yolo = true }
       ~home:"/monty" ~instructions:(Some "/monty/MONTY.md") ~job
       ~context:job.context
@@ -1336,132 +1335,39 @@ let test_headless_json_contract () =
         home = "/monty";
         profile = reviewed_profile }
   in
-  let json = Headless.dispatch_json ~attempt_id:"attempt-test" dispatch in
-  assert_equal "headless dispatch schema" Headless.dispatch_schema
-    Yojson.Safe.Util.(json |> member "schema" |> to_string);
-  assert_equal "headless dispatch worktree" dispatch.worktree
-    Yojson.Safe.Util.(json |> member "worker" |> member "worktree" |> to_string);
-  assert_equal "headless dispatch workspace count" "2"
-    (Yojson.Safe.Util.(json |> member "worker" |> member "workspaces" |> to_list)
-    |> List.length |> string_of_int);
-  assert_bool "headless dispatch excludes subagent runtime state"
-    Yojson.Safe.Util.(json |> member "worker" |> member "run_id" = `Null);
-  let harness_call = Yojson.Safe.Util.member "harness_call" json in
-  assert_equal "headless harness tool" "subagent"
-    Yojson.Safe.Util.(harness_call |> member "tool" |> to_string);
-  let arguments = Yojson.Safe.Util.member "arguments" harness_call in
-  assert_equal "headless harness context" "fresh"
-    Yojson.Safe.Util.(arguments |> member "context" |> to_string);
-  assert_equal "headless harness agent scope" "project"
-    Yojson.Safe.Util.(arguments |> member "agentScope" |> to_string);
-  assert_equal "headless harness cwd" dispatch.home
-    Yojson.Safe.Util.(arguments |> member "cwd" |> to_string);
-  assert_bool "headless harness is async"
-    Yojson.Safe.Util.(arguments |> member "async" |> to_bool);
-  assert_bool "headless harness disables clarify"
-    (not Yojson.Safe.Util.(arguments |> member "clarify" |> to_bool));
-  assert_bool "headless harness does not request Pi worktrees"
-    Yojson.Safe.Util.(arguments |> member "worktree" = `Null);
-  let chain = Yojson.Safe.Util.(arguments |> member "chain" |> to_list) in
-  assert_bool "headless 1-2-1 chain has three phases" (List.length chain = 3);
-  let implementation = List.nth chain 0 in
-  let reviewers =
-    Yojson.Safe.Util.(List.nth chain 1 |> member "parallel" |> to_list)
-  in
-  let fixer = List.nth chain 2 in
-  assert_bool "headless has two reviewers" (List.length reviewers = 2);
-  let attempt_root =
-    "/monty/.monty/runs/run-1/workers/issue-123/artifacts/headless/attempt-test"
-  in
-  let assert_child label relative_path child =
-    assert_equal (label ^ " output") (Filename.concat attempt_root relative_path)
-      Yojson.Safe.Util.(child |> member "output" |> to_string);
-    assert_bool (label ^ " progress disabled")
-      (not Yojson.Safe.Util.(child |> member "progress" |> to_bool));
-    let acceptance = Yojson.Safe.Util.member "acceptance" child in
-    assert_equal (label ^ " acceptance level") "none"
-      Yojson.Safe.Util.(acceptance |> member "level" |> to_string);
-    assert_equal (label ^ " acceptance reason") Headless.acceptance_reason
-      Yojson.Safe.Util.(acceptance |> member "reason" |> to_string)
-  in
-  assert_child "headless implementation" "implementation.md" implementation;
-  assert_child "headless correctness review" "reviews/correctness.md"
-    (List.nth reviewers 0);
-  assert_child "headless quality review" "reviews/quality.md"
-    (List.nth reviewers 1);
-  assert_child "headless final" "final.md" fixer;
+  let inputs = Headless.{instructions_contents = "Supplied instructions";
+    context_contents = "Supplied task context"} in
+  let paths = Headless.attempt_paths dispatch "attempt-test" in
+  let descriptor = Headless.attempt_descriptor_json dispatch paths "headless-pi" in
+  assert_equal "process attempt schema" "monty:headless-attempt:v2"
+    Yojson.Safe.Util.(descriptor |> member "schema" |> to_string);
+  assert_equal "implementation artifact" (Filename.concat paths.root "implementation.md") paths.implementation;
+  assert_bool "two reviewer artifacts" (List.length paths.reviews = 2);
+  let implementation = Headless.implementation_prompt dispatch inputs in
+  assert_contains "implementation receives instructions" implementation inputs.instructions_contents;
+  assert_contains "implementation receives context" implementation inputs.context_contents;
+  assert_contains "supervisor persists memory" implementation "Do not write worker memory";
+  let handoff = "Implementation handoff with literal {previous} and {outputs.implementation}" in
+  let reports = List.map (fun (path : Headless.review_path) ->
+      let prompt = Headless.reviewer_prompt dispatch inputs path.review handoff in
+      assert_contains "reviewer receives handoff verbatim" prompt handoff;
+      assert_contains "reviewer remains read-only" prompt Reviewer_prompt.read_only_worktree_rule;
+      assert_contains "reviewer must verify claims" prompt "verify every claim against the worktree";
+      path.review.title ^ " report with literal {outputs.implementation}") paths.reviews in
+  let fixer = Headless.fixer_prompt dispatch inputs paths.reviews reports handoff in
+  assert_contains "fixer receives handoff verbatim" fixer handoff;
+  List.iter (fun report -> assert_contains "fixer receives report verbatim" fixer report) reports;
   let bundled_home =
     Option.value ~default:(Sys.getcwd ()) (Sys.getenv_opt "DUNE_SOURCEROOT") in
   let simplified = must (Agent_profile.find ~home:bundled_home "simplified") in
-  let simplified_chain =
-    Headless.harness_arguments_json { dispatch with profile = simplified } "attempt-test"
-    |> Yojson.Safe.Util.member "chain" |> Yojson.Safe.Util.to_list in
-  assert_bool "simplified has exactly two phases" (List.length simplified_chain = 2);
-  List.iter (fun child ->
-      assert_equal "simplified writable worker" "worker"
-        Yojson.Safe.Util.(child |> member "agent" |> to_string);
-      assert_equal "simplified shared workspace" dispatch.worktree
-        Yojson.Safe.Util.(child |> member "cwd" |> to_string);
-      assert_bool "simplified has no review group"
-        Yojson.Safe.Util.(child |> member "parallel" = `Null)) simplified_chain;
-  let simplifier = List.nth simplified_chain 1 in
-  assert_equal "simplifier phase" "Simplification"
-    Yojson.Safe.Util.(simplifier |> member "phase" |> to_string);
-  assert_contains "simplifier receives implementation handoff"
-    Yojson.Safe.Util.(simplifier |> member "task" |> to_string) "{outputs.implementation}";
-  assert_child "simplifier final" "final.md" simplifier;
-  assert_bool "simplification claims no independent reviews"
-    (Headless.review_summary simplified = None);
-  assert_contains "simplifier validation summary"
-    (Headless.validation_summary simplified) "final simplifier handoff";
-  let review_only_profile =
-    Agent_profile.
-      { id = "review-only";
-        description = "one review without a fixer";
-        interactive = "Review once.";
-        implementation = "Implement.";
-        reviews =
-          [ { id = "edge"; title = "Edge review";
-              instructions = "Inspect edge cases." } ];
-        fix = None; fix_role = Fixer }
-  in
-  let review_only =
-    Headless.dispatch_json ~attempt_id:"attempt-review-only"
-      { dispatch with profile = review_only_profile }
-  in
-  let review_only_chain =
-    Yojson.Safe.Util.(
-      review_only |> member "harness_call" |> member "arguments"
-      |> member "chain" |> to_list)
-  in
-  assert_bool "review-only chain omits fixer"
-    (List.length review_only_chain = 2);
-  assert_equal "review-only implementation is final" "final.md"
-    Yojson.Safe.Util.(
-      List.hd review_only_chain |> member "output" |> to_string
-      |> Filename.basename);
-  let colliding_ids_profile =
-    { reviewed_profile with
-      reviews =
-        [ Agent_profile.
-            { id = "edge-case"; title = "Hyphen review";
-              instructions = "Review." };
-          Agent_profile.
-            { id = "edge_case"; title = "Underscore review";
-              instructions = "Review." } ] }
-  in
-  let colliding_ids =
-    Headless.dispatch_json ~attempt_id:"attempt-aliases"
-      { dispatch with profile = colliding_ids_profile }
-  in
-  let aliases =
-    Yojson.Safe.Util.(
-      colliding_ids |> member "harness_call" |> member "arguments"
-      |> member "chain" |> index 1 |> member "parallel" |> to_list)
-    |> List.map Yojson.Safe.Util.(fun json -> json |> member "as" |> to_string)
-  in
-  assert_bool "distinct reviewer ids keep distinct output aliases"
-    (List.sort_uniq String.compare aliases |> List.length = 2);
+  let simplified_dispatch = {dispatch with profile = simplified} in
+  let simplified_paths = Headless.attempt_paths simplified_dispatch "attempt-simple" in
+  assert_bool "simplified has no reviewer artifacts" (simplified_paths.reviews = []);
+  let simplifier = Headless.fixer_prompt simplified_dispatch inputs [] [] handoff in
+  assert_contains "simplifier instructions" simplifier "can you radically simplify this?";
+  assert_contains "simplifier receives handoff verbatim" simplifier handoff;
+  assert_bool "simplification claims no independent reviews" (Headless.review_summary simplified = None);
+  assert_contains "simplifier validation summary" (Headless.validation_summary simplified) "final simplifier handoff";
   let prepared =
     Headless.
       { id = dispatch.id;

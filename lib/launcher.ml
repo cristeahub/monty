@@ -359,10 +359,7 @@ let script_environment contents =
     let* next = consume "\n" finish in
     Some (value, next)
   in
-  let* start = consume "#!/bin/sh\n" 0 in
-  let start =
-    Option.value ~default:start (consume "# monty-launch-script-v1\n" start)
-  in
+  let* start = consume "#!/bin/sh\n# monty-launch-script-v1\n" 0 in
   let* start = consume "set -eu\n" start in
   let* environment_path, start = export "PATH" start in
   let rec profiles index = function
@@ -378,36 +375,11 @@ let script_environment contents =
         let* rest = profiles next rest in
         Some ((name, value) :: rest)
   in
-  let* profile_environment =
-    (* Pre-profile scripts go straight from PATH to the title. *)
-    match consume "printf " start with
-    | Some _ -> Some []
-    | None ->
-        (match profiles start Harness_command.profile_environment_names with
-         | Some _ as current -> current
-         | None -> (match profiles start (List.filter ((<>) "CLAUDE_CONFIG_DIR") Harness_command.profile_environment_names) with
-           | Some _ as legacy -> legacy
-           | None -> profiles start (List.filter (fun n -> not(List.mem n ["PI_CODING_AGENT_DIR";"CLAUDE_CONFIG_DIR"])) Harness_command.profile_environment_names)))
-  in
+  let* profile_environment = profiles start Harness_command.profile_environment_names in
   Some (environment_path, profile_environment)
 
-let script_has_owner_marker (options : options) (prepared : prepared)
-    (record : Job_store.record) path =
+let script_has_owner_marker (options : options) (prepared : prepared) path =
   try
-    let without_lines predicates text =
-      text |> String.split_on_char '\n'
-      |> List.filter (fun line ->
-             not (List.exists (fun predicate -> predicate line) predicates))
-      |> String.concat "\n"
-    in
-    let marker line = String.equal line "# monty-launch-script-v1" in
-    let job_file line = String.starts_with ~prefix:"export MONTY_JOB_FILE=" line in
-    let variants expected =
-      [ expected;
-        without_lines [ marker ] expected;
-        without_lines [ job_file ] expected;
-        without_lines [ marker; job_file ] expected ]
-    in
     let decode_generated_shell_quote value =
       match decode_generated_shell_quote_at value 0 with
       | Some (decoded, finish) when finish = String.length value -> Some decoded
@@ -419,13 +391,12 @@ let script_has_owner_marker (options : options) (prepared : prepared)
     | None -> false
     | Some (environment_path, profile_environment) ->
     (* Decode only the fixed preamble, including multiline quoted values, then
-       authenticate the entire template using its historical environment.
+       authenticate the entire template using its recorded environment.
        Resume replaces it with a fresh script before requesting execution. *)
-    let expected ?(pin_policy = true) ?(managed = true) ?(legacy_mcp = true) ?(skills = false) ?(codex_hook = true) ?(job = prepared.job) codex_mode
-        codex_trusted_paths =
-      Harness_command.launch_script_contents ~pin_policy ~managed ~legacy_mcp ~skills ~environment_path ~profile_environment
+    let expected codex_mode =
+      Harness_command.launch_script_contents ~environment_path ~profile_environment
         ~options:(harness_options options)
-        ~codex_hook ~codex_mode ~codex_trusted_paths ~job ~id:prepared.id
+        ~codex_mode ~job:prepared.job ~id:prepared.id
         ~branch:prepared.branch
         ~source_repo:prepared.repo ~initial_workdir:prepared.repo
         ~home:options.home ~context:prepared.context
@@ -435,8 +406,15 @@ let script_has_owner_marker (options : options) (prepared : prepared)
         ~wt_command:options.wt_command ()
     in
     let exact_template_matches contents template =
-      let sentinel = "monty-codex-session-id-sentinel" in
-      let suffix = Shell.quote sentinel ^ "\n" in
+      let sentinel = "monty-native-session-id-sentinel" in
+      let tail =
+        (match options.harness with
+        | Harness.Codex -> ""
+        | Harness.Pi | Harness.Claude ->
+            Option.fold ~none:"" ~some:(fun id -> " --fork " ^ Shell.quote id) options.fork)
+        ^ "\n"
+      in
+      let suffix = Shell.quote sentinel ^ tail in
       if not (String.ends_with ~suffix template) then false
       else
         let prefix =
@@ -445,75 +423,29 @@ let script_has_owner_marker (options : options) (prepared : prepared)
         if
           not
             (String.starts_with ~prefix contents
-            && String.ends_with ~suffix:"\n" contents)
+            && String.ends_with ~suffix:tail contents)
         then false
         else
           let value =
             String.sub contents (String.length prefix)
-              (String.length contents - String.length prefix - 1)
+              (String.length contents - String.length prefix - String.length tail)
           in
           match decode_generated_shell_quote value with
           | None -> false
           | Some session_id -> (
               match
-                Codex_session.validate_id ~label:"Codex launch script session id"
+                Codex_session.validate_id ~label:"native launch script session id"
                   session_id
               with
               | Error _ -> false
-              | Ok session_id -> String.equal value (Shell.quote session_id))
+              | Ok session_id ->
+                  Result.is_ok (Native_session.validate ~harness:options.harness session_id)
+                  && String.equal value (Shell.quote session_id))
     in
-    let trusted_paths =
-      record.workspaces
-      |> List.filter_map (fun (workspace : Job_store.workspace_state) ->
-             workspace.worktree)
-    in
-    let modes =
-      match Codex_session.read record.worker_dir with
-      | Ok (Some session_id) ->
-          [ Codex_session.Fresh; Codex_session.Picker;
-            Codex_session.Exact session_id ]
-      | Ok None | Error _ ->
-          [ Codex_session.Fresh; Codex_session.Picker ]
-    in
-    let templates mode =
-      [trusted_paths; []] |> List.concat_map (fun paths ->
-        variants (expected ~skills:true ~legacy_mcp:false mode paths)
-        @ variants (expected ~managed:false mode paths)
-        @ variants (expected mode paths)
-        @ variants (expected ~pin_policy:false mode paths)
-        @ variants (expected ~legacy_mcp:false mode paths))
-    in
-    let accepted = List.concat_map templates modes in
-    let legacy_worker_dirs =
-      [ None; Some prepared.worker_dir ]
-      @
-      match State_path.canonicalize options.home with
-      | Error _ -> []
-      | Ok physical_home -> (
-          match
-            State_path.split_relative ~root:physical_home prepared.worker_dir
-          with
-          | None -> []
-          | Some parts ->
-              [ Some
-                  (List.fold_left Filename.concat
-                     (Shell.normalize (Shell.abs_path options.home))
-                     parts) ])
-    in
-    let legacy =
-      legacy_worker_dirs
-      |> List.concat_map (fun worker_dir ->
-             let job = { prepared.job with Job.worker_dir = worker_dir } in
-             variants
-               (expected ~legacy_mcp:false ~codex_hook:false ~job Codex_session.Fresh
-                  trusted_paths)
-             @ variants
-                 (expected ~legacy_mcp:false ~codex_hook:false ~job Codex_session.Fresh []))
-    in
-    let sentinel = "monty-codex-session-id-sentinel" in
-    let exact_templates = templates (Codex_session.Exact sentinel) in
-    List.exists (String.equal contents) (accepted @ legacy)
-    || List.exists (exact_template_matches contents) exact_templates
+    let sentinel = "monty-native-session-id-sentinel" in
+    List.exists (fun mode -> String.equal contents (expected mode))
+      [ Codex_session.Fresh; Codex_session.Picker ]
+    || exact_template_matches contents (expected (Codex_session.Exact sentinel))
   with Sys_error _ -> false
 
 let trusted_script_destination options path =
@@ -561,7 +493,7 @@ let recorded_script options (prepared : prepared) (record : Job_store.record) =
           try
             match (Unix.lstat path).Unix.st_kind with
             | Unix.S_REG ->
-                if script_has_owner_marker options prepared record path then Ok ()
+                if script_has_owner_marker options prepared path then Ok ()
                 else
                   Error
                     (Printf.sprintf
@@ -1239,9 +1171,8 @@ let dry_run ?(codex_mode = Codex_session.Fresh) options
         | Codex_session.Exact session_id -> " " ^ session_id
         | _ -> ""));
   Fmt.pr "[dry-run] command: %s\n"
-    (Harness_command.build_command ~codex_hook:true ~codex_mode
+    (Harness_command.build_command ~codex_mode
        ~options:(harness_options options)
-       ~codex_trusted_paths:[]
        ~home:options.home ~instructions:(Some prepared.instructions)
        ~job:prepared.job
        ~context:prepared.context)
@@ -1428,11 +1359,6 @@ let begin_request ?(persist_failure = true) ?(write_script = true)
                 ignore
                   (Harness_command.write_launch_script ~path:prepared.script_path
                      ~codex_mode
-                     ~codex_trusted_paths:
-                       (workspace_states
-                       |> List.filter_map
-                            (fun (workspace : Job_store.workspace_state) ->
-                              workspace.worktree))
                      ~options:(harness_options options) ~job:prepared.job
                      ~id:prepared.id ~branch:prepared.branch
                      ~source_repo:prepared.repo ~initial_workdir

@@ -111,8 +111,7 @@ let codex_model_config t p ~cwd =
 let session_connection t sess = connection t (s "id" (session_profile t sess))
 let prepare_codex_skill t p rpc workspaces =
   if s "harness" p<>"codex" then Lwt.return_unit else (
-    get(Skill.ensure_at ~home:t.home ~harness:Harness.Codex ~directory:(s "codex_home" p)
-      ~monty_command:(Unix.realpath Sys.executable_name));
+    get(Skill.ensure_at ~home:t.home ~directory:(s "codex_home" p));
     Codex_rpc.call rpc "skills/list" (obj ["cwds",workspaces;"forceReload",`Bool true]) >|= ignore)
 let pi_find t sess =
   ignore(session_profile t sess);
@@ -209,7 +208,7 @@ let pi_start t cid sess request ~fresh =
       if field "partial_tail" raw=`Bool true then fail 409 "Pi source has an incomplete trailing record; wait for a complete write before resuming";
       if Unix.realpath (required "cwd" (field "header" raw))<>cwd then fail 409 "Pi resume workspace must match the native session cwd; use a branch for a new workspace";
       ["--session";required "source_file" sess]) in
-  get(Skill.ensure_at ~harness:Harness.Pi ~directory:(s "pi_home" p) ~home:t.home ~monty_command:(Unix.realpath Sys.executable_name));
+  get(Skill.ensure_at ~directory:(s "pi_home" p) ~home:t.home);
   let worker_env=match field "environment" context with `Assoc fields ->
     List.filter_map (fun (k,v) -> if k="MONTY_HOME" then None else Some(k ^ "=" ^ str v)) fields|_->[] in
   let env=native_environment (profile_auth p @ ["PI_CODING_AGENT_DIR=" ^ s "pi_home" p;"MONTY_HOME=" ^ t.home;"PI_TELEMETRY=0";
@@ -262,7 +261,7 @@ let claude_start t cid sess request ~fresh =
   List.iter (fun workspace -> let path=Unix.realpath(str workspace) in
     if path<>str workspace || not(List.exists (fun root -> within (str root) path) (xs "roots" p)) then
       fail 403 "Claude workspace is no longer allowed") (xs "workspaces" context);
-  get(Skill.ensure_at ~home:t.home ~harness:Harness.Claude ~directory:(s "claude_home" p) ~monty_command:(Unix.realpath Sys.executable_name));
+  get(Skill.ensure_at ~home:t.home ~directory:(s "claude_home" p));
   Claude_rpc.start ~env:(claude_env t p context) ~cwd:(str(List.hd(xs "workspaces" context))) p
     ~locks:(worker_locks t sess)
     ~lock:(Filename.concat (s "claude_home" p) (".monty-session-" ^ sha(s "native_id" sess) ^ ".lock"))
@@ -648,7 +647,7 @@ let terminal_start t cid sess request =
     if path<>str value || not(List.exists (fun root -> within (str root) path) (xs "roots" p)) then fail 403 "terminal workspace is no longer allowed") (xs "workspaces" context);
   let harness=get(Harness.of_string(s "harness" sess) |> Result.map_error (fun (`Msg m)->m)) in
   let directory=s (match harness with Harness.Pi->"pi_home"|Codex->"codex_home"|Claude->"claude_home") p in
-  get(Skill.ensure_at ~home:t.home ~harness ~directory ~monty_command:(Unix.realpath Sys.executable_name));
+  get(Skill.ensure_at ~home:t.home ~directory);
   let native=s "native_id" sess in
   let fork=match field "fork" request with `Null->[]|`String selector when harness=Harness.Pi && field "fresh" request=`Bool true ->
     let paths,_=Client_discovery.pi_files p in

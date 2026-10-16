@@ -1,6 +1,5 @@
-"""Checkout-binary skill installation and migration; isolated homes, no model calls."""
+"""Checkout-binary skill installation; isolated homes, no model calls."""
 import concurrent.futures
-import fcntl
 import json
 import os
 from pathlib import Path
@@ -30,11 +29,14 @@ with tempfile.TemporaryDirectory(prefix="monty-skills-") as tmp:
 
     index = cli("guide").stdout
     assert "skills" in index and "mcp:" not in index
-    assert cli("mcp", "guide").stdout == index
-    assert cli("mcp", "guide", "workers").stdout == cli("guide", "workers").stdout
+    cli("mcp", "guide", ok=False)
+    cli("mcp", "guide", "workers", ok=False)
+    for command in ("begin", "finish"):
+        cli("headless", command, "worker", ok=False)
     cli("guide", "not-a-topic", ok=False)
     cli("mcp", "serve", ok=False)
     cli("mcp", "setup-pi", ok=False)
+    cli("codex-session-capture", ok=False)
     cli("skills", "install", "--help=plain")
     assert list(home.iterdir()) == []
     assert not Path(env["CODEX_HOME"]).exists()
@@ -105,53 +107,10 @@ with tempfile.TemporaryDirectory(prefix="monty-skills-") as tmp:
 
     agent = Path(env["PI_CODING_AGENT_DIR"])
     config = agent / "mcp.json"
-    existing = {"autoEnableCodemode": False, "mcpServers": {"other": {"command": "keep"}}}
-    legacy = {"command": str(executable), "args": ["mcp", "serve"], "exposure": "direct"}
-    config.write_text(json.dumps(dict(existing, mcpServers=dict(existing["mcpServers"], monty=legacy))))
-    cli("skills", "install", "--harness", "pi")
-    assert json.loads(config.read_text()) == existing
+    config.write_text('{"mcpServers":{"monty":{"command":"untouched"}}}')
     before = config.stat().st_mtime_ns, config.read_bytes()
     cli("skills", "install", "--harness", "pi")
     assert (config.stat().st_mtime_ns, config.read_bytes()) == before
-    # A user-managed server with the same name is not ours to remove.
-    custom = dict(existing, mcpServers={"monty": dict(legacy, command="other-server")})
-    config.write_text(json.dumps(custom))
-    cli("skills", "install", "--harness", "pi")
-    assert json.loads(config.read_text()) == custom
-
-    def migrate_after_replacement(replace, ok=True):
-        config.write_text(json.dumps(dict(existing, mcpServers=dict(existing["mcpServers"], monty=legacy))))
-        with Path(str(config) + ".monty.lock").open("r+") as lock:
-            fcntl.lockf(lock, fcntl.LOCK_EX)
-            process = subprocess.Popen([str(executable), "skills", "install", "--harness", "pi"],
-                                       cwd=root, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            try:
-                try:
-                    process.communicate(timeout=.2)
-                    raise AssertionError("migration did not wait for native config lock")
-                except subprocess.TimeoutExpired:
-                    pass
-                replace()
-            finally:
-                fcntl.lockf(lock, fcntl.LOCK_UN)
-        _, err = process.communicate(timeout=20)
-        assert (process.returncode == 0) == ok, err
-
-    # Migration rereads and revalidates after acquiring the native-config lock.
-    migrate_after_replacement(lambda: config.write_text(json.dumps(
-        dict(json.loads(config.read_text()), addedWhileWaiting=True))))
-    assert json.loads(config.read_text()) == dict(existing, addedWhileWaiting=True)
-    victim = root / "config-victim.json"
-    victim.write_text(json.dumps({"mcpServers": {"monty": legacy}}))
-    before = victim.read_bytes()
-
-    def replace_with_symlink():
-        config.unlink()
-        config.symlink_to(victim)
-
-    migrate_after_replacement(replace_with_symlink, ok=False)
-    assert config.is_symlink() and victim.read_bytes() == before
-    config.unlink()
 
     # Real head-butler start/continue reaches the harness only after installing.
     log = root / "argv.json"
@@ -180,4 +139,4 @@ with tempfile.TemporaryDirectory(prefix="monty-skills-") as tmp:
     assert not (home / ".monty/tasks.local.json").exists()
     assert not (home / ".monty/runs").exists()
 
-print("CLI skills: isolated installation, refresh, migration, concurrency and Pi startup passed")
+print("CLI skills: isolated installation, refresh, concurrency and Pi startup passed")

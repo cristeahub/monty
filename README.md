@@ -352,13 +352,7 @@ monty headless resume issue-123
 # Add --wait to wait for its final result.
 ```
 
-Harness selection still follows CLI, environment, and persisted-settings precedence. No PID, backend, Pi run ID, Codex session ID, or runtime status is persisted in `job.json`. Direct process attempts use `monty:headless-attempt:v2`, separating them from legacy callback recovery.
-
-### Legacy Pi extension dispatch
-
-`headless begin` submits server-owned execution, like `headless run`. An explicit successor uses `monty headless begin <worker> --resume`. `headless finish` remains available to recover already persisted legacy callback attempts; new execution returns startup and final receipts rather than a `subagent` dispatch payload.
-
-Before mutating a legacy Pi extension workflow, verify that the parent exposes `subagent` with `action: "list"` and the required agents. Pass emitted `harness_call.arguments` unchanged; finalize successful/failed callbacks with the emitted completion commands. Callback-loss recovery applies only to legacy v1 attempts, never to live standalone process attempts. The similarly named `@tintinweb/pi-subagents` package exposes a different API and cannot execute this legacy payload.
+Harness selection still follows CLI, environment, and persisted-settings precedence. No PID, backend, Pi run ID, Codex session ID, or runtime status is persisted in `job.json`. Process attempts use `monty:headless-attempt:v2`.
 
 ## Run handoffs and pending results
 
@@ -394,7 +388,7 @@ butler. Its canonical record remains available for later inspection.
 
 Headless completion uses Monty's home-level `.monty/inbox/run-handoffs/`, whose small `monty:run-handoff-notice:v1` records reference canonical handoffs.
 Reading is at-least-once: `pending` never acknowledges implicitly, and acknowledgement is idempotent.
-If publication stopped after the canonical record was written, `pending` repairs its rendering and delivery receipt without turning an interactive result into a head-butler notification. If a Pi chain wrote its final artifact after the original head-butler callback became unavailable, `pending` publishes a provisional `needs-attention` receipt without inferring success from `final.md`. A later callback replaces that provisional outcome with its confirmed result and preserves any acknowledgement. Discovery never launches or resumes a run and never changes task status.
+If publication stopped after the canonical record was written, `pending` repairs its rendering and delivery receipt without turning an interactive result into a head-butler notification. Discovery never launches or resumes a run and never changes task status.
 
 ```sh
 monty handoff pending
