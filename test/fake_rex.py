@@ -164,7 +164,10 @@ elif command == 'block' and sub == 'call':
     else:
         fail('Error: unknown method ' + method, 2)
 elif command == 'client' and sub == 'ls':
-    clients = [{'client_id': 'client:01a1-cli', 'info': {'kind': 'cli'}}]
+    clients = [{'client_id': 'client:01a1-peer'},
+               {'client_id': 'client:01a1-null', 'info': None},
+               {'client_id': 'client:01a1-unregistered', 'info': 'unknown'},
+               {'client_id': 'client:01a1-cli', 'info': {'kind': 'cli'}}]
     if not os.environ.get('REX_FAKE_NO_APP'):
         clients.append({'client_id': APP, 'info': {'kind': 'app', 'label': 'Fake Mac'}})
     if os.environ.get('REX_FAKE_TWO_APPS'):

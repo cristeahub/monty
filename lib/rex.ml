@@ -152,7 +152,9 @@ let app_client ?server hint =
   in
   let clients = match member "clients" json with `List clients -> clients | _ -> [] in
   let id client = string_member "client_id" client in
-  let is_app client = string_member "kind" (member "info" client) = Some "app" in
+  let is_app client = match member "info" client with
+    | `Assoc _ as info -> string_member "kind" info = Some "app"
+    | _ -> false in
   match hint with
   | Some wanted ->
       if List.exists (fun client -> id client = Some wanted) clients then Ok wanted

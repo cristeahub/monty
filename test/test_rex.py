@@ -129,6 +129,9 @@ with tempfile.TemporaryDirectory(prefix='monty-rex-') as temporary:
     assert args[args.index('--') + 3].endswith('monty-success-launch.sh')
     assert '--keep-open' in args and args[args.index('--shell') + 1] == 'none'
     assert not any('do' in row for row in calls()), 'in-context tabs must not move the app view'
+    assert not any('client' in row for row in calls()), 'caller-relative tabs must not need REX_CLIENT'
+    assert list(state()['sessions']) == [caller_session], 'a task must open a tab in the caller session'
+    assert not (home / '.monty' / 'rex-session.json').exists()
     assert job(worker)['status'] == 'launch-requested'
     ref = reference(worker)
     assert ref['schema'] == 'monty:rex-terminal:v1' and ref['session_id'] == caller_session
@@ -158,6 +161,7 @@ with tempfile.TemporaryDirectory(prefix='monty-rex-') as temporary:
     assert not worker.exists() and len(mutations()) == before, 'preflight failure reserved or created state'
 
     # ---- window: one Rex session per worker, shown through the app client ---------------
+    # Client discovery must ignore bare peers and null/non-object info without REX_CLIENT.
     path, worker = manifest('window')
     launch(path, target='window', extra=inside)
     args = [row for row in calls() if 'new' in row][-1]
@@ -237,6 +241,7 @@ with tempfile.TemporaryDirectory(prefix='monty-rex-') as temporary:
     assert len(mutations()) == before + 1
     newer = reference(worker)
     assert newer['block_id'] != ref['block_id'] and newer['requested_at'] >= ref['requested_at']
+    assert newer['session_id'] == caller_session, 'resuming must open a tab in the caller session'
     # Stale IDs (block gone) also fall through to a new tab; an unreachable server never does.
     current = state()
     del current['blocks'][newer['block_id']]
