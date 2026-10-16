@@ -6,12 +6,14 @@ type t = {
   branch_prefix : string option;
   agent_profile : string option;
   terminal : Terminal.backend option;
-  rex_session : string option;  (* Rex session (ID or label) for tabs requested outside Rex *)
+  rex_session : string option;  (* Rex session for tabs requested outside Rex, no Mantle profile *)
+  rex_sessions : (string * string) list;  (* the same per Mantle profile *)
 }
 
 let empty =
   { harness = None; context_enabled = false; codex_yolo = false; container_workers = false;
-    branch_prefix = None; agent_profile = None; terminal = None; rex_session = None }
+    branch_prefix = None; agent_profile = None; terminal = None; rex_session = None;
+    rex_sessions = [] }
 let path ~home = Filename.concat (Filename.concat home ".monty") "settings.json"
 
 let parse json =
@@ -75,8 +77,23 @@ let parse json =
       | `String value -> Ok (Some value)
       | _ -> Error "settings field \"rex_session\" must be a string"
     in
+    let* rex_sessions =
+      match member "rex_sessions" json with
+      | `Null -> Ok []
+      | `Assoc entries ->
+          List.fold_left
+            (fun acc (profile, value) ->
+              let* acc = acc in
+              let* profile = Mantle.valid_name profile in
+              match value with
+              | `String value when String.trim value <> "" -> Ok (acc @ [ (profile, value) ])
+              | `String _ | `Null -> Ok acc
+              | _ -> Error (Printf.sprintf "settings field \"rex_sessions.%s\" must be a string" profile))
+            (Ok []) entries
+      | _ -> Error "settings field \"rex_sessions\" must be an object"
+    in
     Ok { harness; context_enabled; codex_yolo; container_workers; branch_prefix; agent_profile; terminal;
-         rex_session })
+         rex_session; rex_sessions })
 
 let load ~home =
   let settings_path = path ~home in
@@ -127,7 +144,9 @@ let to_json settings =
       ( "rex_session",
         match settings.rex_session with
         | None -> `Null
-        | Some rex_session -> `String rex_session ) ]
+        | Some rex_session -> `String rex_session );
+      ( "rex_sessions",
+        `Assoc (List.map (fun (profile, session) -> (profile, `String session)) settings.rex_sessions) ) ]
 
 let set_harness ~home harness =
   State_store.with_lock ~home (fun () ->
@@ -223,17 +242,30 @@ let effective_terminal ~getenv ~home override =
           |> Result.map (fun settings ->
                  Option.value ~default:Terminal.Rex settings.terminal))
 
-(* The Rex session that tabs requested from outside Rex should land in. An
-   empty value clears it, which returns tabs to the Monty-owned session. *)
-let set_rex_session ~home rex_session =
-  let rex_session =
-    match String.trim rex_session with "" -> None | value -> Some value
-  in
+(* The Rex session that tabs requested from outside Rex should land in, for
+   the active Mantle profile (None means no profile). *)
+let rex_session_for settings profile =
+  match profile with
+  | Some profile -> List.assoc_opt profile settings.rex_sessions
+  | None -> settings.rex_session
+
+(* An empty value clears the entry, which returns that profile's tabs to the
+   session Monty owns for it. *)
+let set_rex_session ~home ~profile value =
+  let value = match String.trim value with "" -> None | value -> Some value in
   State_store.with_lock ~home (fun () ->
       let ( let* ) = Result.bind in
       let* settings = load ~home in
-      State_store.write_json_atomic ~path:(path ~home)
-        (to_json { settings with rex_session }))
+      let settings =
+        match profile with
+        | None -> { settings with rex_session = value }
+        | Some profile ->
+            let others = List.remove_assoc profile settings.rex_sessions in
+            { settings with
+              rex_sessions =
+                (match value with None -> others | Some value -> others @ [ (profile, value) ]) }
+      in
+      State_store.write_json_atomic ~path:(path ~home) (to_json settings))
 
 let effective_agent_profile ~home override =
   match override with
@@ -243,12 +275,19 @@ let effective_agent_profile ~home override =
       |> Result.map (fun settings ->
              Option.value ~default:Agent_profile.default_id settings.agent_profile)
 
-let render settings =
+let render ?profile settings =
   let harness =
     settings.harness |> Option.value ~default:Harness.Pi |> Harness.to_string
   in
+  let rex_session =
+    match rex_session_for settings profile, profile with
+    | Some session, Some profile -> Printf.sprintf "%s (profile %s)" session profile
+    | Some session, None -> session
+    | None, Some profile -> Printf.sprintf "(session labelled %s, profile %s)" profile profile
+    | None, None -> "(monty-owned session)"
+  in
   String.concat "\n"
-    [ "SETTING        VALUE";
+    ([ "SETTING        VALUE";
       "-------------  -----";
       "harness       " ^ harness;
       "codex-yolo    " ^ if settings.codex_yolo then "true" else "false";
@@ -260,7 +299,8 @@ let render settings =
       "terminal      "
       ^ Terminal.backend_to_string
           (Option.value ~default:Terminal.Rex settings.terminal);
-      "rex-session   " ^ Option.value ~default:"(monty-owned session)" settings.rex_session ]
+      "rex-session   " ^ rex_session ]
+    @ List.map (fun (profile, session) -> "rex-session." ^ profile ^ " " ^ session) settings.rex_sessions)
   ^ "\n"
 
 let set_context_enabled ~home context_enabled =

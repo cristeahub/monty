@@ -1137,8 +1137,17 @@ let settings_show home =
   match Settings.load ~home with
   | Error message -> exit_code (Error message)
   | Ok settings ->
-      Fmt.pr "%s" (Settings.render settings);
+      Fmt.pr "%s" (Settings.render ?profile:(mantle_profile Sys.getenv_opt) settings);
       0
+ in
+(* `rex-session` addresses the active Mantle profile (or no profile);
+   `rex-session.<profile>` addresses that profile explicitly. *)
+let rex_session_profile key =
+  match String.index_opt key '.' with
+  | None -> Ok (mantle_profile Sys.getenv_opt)
+  | Some index ->
+      Mantle.valid_name (String.sub key (index + 1) (String.length key - index - 1))
+      |> Result.map Option.some
  in
 let settings_show_term = Cmdliner.Term.(const settings_show $ home_arg)
  in
@@ -1174,9 +1183,12 @@ let settings_get key home =
             (settings.Settings.terminal
             |> Option.value ~default:Terminal.Rex |> Terminal.backend_to_string);
           0
-      | "rex-session" ->
-          Fmt.pr "%s\n" (Option.value ~default:"" settings.Settings.rex_session);
-          0
+      | key when key = "rex-session" || String.starts_with ~prefix:"rex-session." key -> (
+          match rex_session_profile key with
+          | Error message -> exit_code (Error message)
+          | Ok profile ->
+              Fmt.pr "%s\n" (Option.value ~default:"" (Settings.rex_session_for settings profile));
+              0)
       | _ -> exit_code (Error (Printf.sprintf "unknown setting %S" key)))
  in
 let settings_get_term =
@@ -1232,16 +1244,26 @@ let settings_set key value home =
           Settings.set_terminal ~home terminal
           |> Result.map (fun () -> Fmt.pr "terminal = %s\n" (Terminal.backend_to_string terminal))
           |> exit_code)
-  | "rex-session" -> (
+  | key when key = "rex-session" || String.starts_with ~prefix:"rex-session." key -> (
       let value = String.trim value in
-      match Rex.validate_session_setting value with
+      match rex_session_profile key with
       | Error message -> exit_code (Error message)
-      | Ok () ->
-          Settings.set_rex_session ~home value
-          |> Result.map (fun () ->
-                 if value = "" then Fmt.pr "rex-session cleared; tabs from outside Rex use the Monty-owned session\n"
-                 else Fmt.pr "rex-session = %s\n" value)
-          |> exit_code)
+      | Ok profile -> (
+          match Rex.validate_session_setting value with
+          | Error message -> exit_code (Error message)
+          | Ok () ->
+              let scope =
+                match profile with
+                | Some profile -> " for Mantle profile " ^ profile
+                | None -> " outside any Mantle profile"
+              in
+              Settings.set_rex_session ~home ~profile value
+              |> Result.map (fun () ->
+                     if value = "" then
+                       Fmt.pr "rex-session cleared%s; tabs from outside Rex use the session Monty owns%s\n" scope
+                         (match profile with Some p -> " (labelled " ^ p ^ ")" | None -> " (labelled monty)")
+                     else Fmt.pr "rex-session = %s%s\n" value scope)
+              |> exit_code))
   | _ -> exit_code (Error (Printf.sprintf "unknown setting %S" key))
  in
 let settings_set_term =

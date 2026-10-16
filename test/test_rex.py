@@ -212,7 +212,7 @@ with tempfile.TemporaryDirectory(prefix='monty-rex-') as temporary:
     # ---- tab outside Rex honours a persisted rex-session (label or ID) -------------------
     assert cli('settings', 'get', 'rex-session').strip() == '' and 'rex-session   (monty-owned session)' in cli('settings')
     assert 'without spaces' in cli('settings', 'set', 'rex-session', 'two words', code=1)
-    assert cli('settings', 'set', 'rex-session', 'caller').strip() == 'rex-session = caller'
+    assert cli('settings', 'set', 'rex-session', 'caller').strip() == 'rex-session = caller outside any Mantle profile'
     assert cli('settings', 'get', 'rex-session').strip() == 'caller' and 'rex-session   caller' in cli('settings')
     doctor = cli('doctor', '--terminal', 'rex', '--harness', 'pi', '--worktree', 'never')
     assert re.search(r'PASS +rex-session +caller \(' + re.escape(caller_session) + r'\)', doctor), doctor
@@ -246,6 +246,56 @@ with tempfile.TemporaryDirectory(prefix='monty-rex-') as temporary:
     path, worker = manifest('setting-cleared')
     launch(path)
     assert reference(worker)['session_id'] == json.loads((home / '.monty' / 'rex-session.json').read_text())['session_id']
+
+    # ---- the setting and the Monty-owned session follow the Mantle profile -----------------
+    work = {'MANTLE_CONTEXT': 'work', '_MANTLE_PREV_STATE': 'unset',
+            '_MANTLE_SELECTED_HOME': str(home / 'codex-home'), 'CODEX_HOME': str(home / 'codex-home')}
+    assert 'rex-session   (session labelled work, profile work)' in cli('settings', extra=work)
+    assert cli('settings', 'get', 'rex-session', extra=work).strip() == ''
+    news = len([row for row in calls() if 'new' in row])
+    path, worker = manifest('profile-a')
+    launch(path, extra=work)
+    assert len([row for row in calls() if 'new' in row]) == news + 1
+    profile_session = json.loads((home / '.monty' / 'rex-session.work.json').read_text())
+    assert state()['sessions'][profile_session['session_id']]['label'] == 'work', 'the owned session carries the profile name'
+    assert reference(worker)['session_id'] == profile_session['session_id']
+    assert json.loads((home / '.monty' / 'rex-session.json').read_text())['session_id'] != profile_session['session_id']
+    path, worker = manifest('profile-b')
+    launch(path, extra=work)
+    assert len([row for row in calls() if 'new' in row]) == news + 1 and reference(worker)['session_id'] == profile_session['session_id']
+    # A session the user already labelled after the profile is used instead of creating one.
+    current = state()
+    del current['sessions'][profile_session['session_id']]
+    state_file.write_text(json.dumps(current))
+    seed = subprocess.run([str(fake / 'rex'), 'new', 'work', '--json'], env=env, capture_output=True, text=True, check=True)
+    users_work = json.loads(seed.stdout)['session_id']
+    news = len([row for row in calls() if 'new' in row])
+    path, worker = manifest('profile-c')
+    launch(path, extra=work)
+    assert len([row for row in calls() if 'new' in row]) == news and reference(worker)['session_id'] == users_work
+    # Outside any profile the plain Monty session is still used.
+    path, worker = manifest('profile-off')
+    launch(path)
+    assert reference(worker)['session_id'] == json.loads((home / '.monty' / 'rex-session.json').read_text())['session_id']
+    # An explicit mapping is stored per profile and addressed as rex-session or rex-session.<profile>.
+    assert 'rex-session = caller for Mantle profile work' in cli('settings', 'set', 'rex-session', 'caller', extra=work)
+    persisted = json.loads((home / '.monty' / 'settings.json').read_text())
+    assert persisted['rex_sessions'] == {'work': 'caller'} and persisted['rex_session'] is None
+    assert cli('settings', 'get', 'rex-session', extra=work).strip() == 'caller'
+    assert cli('settings', 'get', 'rex-session').strip() == ''
+    assert cli('settings', 'get', 'rex-session.work').strip() == 'caller'
+    shown = cli('settings', extra=work)
+    assert 'rex-session   caller (profile work)' in shown and 'rex-session.work caller' in shown, shown
+    assert 'not a Mantle profile name' in cli('settings', 'get', 'rex-session.bad.name', code=1)
+    path, worker = manifest('profile-mapped')
+    launch(path, extra=work)
+    assert reference(worker)['session_id'] == caller_session
+    doctor = cli('doctor', '--terminal', 'rex', '--harness', 'pi', '--worktree', 'never', extra=work)
+    assert re.search(r'PASS +rex-session +caller \(' + re.escape(caller_session) + r'\) for profile work', doctor), doctor
+    assert 'rex-session' not in cli('doctor', '--terminal', 'rex', '--harness', 'pi', '--worktree', 'never')
+    assert 'cleared for Mantle profile work' in cli('settings', 'set', 'rex-session.work', '')
+    assert cli('settings', 'get', 'rex-session', extra=work).strip() == ''
+    assert json.loads((home / '.monty' / 'settings.json').read_text())['rex_sessions'] == {}
 
     # ---- lost or garbled responses keep launch-requested without replay ------------------
     for name, extra in [('invalid', {'REX_FAKE_INVALID': 'run'}), ('failed', {'REX_FAKE_FAIL': 'run'})]:

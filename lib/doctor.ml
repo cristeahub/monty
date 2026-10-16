@@ -245,18 +245,23 @@ let checks ?(find_command = Process.command_exists_with_arguments)
               | Ok endpoint ->
                   (* A persisted rex-session must resolve on this server, or
                      every tab requested from outside Rex fails in preflight. *)
+                  let profile = Mantle.profile Sys.getenv_opt in
+                  let scope = match profile with Some p -> " for profile " ^ p | None -> "" in
                   let session =
                     match Settings.load ~home with
-                    | Ok { Settings.rex_session = Some setting; _ } -> (
-                        match Rex.resolve_session ?server ~endpoint setting with
-                        | Ok session ->
-                            [ { name = "rex-session"; level = Pass;
-                                message = Printf.sprintf "%s (%s)" setting session; recovery = [] } ]
-                        | Error message ->
-                            [ { name = "rex-session"; level = Fail; message;
-                                recovery =
-                                  [ "Run `rex ls`, then `monty settings set rex-session <session>` or clear it with `monty settings set rex-session ''`." ] } ])
-                    | Ok _ | Error _ -> []
+                    | Ok settings -> (
+                        match Settings.rex_session_for settings profile with
+                        | Some setting -> (
+                            match Rex.resolve_session ?server ~endpoint setting with
+                            | Ok session ->
+                                [ { name = "rex-session"; level = Pass;
+                                    message = Printf.sprintf "%s (%s)%s" setting session scope; recovery = [] } ]
+                            | Error message ->
+                                [ { name = "rex-session"; level = Fail; message;
+                                    recovery =
+                                      [ "Run `rex ls`, then `monty settings set rex-session <session>` or clear it with `monty settings set rex-session ''`." ] } ])
+                        | None -> [])
+                    | Error _ -> []
                   in
                   { name = "rex-server"; level = Pass; message = endpoint; recovery = [] } :: session
               | Error message ->

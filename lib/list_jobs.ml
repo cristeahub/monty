@@ -1,15 +1,4 @@
-let mantle_profile getenv =
-  let env name = Option.value ~default:"" (getenv name) in
-  let name = env "MANTLE_CONTEXT" in
-  (* Match Mantle's shell-local active_context contract without invoking a CLI. *)
-  if String.length name > 0 && String.length name <= 32
-     && name.[0] >= 'a' && name.[0] <= 'z'
-     && String.for_all (function 'a' .. 'z' | '0' .. '9' | '-' | '_' -> true | _ -> false) name
-     && not (List.mem name [ "init"; "list"; "create"; "off"; "status"; "prompt" ])
-     && List.mem (env "_MANTLE_PREV_STATE") [ "unset"; "local"; "export" ]
-     && env "_MANTLE_SELECTED_HOME" <> ""
-     && env "CODEX_HOME" = env "_MANTLE_SELECTED_HOME"
-  then Some name else None
+let mantle_profile = Mantle.profile
 
 let selection ~getenv ?project group all_groups =
   if all_groups && group <> None then Error "--group and --all-groups cannot be combined"

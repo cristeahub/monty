@@ -152,7 +152,7 @@ let resolve_session ?server ~endpoint setting =
   | Error (Not_found _) ->
       Error
         (Printf.sprintf
-           "the rex-session setting %s is not a live session on %s; point it at a session from `rex ls` with `monty settings set rex-session <session>`, or clear it with `monty settings set rex-session ''`"
+           "the rex-session setting %s is not a live session on %s; point it at a session from `rex ls` with `monty settings set rex-session <session>` (for the active Mantle profile), or clear it with `monty settings set rex-session ''`"
            setting endpoint)
   | Error (Failed message) -> Error message
 
@@ -214,7 +214,10 @@ let select ?server ~client ~session ~window () =
 
 (* ---- Monty-owned session ---------------------------------------------------- *)
 
-let home_session_path home = Filename.concat (Filename.concat home ".monty") "rex-session.json"
+(* One Monty-owned session per Mantle profile, each recorded in its own file. *)
+let home_session_path home profile =
+  let name = match profile with None -> "rex-session.json" | Some p -> "rex-session." ^ p ^ ".json" in
+  Filename.concat (Filename.concat home ".monty") name
 
 let read_json_regular path =
   let* existing = State_store.lstat path in
@@ -239,10 +242,13 @@ let label_of_title title =
   if title = "" then "Monty worker" else title
 
 (* Launches without a caller session land in one Monty-owned session on the
-   same server, recorded under the home and verified live before reuse. The
-   launch that follows shows the new window in the app. *)
-let ensure_home_session ~home ?server ~endpoint () =
-  let path = home_session_path home in
+   same server, recorded under the home and verified live before reuse. With a
+   Mantle profile the session carries the profile's name, and a live session the
+   user already labelled that way is used instead of creating one. The launch
+   that follows shows the new window in the app. *)
+let ensure_home_session ~home ~profile ?server ~endpoint () =
+  let path = home_session_path home profile in
+  let label = Option.value ~default:"monty" profile in
   let* recorded = read_json_regular path in
   let* reusable =
     match recorded with
@@ -254,11 +260,20 @@ let ensure_home_session ~home ?server ~endpoint () =
         | None -> Ok None)
     | _ -> Ok None
   in
-  match reusable with
+  let* labelled =
+    match reusable, profile with
+    | Some _, _ | None, None -> Ok reusable
+    | None, Some name -> (
+        match invoke_json ?server [ "session"; "inspect"; name; "--json" ] with
+        | Ok json -> Ok (string_member "session_id" json)
+        | Error (Not_found _) -> Ok None
+        | Error (Failed message) -> Error message)
+  in
+  match labelled with
   | Some session -> Ok session
   | None ->
       let* json =
-        invoke_json ?server [ "new"; "monty"; "--json" ] |> Result.map_error failure_message
+        invoke_json ?server [ "new"; label; "--json" ] |> Result.map_error failure_message
       in
       let* session =
         match string_member "session_id" json with
@@ -286,9 +301,11 @@ type plan = { server : string option; endpoint : string; placement : placement }
 
 (* Runs before any worker reservation and makes no Rex mutation except the
    Monty-owned session a context-less tab launch needs. Outside Rex, a tab goes
-   to the persisted rex-session setting when one is set, else to that session. *)
+   to the active Mantle profile's persisted rex-session when one is set, else
+   to the session Monty keeps for that profile. *)
 let preflight ~home ~target =
   let context = context_of_env () in
+  let profile = Mantle.profile Sys.getenv_opt in
   let server = context.server in
   let* endpoint = endpoint ?server () in
   let need_client () =
@@ -319,9 +336,9 @@ let preflight ~home ~target =
             let* client = need_client () in
             let* settings = Settings.load ~home in
             let* session =
-              match settings.Settings.rex_session with
+              match Settings.rex_session_for settings profile with
               | Some setting -> resolve_session ?server ~endpoint setting
-              | None -> ensure_home_session ~home ?server ~endpoint ()
+              | None -> ensure_home_session ~home ~profile ?server ~endpoint ()
             in
             Ok (Tab { session; show = Some client }))
   in
