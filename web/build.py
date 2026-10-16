@@ -30,7 +30,7 @@ if not dune.exists():
     archive.unlink()
 
 env = {**os.environ, 'PATH': str(tools) + os.pathsep + os.environ['PATH']}
-args = sys.argv[1:] or ['build', '--profile', 'release', 'main.bc.js', 'index.html', 'style.css']
+args = sys.argv[1:] or ['build', '--profile', 'release', 'main.bc.js', 'index.html', 'style.css', 'monty.svg']
 os.chdir(root)
 if args[0] in ('build', 'runtest'):
     # js_of_ocaml 5's findlib cannot infer a relocatable compiler's stdlib.

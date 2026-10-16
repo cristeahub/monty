@@ -589,7 +589,7 @@ let application graph =
   let set f=inject f in
   let error=if m.error="" then N.none else N.div ~attrs:[cls "notice error";A.create "role" "alert"] [txt m.error;button "Dismiss" (set(fun m->{m with error=""}))] in
   if not m.authenticated then
-    N.main ~attrs:[cls "login"] [N.div ~attrs:[cls "login-card"] [N.div ~attrs:[cls "brand"] [txt "m"];heading "MONTY / LOCAL WORKSPACE" "Welcome back.";
+    N.main ~attrs:[cls "login"] [N.div ~attrs:[cls "login-card"] [N.img ~attrs:[cls "brand";A.src "/monty.svg";A.alt "Monty"] ();heading "MONTY / LOCAL WORKSPACE" "Welcome back.";
       note "Run monty web in your terminal, then paste the one-use pairing code here.";
       el "form" ~attrs:[A.on_submit(fun _ -> Effect.Many [Effect.Prevent_default;
         (let open Effect.Let_syntax in let%bind result=post "browser/session" (obj["code",str m.code]) in
@@ -727,7 +727,7 @@ let application graph =
            N.div ~attrs:[cls "composer-actions"] [note "Drafts are saved in this browser.";
              N.button ~attrs:([A.type_ "submit";cls "primary"] @ if not m.online || String.strip draft="" || not(List.is_empty m.pending) || not(Poly.equal(field "observed" sess)(`Bool true)) then [A.disabled] else []) [txt "Send message"]]]]
   in
-  N.div ~attrs:[cls "app"] [el "aside" ~attrs:[cls "sidebar"] [N.div ~attrs:[cls "wordmark"] [N.span ~attrs:[cls "brand"] [txt "m"];N.strong[txt "Monty"]];
+  N.div ~attrs:[cls "app"] [el "aside" ~attrs:[cls "sidebar"] [N.div ~attrs:[cls "wordmark"] [N.img ~attrs:[cls "brand";A.src "/monty.svg";A.alt ""] ();N.strong[txt "Monty"]];
       N.p ~attrs:[cls "eyebrow"] [txt "YOUR WORKSPACE"];
       el "nav" (List.map ["tasks","Tasks";"chats","Chats"] ~f:(fun (view,label)->button ~kind:(if m.view=view then "nav-item active" else "nav-item") label (navigate view inject)));
       N.div ~attrs:[cls "sidebar-footer"] [tag(if not m.online then "Reconnecting" else if m.events_connected then "Live updates" else "Connecting updates");button "Sign out" (let open Effect.Let_syntax in

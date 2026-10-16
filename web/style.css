@@ -16,7 +16,7 @@ h2 { font-size: 27px; line-height: 1.25; letter-spacing: -.6px; font-weight: 550
 h3 { font-size: 14px; margin: 26px 0 12px; }
 .eyebrow { color: var(--muted); font-size: 10px; letter-spacing: 1.8px; font-weight: 650; margin-bottom: 11px; }
 .muted { color: var(--muted); font-size: 12px; line-height: 1.65; }
-.brand { display: inline-grid; width: 33px; height: 33px; place-items: center; background: var(--green); color: #e7eddb; border-radius: 9px; font: italic 29px Georgia, serif; }
+.brand { display: block; width: 33px; height: 33px; flex-shrink: 0; }
 .app { display: grid; grid-template-columns: 182px minmax(0,1fr); height: 100dvh; }
 .sidebar { padding: 29px 19px 20px; border-right: 1px solid var(--line); display: flex; flex-direction: column; background: #eff1e9; }
 .wordmark { display: flex; align-items: center; gap: 11px; font-size: 22px; letter-spacing: -.5px; margin-bottom: 49px; }

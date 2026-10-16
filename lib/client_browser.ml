@@ -22,7 +22,8 @@ let load_assets t directory =
       really_input_string ic st.st_size) in
     route,(mime,bytes)) ["/","index.html","text/html; charset=utf-8";
       "/main.bc.js","main.bc.js","text/javascript; charset=utf-8";
-      "/style.css","style.css","text/css; charset=utf-8"] in
+      "/style.css","style.css","text/css; charset=utf-8";
+      "/monty.svg","monty.svg","image/svg+xml"] in
   t.assets <- assets
   with Sys_error _ | Unix.Unix_error _ ->
     fail 400 "web assets unavailable; finish building the client before running monty web"

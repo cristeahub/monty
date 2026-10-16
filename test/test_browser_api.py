@@ -77,8 +77,10 @@ def check(home):
         http_error(400, lambda: c.req('browser/pair', {'assets': str(home / 'missing-web-build')}))
         assets = home / 'web'
         assets.mkdir()
+        icon = (Path(__file__).resolve().parent.parent / 'web' / 'monty.svg').read_text()
         for name, content in [('index.html', '<!doctype html><title>Monty</title>'),
-                              ('style.css', 'body {}'), ('main.bc.js', '/* client */')]:
+                              ('style.css', 'body {}'), ('main.bc.js', '/* client */'),
+                              ('monty.svg', icon)]:
             (assets / name).write_text(content)
         c.req('browser/pair', {'assets': str(assets)})
         with urllib.request.urlopen(c.url) as response:
@@ -86,6 +88,10 @@ def check(home):
             assert response.headers['X-Frame-Options'] == 'DENY'
             assert "script-src 'self'" in response.headers['Content-Security-Policy']
             assert response.headers['Cache-Control'] == 'no-store'
+        with urllib.request.urlopen(c.url + '/monty.svg') as response:
+            assert response.headers['Content-Type'] == 'image/svg+xml'
+            assert response.headers['X-Content-Type-Options'] == 'nosniff'
+            assert response.read().decode() == icon
         http_error(401, lambda: urllib.request.urlopen(c.url + '/profiles.json'))
         http_error(403, lambda: urllib.request.urlopen(urllib.request.Request(c.url, headers={'Origin': 'https://example.com'})))
         for i in range(26):
