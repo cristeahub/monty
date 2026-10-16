@@ -1,5 +1,5 @@
 open Lwt.Infix
-open Context_store
+open Json_fields
 open Conversation_store
 
 let value = function Ok value -> value | Error message -> fail 409 message

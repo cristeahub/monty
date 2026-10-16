@@ -14,7 +14,7 @@ The same manual is bundled in [references/workflows.md](references/workflows.md)
 Read only the relevant section, especially when your role has file access but
 no shell.
 The manual covers inventory, launch, headless, lifecycle, projects, workers,
-settings, findings, handoffs, skills, web-client, and client-service.
+settings, handoffs, skills, web-client, and client-service.
 
 Follow the active `AGENTS.md`, task `MONTY.md`, workspace map and user request.
 This skill supplies CLI guidance; it does not assign a head-butler role or grant

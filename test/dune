@@ -29,16 +29,6 @@
 
 (rule
  (alias runtest)
- (deps test_context.py ../helpers/context_source.py ../bin/main.exe)
- (action (run python3 %{dep:test_context.py} %{dep:../bin/main.exe} %{dep:../helpers/context_source.py})))
-
-(rule
- (alias runtest)
- (deps test_context_adapters.py ../helpers/context_source.py)
- (action (run python3 %{dep:test_context_adapters.py} %{dep:../helpers/context_source.py})))
-
-(rule
- (alias runtest)
  (deps test_skills.py ../bin/main.exe)
  (action (run python3 %{dep:test_skills.py} %{dep:../bin/main.exe})))
 

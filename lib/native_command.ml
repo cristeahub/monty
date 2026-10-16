@@ -17,7 +17,7 @@ let executable ~home command =
   path
 
 let codex_model_config config =
-  let open Context_store in
+  let open Json_fields in
   let provider=s "model_provider" config in
   let* ()=if provider="" || String.for_all(function 'a'..'z'|'A'..'Z'|'0'..'9'|'_'|'-'->true|_->false) provider then Ok ()
     else Error "Codex reviewer provider id cannot be projected safely" in

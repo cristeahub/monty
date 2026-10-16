@@ -6153,6 +6153,9 @@ let test_settings_commands_and_effective_harness () =
       in
       require_code 0 set;
       require_contains "set harness result" set.stdout "harness = codex";
+      if Yojson.Safe.Util.member "context_enabled"
+           (Yojson.Safe.from_file settings_path) <> `Null then
+        failwith "settings persisted the removed attention inbox option";
       let get =
         run ~root ~env 1952
           [ "settings"; "get"; "harness"; "--home"; home ]
@@ -6309,7 +6312,9 @@ let test_cli_parser_and_doctor_contracts () =
             "unknown command")
         [ [ "container-image"; "register" ];
           [ "inspect"; "missing-worker" ];
-          [ "stop"; "missing-worker" ] ];
+          [ "stop"; "missing-worker" ];
+          [ "context"; "on" ];
+          [ "findings"; "--json" ] ];
       let invalid_defaults =
         replace_env env
           [ ("MONTY_TERMINAL", "not-a-backend");

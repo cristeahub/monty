@@ -862,14 +862,14 @@ let claude_final_message events =
   try
     let lines=String.split_on_char '\n' (Shell.read_file events) |> List.filter (fun s->String.trim s<>"") in
     let records=List.map Yojson.Safe.from_string lines in
-    if List.length(List.filter(fun value->Context_store.field "type" value=`String "result") records)<>1 then Error "Claude stream must contain exactly one terminal result" else
+    if List.length(List.filter(fun value->Json_fields.field "type" value=`String "result") records)<>1 then Error "Claude stream must contain exactly one terminal result" else
     match List.rev records with
-    | result::_ when Context_store.s "type" result="result" && Context_store.s "subtype" result="success"
-      && Context_store.field "is_error" result=`Bool false
-      && (match Context_store.field "permission_denials" result with `Null|`List []->true|_->false) ->
-        let text=Context_store.s "result" result |> String.trim in
-        if text="" || Context_store.s "session_id" result="" then Error "Claude terminal result is missing handoff or native session identity"
-        else let* _=Native_session.validate ~harness:Harness.Claude (Context_store.s "session_id" result) in Ok(text ^ "\n")
+    | result::_ when Json_fields.s "type" result="result" && Json_fields.s "subtype" result="success"
+      && Json_fields.field "is_error" result=`Bool false
+      && (match Json_fields.field "permission_denials" result with `Null|`List []->true|_->false) ->
+        let text=Json_fields.s "result" result |> String.trim in
+        if text="" || Json_fields.s "session_id" result="" then Error "Claude terminal result is missing handoff or native session identity"
+        else let* _=Native_session.validate ~harness:Harness.Claude (Json_fields.s "session_id" result) in Ok(text ^ "\n")
     | _ -> Error "Claude stream has no valid final result, or contains permission denials; inspect retained events"
   with Sys_error message | Yojson.Json_error message -> Error message
 

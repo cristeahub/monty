@@ -1,5 +1,5 @@
 open Lwt.Infix
-open Context_store
+open Json_fields
 open Conversation_store
 let request ~home meth path body =
   let metadata_path=file home ["client-service.json"] in

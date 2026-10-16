@@ -1,5 +1,5 @@
 (* Discovery never registers a conversation or resumes a native writer. *)
-open Context_store
+open Json_fields
 open Conversation_store
 let optional key json = match field key json with `String value -> value | _ -> ""
 let short_text value =

@@ -1,6 +1,8 @@
 (* Owned history is independent of native runtime and task lifecycle. All writers
    enter Monty's home lock; a manifest is the only commit point for batch files. *)
-open Context_store
+open Json_fields
+let now () = `Float (Unix.gettimeofday ())
+let take n values = List.filteri (fun index _ -> index < n) values
 exception Failure of int * string
 let fail code message = raise (Failure (code, message))
 let get = function Ok x -> x | Error e -> fail 500 e

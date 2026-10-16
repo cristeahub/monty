@@ -329,11 +329,11 @@ let server_child ~home =
   match Sys.getenv_opt "MONTY_SERVER_EPOCH",Sys.getenv_opt "MONTY_SERVER_PARENT_PID",Sys.getenv_opt "MONTY_SERVER_EXECUTION",Sys.getenv_opt "MONTY_SERVER_NONCE" with
   | Some epoch,Some pid,Some execution,Some nonce ->
       (try
-        if int_of_string pid<>Unix.getppid() || Context_store.s "epoch" (Conversation_store.read (Conversation_store.file home ["client-service.json"]))<>epoch then false else
+        if int_of_string pid<>Unix.getppid() || Json_fields.s "epoch" (Conversation_store.read (Conversation_store.file home ["client-service.json"]))<>epoch then false else
         let result=Lwt_main.run(Client_http.request ~home `POST "/v1/supervisors/authorize"
           (`Assoc["execution",`String execution;"nonce",`String nonce;"parent_pid",`Int(Unix.getppid())])) in
         Unix.putenv "MONTY_SERVER_NONCE" "";
-        Context_store.field "authorized" result=`Bool true
+        Json_fields.field "authorized" result=`Bool true
       with _->false)
   | _ -> false
  in
@@ -380,7 +380,7 @@ let headless_run_many manifest wait options =
               Client_terminal.headless_async ~wait ~resume:false options worker >|= function
               | Ok result -> `Assoc["worker_id",`String worker;"result",result]
               | Error error -> `Assoc["worker_id",`String worker;"error",`String error]) workers) in
-            let success=List.for_all(fun result->Context_store.field "error" result=`Null) results in
+            let success=List.for_all(fun result->Json_fields.field "error" result=`Null) results in
             Ok(`Assoc["schema",`String(if not wait then "monty:headless-start-many:v1" else
                match options.harness with Harness.Codex->Headless.codex_run_many_schema|Pi->"monty:headless-pi-run-many:v1"|Claude->"monty:headless-claude-run-many:v1");
               "harness",`String(Harness.to_string options.harness);"codex_yolo",`Bool(options.harness=Harness.Codex && options.codex_yolo);
@@ -1497,7 +1497,7 @@ let main_cmd =
   in
   Cmdliner.Cmd.group ~default:start_term
     (Cmdliner.Cmd.info "monty" ~version:"dev" ~doc ~man)
-    ([
+    [
       Client_cli.command ~home_arg;
       Client_cli.web ~home_arg;
       Client_cli.terminal ~home_arg;
@@ -1524,7 +1524,7 @@ let main_cmd =
       Guide.command;
       Cmdliner.Cmd.group (Cmdliner.Cmd.info "mcp" ~doc:"Legacy CLI guide alias; the MCP server has been removed.") [Guide.command];
       Skill.command ~home_arg ~harness_arg ~getenv ~monty_command:(monty_command ());
-    ] @ Context_cli.commands ~home_arg ~harness_arg ~pi_command_arg ~codex_command_arg ~claude_command_arg ~getenv)
+    ]
  in
 main_cmd
 

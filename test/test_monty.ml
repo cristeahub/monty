@@ -1303,10 +1303,10 @@ let test_codex_review_config () =
     "model_providers",`Assoc["fixture",definition];"features",`Assoc["hooks",`Bool true];
     "mcp_servers",`Assoc["unsafe",`Assoc[]];"sandbox_mode",`String "danger-full-access"] in
   let projected=must(Native_command.codex_model_config(config provider)) in
-  assert_bool "reviewer retains scoped model" (Context_store.field "model" projected=`String "scoped-model");
+  assert_bool "reviewer retains scoped model" (Json_fields.field "model" projected=`String "scoped-model");
   assert_bool "reviewer retains scoped provider URL"
-    (Context_store.field "model_providers.fixture.base_url" projected=`String "http://localhost/v1");
-  List.iter(fun key->assert_bool ("reviewer excludes " ^ key) (Context_store.field key projected=`Null))
+    (Json_fields.field "model_providers.fixture.base_url" projected=`String "http://localhost/v1");
+  List.iter(fun key->assert_bool ("reviewer excludes " ^ key) (Json_fields.field key projected=`Null))
     ["features";"mcp_servers";"sandbox_mode"];
   assert_bool "reviewer inline credentials require explicit env references"
     (Result.is_error(Native_command.codex_model_config(config (`Assoc["http_headers",`Assoc["Authorization",`String "secret"]]))));

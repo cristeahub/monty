@@ -1,6 +1,6 @@
 (* One owned Pi subprocess per session. HTTP observers never own these pipes. *)
 open Lwt.Infix
-open Context_store
+open Json_fields
 open Conversation_store
 
 type t = { identity:string; process:Lwt_process.process_full;

@@ -1,7 +1,6 @@
 type t = {
   harness : Harness.t option;
   codex_yolo : bool;
-  context_enabled : bool;
   branch_prefix : string option;
   agent_profile : string option;
   terminal : Terminal.backend option;
@@ -10,7 +9,7 @@ type t = {
 }
 
 let empty =
-  { harness = None; context_enabled = false; codex_yolo = false;
+  { harness = None; codex_yolo = false;
     branch_prefix = None; agent_profile = None; terminal = None; rex_session = None;
     rex_sessions = [] }
 let path ~home = Filename.concat (Filename.concat home ".monty") "settings.json"
@@ -27,12 +26,6 @@ let parse json =
           |> Result.map_error (fun (`Msg message) -> message)
           |> Result.map Option.some
       | _ -> Error "settings field \"harness\" must be a string"
-    in
-    let* context_enabled =
-      match member "context_enabled" json with
-      | `Null -> Ok false
-      | `Bool value -> Ok value
-      | _ -> Error "context_enabled must be a boolean"
     in
     let* codex_yolo =
       match member "codex_yolo" json with
@@ -85,7 +78,7 @@ let parse json =
             (Ok []) entries
       | _ -> Error "settings field \"rex_sessions\" must be an object"
     in
-    Ok { harness; context_enabled; codex_yolo; branch_prefix; agent_profile; terminal;
+    Ok { harness; codex_yolo; branch_prefix; agent_profile; terminal;
          rex_session; rex_sessions })
 
 let load ~home =
@@ -119,7 +112,6 @@ let to_json settings =
         match settings.harness with
         | None -> `Null
         | Some harness -> `String (Harness.to_string harness) );
-      ("context_enabled", `Bool settings.context_enabled);
       ("codex_yolo", `Bool settings.codex_yolo);
       ( "branch_prefix",
         match settings.branch_prefix with
@@ -286,10 +278,3 @@ let render ?profile settings =
       "rex-session   " ^ rex_session ]
     @ List.map (fun (profile, session) -> "rex-session." ^ profile ^ " " ^ session) settings.rex_sessions)
   ^ "\n"
-
-let set_context_enabled ~home context_enabled =
-  State_store.with_lock ~home (fun () ->
-      let ( let* ) = Result.bind in
-      let* settings = load ~home in
-      State_store.write_json_atomic ~path:(path ~home)
-        (to_json { settings with context_enabled }))

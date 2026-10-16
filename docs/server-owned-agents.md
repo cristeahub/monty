@@ -1,9 +1,8 @@
 # Server-owned agents (implementation in progress)
 
 The authority is `clients → Monty server → native runtimes`. This includes web/API,
-CLI/head-butler conversations, Ghostty and Rex terminals, headless supervisors and the
-optional tools-disabled context classifier. An unavailable server is an error;
-there is no independent vendor launch fallback.
+CLI/head-butler conversations, Ghostty and Rex terminals, and headless supervisors.
+An unavailable server is an error; there is no independent vendor launch fallback.
 
 Configure the loopback service before using these entry points. All native runtime guards require Python 3.9+ on the server PATH; Claude SDK use additionally requires its configured Python 3.10+ environment. Existing profile
 roots remain the workspace permission boundary. Account directories are explicit:
@@ -97,7 +96,7 @@ Reviewer preflight rejects fixed command arguments that enable tools,
 integrations, permission bypass or extra worktrees. Claude reviewers use native
 restricted/safe modes, exact read tools and a strict empty MCP configuration;
 this requires Claude Code 2.1.248 or later and is tested with 2.1.299. Codex
-reviewers and classifiers retain the account's model/provider connection fields
+reviewers retain the account's model/provider connection fields
 through native `config/read` while runtime integrations stay disabled. Inline
 provider header/bearer credentials require environment references for these
 paths; Monty reports a configuration error instead of using another provider.

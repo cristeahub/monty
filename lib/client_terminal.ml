@@ -1,5 +1,5 @@
 open Lwt.Infix
-open Context_store
+open Json_fields
 open Conversation_store
 let request=Client_http.request
 let health ~home = Lwt.catch (fun () ->
@@ -143,7 +143,7 @@ let launch ~home ~profile ~harness ~command_override ~fork ~mode ~session_id ~pr
        (obj ["op",string "start";"profile",string pid;"command",Option.fold ~none:`Null ~some:string command_override;"context",context;"terminal",`Bool true;"fork",Option.fold ~none:`Null ~some:string fork;"codex_yolo",`Bool codex_yolo;"terminal_environment",terminal_environment;
          "title",string title;"task_keys",`List(match if worker then Sys.getenv_opt "MONTY_TASK_KEY" else None with Some key when key<>""->[string key]|_->[])])
      else request ~home `GET "/v1/conversations" `Null >|= fun catalog ->
-       let candidates=Context_store.list catalog |> List.filter(fun c -> field "purged" c<>`Bool true &&
+       let candidates=Json_fields.list catalog |> List.filter(fun c -> field "purged" c<>`Bool true &&
          List.exists(fun sess->matches sess &&
            (match session_id with None->field "id" sess=field "selected_session" c|Some id->s "native_id" sess=id)) (xs "sessions" c))
          |> List.sort(fun a b->compare(n "created_at" b)(n "created_at" a)) in

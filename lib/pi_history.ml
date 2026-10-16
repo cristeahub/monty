@@ -1,5 +1,5 @@
 (* Read only explicitly selected native files. Pi remains their sole writer. *)
-open Context_store
+open Json_fields
 open Conversation_store
 
 let source_path profile path =

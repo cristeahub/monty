@@ -450,6 +450,10 @@ def fake_suite(home):
         http_error(403,lambda:c.req('health',headers={'Host':'evil.example'}))
         assert c.req('inventory')['tasks']==[]
         assert not (home/'.monty/tasks.json').exists()
+        removed=c.cmd('removed-classify',{'op':'classify','profile':'default',
+            'text':'This feature has been removed.','seconds':30},status='rejected')
+        assert removed['code']==400 and removed['message']=='unknown command',removed
+        assert not server.threads and not (home/'.monty/conversation-executions').exists()
         request={'op':'start','profile':'default','context':{'workspaces':[str(repo)],'instructions':'trusted current instructions','environment':{'MONTY_JOB_TITLE':'isolated'}}}
         assert c.req('health')['codex_tested_versions']==['0.160.0','0.160.1']
         with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:

@@ -18,21 +18,6 @@ class ScopedModel(Model):
     def do_POST(self):
         body=self.rfile.read(int(self.headers['Content-Length']))
         type(self).requests.append(json.loads(body))
-        if getattr(self.server,'question',False):
-            self.server.question=False
-            args=json.dumps({'questions':[{'id':'q','header':'Input','question':'Choose one.',
-              'options':[{'label':'A','description':'First'},{'label':'B','description':'Second'}]}]})
-            item={'type':'function_call','id':'fc-1','call_id':'call-1','name':'request_user_input','arguments':args}
-            self.send_response(200);self.send_header('Content-Type','text/event-stream');self.end_headers()
-            events=[{'type':'response.created','response':{'id':'resp-question','status':'in_progress','output':[]}},
-              {'type':'response.output_item.added','output_index':0,'item':{**item,'arguments':''}},
-              {'type':'response.function_call_arguments.delta','output_index':0,'item_id':'fc-1','delta':args},
-              {'type':'response.output_item.done','output_index':0,'item':item},
-              {'type':'response.completed','response':{'id':'resp-question','status':'completed','output':[item],
-               'usage':{'input_tokens':1,'output_tokens':1,'total_tokens':2}}}]
-            for event in events:
-                self.wfile.write(('event: '+event['type']+'\ndata: '+json.dumps(event)+'\n\n').encode());self.wfile.flush()
-            return
         # Reuse the existing native Responses protocol fixture.
         import io
         self.rfile=io.BytesIO(body)
@@ -66,16 +51,6 @@ with tempfile.TemporaryDirectory(prefix='monty-codex-native-') as directory:
             assert result.returncode==0,(result.stdout,result.stderr,progress)
         assert ScopedModel.requests
         assert all(request['model']=='monty-fixture' for request in ScopedModel.requests), [request['model'] for request in ScopedModel.requests]
-        model.reply='[]';model.question=True
-        classified=service.client.cmd('classify',{'op':'classify','profile':'codex','text':'Return only an empty JSON array.','seconds':30})
-        assert classified==[],classified
-        assert ScopedModel.requests[-1]['model']=='monty-fixture'
-        # Codex advertises this Plan-only tool even in Default mode. Verify
-        # the runtime denies it instead of soliciting input or hanging.
-        assert {tool.get('name') for tool in ScopedModel.requests[-1].get('tools',[])} <= {'request_user_input'}
-        outputs=[item.get('output','') for request in ScopedModel.requests for item in request.get('input',[])
-                 if item.get('type')=='function_call_output']
-        assert any('unavailable in Default mode' in output for output in outputs),outputs
-        print('Native Codex: server-owned headless writers/reviewers and tools-disabled classifier preserve scoped provider/model')
+        print('Native Codex: server-owned headless writers/reviewers preserve scoped provider/model')
     finally:
         service.close();model.shutdown();model.server_close()

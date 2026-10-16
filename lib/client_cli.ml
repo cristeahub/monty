@@ -37,8 +37,8 @@ let web ~home_arg =
       let paired=Lwt_main.run (let open Lwt.Infix in
         Client_terminal.ensure_service ?config_path ~home () >>= fun _ ->
         Client_terminal.request ~home `POST "/v1/browser/pair" (obj ["assets",string assets])) in
-      let url=Context_store.s "url" (read (file home ["client-service.json"])) in
-      Printf.printf "Open %s\n\nPairing code (one use, expires in five minutes):\n%s\n%!" url (Context_store.s "code" paired)))
+      let url=Json_fields.s "url" (read (file home ["client-service.json"])) in
+      Printf.printf "Open %s\n\nPairing code (one use, expires in five minutes):\n%s\n%!" url (Json_fields.s "code" paired)))
       $ home_arg $ assets $ config)
 
 let terminal ~home_arg =

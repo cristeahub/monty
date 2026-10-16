@@ -23,9 +23,9 @@ let call c meth params =
   Lwt.finalize (fun () ->
     send c (obj ["id",`Int id;"method",string meth;"params",params]) >>= fun () ->
     Lwt_unix.with_timeout 30. (fun () -> promise) >>= fun value ->
-    if Context_store.field "error" value <> `Null then
-      Lwt.fail (Failure (502,"native request rejected: " ^ Yojson.Safe.to_string (redact (Context_store.field "error" value))))
-    else Lwt.return (Context_store.field "result" value))
+    if Json_fields.field "error" value <> `Null then
+      Lwt.fail (Failure (502,"native request rejected: " ^ Yojson.Safe.to_string (redact (Json_fields.field "error" value))))
+    else Lwt.return (Json_fields.field "result" value))
     (fun () -> Hashtbl.remove c.pending id;Lwt.return_unit)
 let connect path =
   Lwt_io.open_connection (Unix.ADDR_UNIX path) >>= fun (ic,oc) ->
@@ -51,7 +51,7 @@ let connect path =
         Buffer.add_string buffer f.content;
         if f.final then (
           let j = Yojson.Safe.from_string (Buffer.contents buffer) in Buffer.clear buffer;
-          match Context_store.field "id" j, Context_store.field "method" j with
+          match Json_fields.field "id" j, Json_fields.field "method" j with
           | `Int id,`Null -> (match Hashtbl.find_opt c.pending id with Some wake -> Lwt.wakeup_later wake j | _ -> ())
           | _,`String _ -> c.notify j
           | _ -> fail 502 "malformed native JSON-RPC event");

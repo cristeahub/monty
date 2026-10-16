@@ -1,5 +1,5 @@
 open Lwt.Infix
-open Context_store
+open Json_fields
 open Conversation_store
 
 type worker_fence = {process:Lwt_process.process_full; mutable session_id:string}
@@ -816,29 +816,6 @@ let headless_start t id request =
     event t(obj["type",string "command_changed";"command",string id]))
     (fun () -> Owned_process.close child >>= fun () -> Hashtbl.remove t.supervisors id;Hashtbl.remove t.active_workers record.path;Lwt_io.close channel));
   Lwt.return(obj["worker_id",string record.id;"status",string "submitted";"command",string id;"log",string log])
-let classify t id request =
-  let p=profile t(required "profile" request) in
-  let harness=get(Harness.of_string(s "harness" p) |> Result.map_error(fun (`Msg m)->m)) in
-  get(Harness.check_review_command harness (s "command" p));
-  let text=bounded_string 131072(field "text" request) in
-  let seconds=i "seconds" request in
-  if seconds<1 || seconds>600 then fail 400 "classifier timeout must be between one and 600 seconds";
-  codex_model_config t p ~cwd:t.home >>= fun model_config ->
-  if t.stopping then fail 503 "Monty service is shutting down; no classifier started";
-  let directory=file t.home["conversation-executions"] in
-  get(State_store.ensure_real_directory ~label:"server execution artifacts" ~mode:0o700 directory);
-  let prompt=file t.home["conversation-executions";id ^ ".prompt"] in
-  locked t.home(fun ()->get(State_store.write_file_atomic ~path:prompt ~perm:0o600 text));
-  let key,account=match harness with Harness.Pi->"PI_CODING_AGENT_DIR",s "pi_home" p|Codex->"CODEX_HOME",s "codex_home" p|Claude->"CLAUDE_CONFIG_DIR",s "claude_home" p in
-  let env=native_environment(profile_auth p @ [key ^ "=" ^ account]) in
-  let command=Context_classifier.command ~model_config harness (Native_command.shell(s "command" p)) ^ " < " ^ Shell.quote prompt in
-  let child=Owned_process.start ~env ~cwd:directory ["/bin/sh";"-c";"exec " ^ command] in
-  Hashtbl.add t.executions id child;
-  Lwt.finalize(fun () -> Lwt_unix.with_timeout (float_of_int seconds) (fun () ->
-    Lwt.both (Lwt_io.read ~count:8_000_001 child#stdout) (Owned_process.drain child#stderr) >>= fun (output,()) ->
-    if String.length output>8_000_000 then fail 413 "classifier output exceeds budget";
-    child#status >|= function Unix.WEXITED 0->Yojson.Safe.from_string(String.trim output)|_->fail 502 "native classifier failed; inspect selected account configuration"))
-    (fun ()->Owned_process.close child)
 let execute t ~id request =
   if t.stopping then fail 503 "Monty service is shutting down; inspect receipts before retrying";
   let op=required "op" request in
@@ -851,7 +828,6 @@ let execute t ~id request =
       if field "updated_at" request<>field "updated_at" receipt || s "status" receipt<>"running" then fail 409 "execution receipt changed; refresh before cancelling";
       let child=match Hashtbl.find_opt t.executions target with Some child->child|None->fail 409 "execution ownership is unavailable; inspect recovery evidence" in
       Owned_process.close child >|= fun () -> finish t.home target "outcome_unknown" (obj["reason",string "explicitly cancelled; inspect artifacts before any fresh execution"])
-  | "classify" -> classify t id request
   | "headless_start" -> headless_start t id request
   | "terminal_open"|"terminal_input"|"terminal_resize" -> terminal_command t op request
   | "start"|"import"|"attach" -> register t request ~mode:op
@@ -937,7 +913,7 @@ let submit t id request =
   if fresh then Lwt.async (fun () ->
     (* A Pi prompt can wait for a dialog before acknowledging. Its response or
        interruption must not wait behind that prompt's command mutex. *)
-    let run f=if List.mem (s "op" request) ["respond";"interrupt";"cancel_execution";"classify"] then f () else Lwt_mutex.with_lock t.commands f in
+    let run f=if List.mem (s "op" request) ["respond";"interrupt";"cancel_execution"] then f () else Lwt_mutex.with_lock t.commands f in
     run (fun () ->
     ignore (finish t.home id "running" `Null);
     Lwt.catch (fun () -> execute t ~id request >|= fun result -> if s "op" request<>"headless_start" || s "status" (receipt t.home id)<>"finished" then ignore(finish t.home id (if s "op" request="headless_start" then "running" else "finished") result))

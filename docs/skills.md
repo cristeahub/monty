@@ -26,8 +26,9 @@ naming the path; move your custom skill to another name before retrying.
 Native settings that disable skills are not overridden. Existing sessions may
 need their native reload command or a restart to discover newly installed skills.
 
-Read-only CLI queries and dry-run preflight do not install anything. Optional
-source triage keeps its existing skills-disabled isolation. Claude receives Monty instructions, task context and every ordered workspace explicitly; it is not expected to discover AGENTS.md or MONTY.md automatically.
+Read-only CLI queries and dry-run preflight do not install anything. Claude
+receives Monty instructions, task context and every ordered workspace explicitly;
+it is not expected to discover AGENTS.md or MONTY.md automatically.
 
 The former documentation MCP server and setup commands have been removed.
 The old `monty mcp guide` spelling remains a CLI alias so saved worker and native
