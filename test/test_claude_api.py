@@ -32,7 +32,7 @@ if '--print' in args:
  text=sys.stdin.read();print(json.dumps({'type':'result','subtype':'success','is_error':False,'session_id':'12345678-1234-4234-8234-123456789abc','permission_denials':[],'result':'complete Claude phase'}));sys.exit()
 native=args[args.index('--session-id')+1] if '--session-id' in args else args[args.index('--resume')+1]
 log=Path(os.environ['CLAUDE_CONFIG_DIR'])/'terminal.json'
-log.write_text(json.dumps({'pid':os.getpid(),'ppid':os.getppid(),'native':native,'tty':os.isatty(0),'args':args}))
+log.write_text(json.dumps({'pid':os.getpid(),'ppid':os.getppid(),'native':native,'tty':os.isatty(0),'args':args,'rex':{k:v for k,v in os.environ.items() if k.startswith('REX_')}}))
 print('NATIVE CLAUDE '+native,flush=True)
 for line in sys.stdin:
  print('RECEIVED '+line.strip(),flush=True)
@@ -130,7 +130,8 @@ for line in sys.stdin:
         # workspace map cannot redirect a worker away from its durable record.
         task_context=root/'context.md';task_context.write_text('Bounded native worker fixture.\n')
         fake_bin=root/'fake-bin';fake_bin.mkdir()
-        osascript=fake_bin/'osascript';osascript.write_text('#!/bin/sh\nexit 0\n');osascript.chmod(0o700)
+        for name in ('ghostty','osascript'):
+            tool=fake_bin/name;tool.write_text('#!/bin/sh\nexit 0\n');tool.chmod(0o700)
         worker_env=dict(env,PATH=str(fake_bin)+os.pathsep+env['PATH'])
         for args in (['projects','add','--repo',str(repo)],
                      ['launch','--repo',str(repo),'--title','Native worker','--branch','cto/native-worker',
@@ -167,6 +168,28 @@ for line in sys.stdin:
         retained=c.req('terminals/'+sid)
         assert not retained['running'] and retained['code']==0
         assert ('NATIVE CLAUDE '+native).encode() in base64.b64decode(retained['data'])
+        # Rex placement is attachment context: it reaches the native process and its
+        # tools, is refreshed on every reconnect, and never enters the durable session.
+        rex_env=dict(worker_env,REX_SESSION='session:01a1-caller',REX_BLOCK='block:01a1-first',REX_SERVER='unix:///fake/rex/server.sock',REX_CLIENT='client:01a1-app')
+        attach=[BIN,'terminal','--worker','--harness','claude','--home',str(root),'--instructions',str(worker_dir/'MONTY.md'),'--context',str(task_context)]
+        def attached(env,predicate):
+            run=subprocess.run(attach,cwd=repo,env=env,capture_output=True,text=True,timeout=15)
+            assert run.returncode==0,run.stderr
+            record=until(lambda:json.loads((account/'terminal.json').read_text()),predicate)
+            chat=next(x for x in c.req('conversations') if x['sessions'][0]['native_id']==record['native'])
+            assert not any(k.startswith('REX_') for k in chat['sessions'][0]['context']['environment']),chat
+            c.cmd('rex-exit-'+record['native'],{'op':'terminal_input','conversation':chat['id'],'selected_session':chat['sessions'][0]['id'],'data':base64.b64encode(b'/exit\n').decode()})
+            until(lambda:c.req('terminals/'+chat['sessions'][0]['id'])['running'],lambda x:not x)
+            return record
+        record=attached(rex_env,lambda r:r.get('rex'))
+        assert record['rex']=={'REX_SESSION':'session:01a1-caller','REX_BLOCK':'block:01a1-first','REX_SERVER':'unix:///fake/rex/server.sock','REX_CLIENT':'client:01a1-app'},record
+        record=attached(dict(rex_env,REX_BLOCK='block:01a1-second',REX_CLIENT='junk'),lambda r:r.get('rex',{}).get('REX_BLOCK')=='block:01a1-second')
+        assert 'REX_CLIENT' not in record['rex'],record
+        assert (worker_dir/'claude-session-id').read_text().strip()==record['native']
+        for name,environment in [('rex-bad-id',{'REX_BLOCK':'nope'}),('rex-foreign',{'PATH':'/tmp'}),('rex-control',{'REX_SESSION':'session:a b'})]:
+            rejected=c.cmd(name,{'op':'terminal_open','conversation':cid,'selected_session':sid,'revision':c.revision(cid),'fresh':False,'terminal_environment':environment},status='rejected')
+            assert rejected['code']==400 and 'terminal environment' in rejected['message'],rejected
+        assert not c.req('terminals/'+sid)['running']
         # Claude's --add-dir is variadic: a second workspace must precede the
         # session flags so the initial prompt stays a positional argument.
         multi=c.cmd('multi-start',{'op':'start','profile':'claude','terminal':True,'context':context})

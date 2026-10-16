@@ -136,6 +136,7 @@ let check_dependencies options =
     let* () = check_worktree_dependency options in
     match options.backend with
     | Terminal.Dry_run -> Ok ()
+    | Terminal.Rex -> check_dependency "Rex CLI" "rex"
     | Terminal.Ghostty ->
         let* () = check_dependency "Ghostty application" "ghostty" in
         check_dependency "Ghostty terminal request" "osascript"
@@ -1523,7 +1524,7 @@ let begin_request ?(persist_failure = true) ?(write_script = true)
                   | Error message -> `Failed message
                   | Ok () -> `Ready { workdir; initial_workdir })))
 
-let request_one ?(codex_mode = Codex_session.Fresh) options
+let request_one ?(codex_mode = Codex_session.Fresh) ?rex options
     (prepared : prepared) ~expected_statuses =
   match begin_request ~codex_mode options prepared ~expected_statuses with
   | `Failed message -> `Failed message
@@ -1532,9 +1533,17 @@ let request_one ?(codex_mode = Codex_session.Fresh) options
       | Error message -> `Requested_error message
       | Ok () -> (
           match
-            Ghostty.launch ~target:options.target
-              ~workdir:request.initial_workdir
-              ~script_path:prepared.script_path
+            (match (options.backend, rex) with
+            | Terminal.Rex, Some plan ->
+                Rex.launch ~home:options.home ~worker_dir:prepared.worker_dir ~plan
+                  ~target:options.target ~workdir:request.initial_workdir
+                  ~script_path:prepared.script_path ~label:prepared.job.Job.title
+            | Terminal.Rex, None -> Error "Rex launch requires a preflight placement plan"
+            | Terminal.Ghostty, _ ->
+                Ghostty.launch ~target:options.target
+                  ~workdir:request.initial_workdir
+                  ~script_path:prepared.script_path
+            | Terminal.Dry_run, _ -> Error "dry-run cannot request a terminal")
           with
           | Error message -> `Requested_error message
           | Ok () -> (
@@ -1574,7 +1583,7 @@ let result_for options retry (prepared : prepared) outcome =
   in
   { id = prepared.id; title = prepared.job.Job.title; outcome; recovery }
 
-let execute_batch options ~retry prepared =
+let execute_batch ?rex options ~retry prepared =
   let rec loop results = function
     | [] -> { jobs = List.rev results }
     | item :: rest -> (
@@ -1599,7 +1608,7 @@ let execute_batch options ~retry prepared =
               | Retryable status -> [ status ]
               | Requested -> assert false
             in
-            match request_one options item ~expected_statuses with
+            match request_one ?rex options item ~expected_statuses with
             | `Requested ->
                 loop
                   (result_for options retry item (Launch_requested None) :: results)
@@ -1652,6 +1661,34 @@ let retry_launch_command options (job : Job.t) =
     | Some branch -> [ "--branch"; Shell.quote branch ])
     @ [ common_retry_options options ])
 
+let terminal_plan options =
+  match options.backend with
+  | Terminal.Rex ->
+      Rex.preflight ~home:options.home ~target:options.target |> Result.map Option.some
+  | Terminal.Ghostty | Terminal.Dry_run -> Ok None
+
+(* A still-live Rex terminal is focused instead of duplicated; an exited or
+   vanished one lets the normal resume request a new terminal. *)
+let live_rex_terminal options (prepared : prepared) (record : Job_store.record) =
+  match options.backend with
+  | Terminal.Ghostty | Terminal.Dry_run -> Ok None
+  | Terminal.Rex -> (
+      let* reference = Rex.read_reference prepared.worker_dir in
+      match reference with
+      | None -> Ok None
+      | Some reference ->
+          let current_script =
+            match record.launch_script with
+            | Some path -> canonical_path_equal path reference.Rex.launch_script
+            | None -> false
+          in
+          if not current_script then Ok None
+          else
+            let* liveness = Rex.liveness reference in
+            (match liveness with
+            | Rex.Live process -> Ok (Some (reference, process))
+            | Rex.Exited _ | Rex.Gone -> Ok None))
+
 let launch_many ?(retry_command = "monty launch-many") options indexed_jobs =
   let* prepared =
     if options.container_workers then preflight_batch options indexed_jobs
@@ -1669,7 +1706,9 @@ let launch_many ?(retry_command = "monty launch-many") options indexed_jobs =
   | Terminal.Dry_run ->
       List.iter (dry_run options) prepared;
       Ok ()
-  | Terminal.Ghostty -> (
+  | Terminal.Ghostty | Terminal.Rex -> (
+      (* The whole batch pins one Rex placement before any worker is reserved. *)
+      let* rex = terminal_plan options in
       match reserve_batch options prepared with
       | Error message ->
           let result =
@@ -1682,7 +1721,7 @@ let launch_many ?(retry_command = "monty launch-many") options indexed_jobs =
           Fmt.pr "%s\n" (render_human result);
           Error ("batch reservation failed: " ^ message)
       | Ok reserved ->
-          let result = execute_batch options ~retry:retry_command reserved in
+          let result = execute_batch ?rex options ~retry:retry_command reserved in
           Fmt.pr "%s\n" (render_human result);
           if has_failure result then Error "batch launch did not request every worker"
           else Ok ())
@@ -1788,7 +1827,7 @@ let resume_job_unlocked ?(validate_open_task = true) ?(fresh = false)
       in
       dry_run ~codex_mode options prepared;
       Ok ()
-  | Terminal.Ghostty ->
+  | Terminal.Ghostty | Terminal.Rex ->
       let* record =
         if not (State_path.path_exists prepared.state_path.State_path.job_file) then
           Error
@@ -1817,6 +1856,16 @@ let resume_job_unlocked ?(validate_open_task = true) ?(fresh = false)
       let* _task_id =
         Project_overview.validate_worker_task_link ~home:options.home record
       in
+      let* live = live_rex_terminal options prepared record in
+      match live with
+      | Some (reference, process) ->
+          let* () = Rex.focus reference in
+          Fmt.pr
+            "%s (%s): terminal is still live (%s running in Rex block %s); focused it instead of requesting another terminal\n"
+            prepared.id prepared.job.Job.title process reference.Rex.block_id;
+          Ok ()
+      | None ->
+      let* rex = terminal_plan options in
       let* prepared = script_for_resume options prepared record in
       let retry =
         String.concat " "
@@ -1825,7 +1874,7 @@ let resume_job_unlocked ?(validate_open_task = true) ?(fresh = false)
           @ [ Shell.quote prepared.id; common_retry_options options ])
       in
       let result =
-        match request_one ~codex_mode options prepared
+        match request_one ~codex_mode ?rex options prepared
                 ~expected_statuses:[ record.Job_store.status ]
         with
         | `Requested ->

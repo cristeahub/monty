@@ -649,6 +649,33 @@ let test_ghostty_tab_launch_focuses_new_terminal () =
   assert_contains "tab launch selects tab" script "select tab montyTab";
   assert_contains "tab launch focuses terminal" script "focus focused terminal of montyTab"
 
+let test_rex_context_and_status () =
+  let getenv = function
+    | "REX_SESSION" -> Some "session:01a1"
+    | "REX_BLOCK" -> Some "block 01a1"
+    | "REX_SERVER" -> Some "unix:///tmp/rex.sock"
+    | "REX_CLIENT" -> Some "nope"
+    | _ -> None
+  in
+  let context = Rex.context_of_env ~getenv () in
+  assert_bool "session kept" (context.Rex.session = Some "session:01a1");
+  assert_bool "malformed REX_BLOCK dropped" (context.Rex.block = None);
+  assert_bool "REX_CLIENT without prefix dropped" (context.Rex.client = None);
+  assert_bool "bindings keep only valid context"
+    (Rex.bindings_of_context context
+    = [ ("REX_SERVER", "unix:///tmp/rex.sock"); ("REX_SESSION", "session:01a1") ]);
+  assert_bool "foreign names rejected" (Result.is_error (Rex.validate_binding "PATH" "/bin"));
+  assert_bool "control characters rejected" (Result.is_error (Rex.validate_binding "REX_SESSION" "session:a\nb"));
+  let report = Rex.status_report ~title:"Worker \"x\"\n" ~msg:"handoff: ready" ~kind:"question" "blocked" in
+  assert_equal "osc 7501 report"
+    ("\027]7501;state=blocked:id=monty:app=monty:kind=question:title="
+    ^ Base64.encode_exn "Worker \"x\"" ^ ":msg=" ^ Base64.encode_exn "handoff: ready" ^ "\027\\")
+    report;
+  assert_equal "clear report" "\027]7501;state=clear:id=monty:app=monty\027\\" (Rex.status_report "clear");
+  assert_equal "blank label" "Monty worker" (Rex.label_of_title "   ");
+  let long = String.concat "" (List.init 60 (fun _ -> "\xc3\xa6")) in
+  assert_equal "utf8 label boundary" long (Rex.label_of_title (long ^ "x"))
+
 let test_list_jobs_render () =
   let root = temp_root "list" in
   let home, repo, _context, _worker_dir, _instructions = setup_worker root in
@@ -1609,6 +1636,7 @@ let () =
     ("launch_many_single_defaults", test_launch_many_single_job_uses_single_job_defaults);
     ("launch_many_multiple_defaults", test_launch_many_multiple_jobs_keeps_numbered_defaults);
     ("ghostty_tab_focus", test_ghostty_tab_launch_focuses_new_terminal);
+    ("rex_context_and_status", test_rex_context_and_status);
     ("list_jobs_render", test_list_jobs_render);
     ("task_row_numbers", test_task_row_numbers);
     ("tasks_sync", test_tasks_sync_jobs_to_local_source);

@@ -20,7 +20,12 @@ let check_command find_command ~required ~name ~command ~recovery =
         recovery;
       }
 
-let transition_check ~home ~wt_command (record : Job_store.record) =
+let transition_check ~home ~wt_command ~backend (record : Job_store.record) =
+  let backend =
+    match backend with
+    | Terminal.Dry_run -> Terminal.Rex
+    | backend -> backend
+  in
   match record.transition with
   | Some transition when transition.operation = Job_store.Complete ->
       Some
@@ -40,8 +45,9 @@ let transition_check ~home ~wt_command (record : Job_store.record) =
           message = "incomplete reopening transition at " ^ record.path;
           recovery =
             [ Printf.sprintf
-                "monty resume --archived %s --home %s --terminal ghostty --worktree %s --wt-command %s"
+                "monty resume --archived %s --home %s --terminal %s --worktree %s --wt-command %s"
                 (Shell.quote record.id) (Shell.quote home)
+                (Terminal.backend_to_string backend)
                 (Shell.quote record.worktree_mode) (Shell.quote wt_command) ];
         }
   | Some _ | None -> None
@@ -134,7 +140,7 @@ let duplicate_identity_checks records =
   check "worker id" ids @ check "repo+branch" repo_branches
   @ check "task link" task_links
 
-let state_checks ~home ~wt_command =
+let state_checks ?(backend = Terminal.Rex) ~home ~wt_command () =
   match Job_store.scan ~home with
   | Error message ->
       [
@@ -160,7 +166,7 @@ let state_checks ~home ~wt_command =
       let record_checks =
         scan.records
         |> List.filter_map (fun record ->
-               match transition_check ~home ~wt_command record with
+               match transition_check ~home ~wt_command ~backend record with
                | Some _ as check -> check
                | None -> launch_state_check ~home record)
       in
@@ -225,6 +231,23 @@ let checks ?(find_command = Process.command_exists_with_arguments)
   let required =
     match (container_workers, backend) with
     | true, _ | false, Terminal.Dry_run -> required
+    | false, Terminal.Rex -> (
+        let cli =
+          check_command find_command ~required:true ~name:"rex" ~command:"rex"
+            ~recovery:[ "Install Rex (its CLI ships inside the Rex app) or use --terminal dry-run." ]
+        in
+        (* The server runs with the Rex app; without it no tab can be created. *)
+        let server =
+          match cli.level with
+          | Pass -> (
+              match Rex.endpoint ?server:(Rex.context_of_env ()).Rex.server () with
+              | Ok endpoint -> [ { name = "rex-server"; level = Pass; message = endpoint; recovery = [] } ]
+              | Error message ->
+                  [ { name = "rex-server"; level = Fail; message;
+                      recovery = [ "Open the Rex app, or set REX_SERVER to a running server, or use --terminal dry-run." ] } ])
+          | Warn | Fail -> []
+        in
+        required @ (cli :: server))
     | false, Terminal.Ghostty ->
         required
         @ [
@@ -243,7 +266,7 @@ let checks ?(find_command = Process.command_exists_with_arguments)
       check_command find_command ~required:false ~name:"sdef" ~command:"sdef"
         ~recovery:[ "Install sdef to inspect the Ghostty AppleScript dictionary." ];
     ]
-  @ state_checks ~home ~wt_command
+  @ state_checks ~backend ~home ~wt_command ()
 
 let width minimum values =
   List.fold_left (fun width value -> max width (String.length value)) minimum values

@@ -68,8 +68,9 @@ worker identity. Workspaces are ordered; the first is only the launch directory.
 Use Monty's existing repo-scoped `wt` flow; never create worktrees directly.
 Treat worktrees as ephemeral and preserve discoveries in durable worker memory.
 
-Ghostty is the default execution surface. Use headless only when explicitly
-requested. Complete full-batch dry-run preflight before launching a new batch.
+Rex is the default execution surface; Ghostty remains available with
+`--terminal ghostty` or the persisted terminal setting. Use headless only when
+explicitly requested. Complete full-batch dry-run preflight before launching a new batch.
 Preserve the complete result of partial failures and use its recovery commands.
 Never automatically relaunch a worker whose launch was already requested.
 

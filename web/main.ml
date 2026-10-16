@@ -682,15 +682,16 @@ let application graph =
             (if Poly.equal m.task_plan `Null then N.none else
               let plan=m.task_plan in
               let ready=Poly.equal (field "ready" plan) (`Bool true) in
+              let terminal=match field "terminal" plan with `String "rex"->"Rex"|`String "ghostty"->"Ghostty"|`String other->other|_->"Rex" in
               N.div ~attrs:[cls "notice preflight";A.create "role" "status"] [
                 N.strong[txt(if ready then "Preflight passed" else "Preflight needs attention")];
-                note("Account: " ^ s "profile" plan ^ " · " ^ s "agent_profile" plan ^ " · Ghostty");
+                note("Account: " ^ s "profile" plan ^ " · " ^ s "agent_profile" plan ^ " · " ^ terminal);
                 N.div(List.map (xs "workspaces" plan) ~f:(fun w->N.p[txt(s "repo" w ^ " · " ^ s "branch" w)]));
                 (if s "context" plan="" then N.none else el "details" [el "summary"[txt "Worker context to launch"];N.pre[txt(s "context" plan)]]);
                 el "details" ~attrs:(if ready then [] else [A.create "open" ""]) [el "summary"[txt "Preflight output"];
                   N.pre[txt(s "stdout" (field "doctor" plan) ^ s "stderr" (field "doctor" plan) ^ s "stdout" (field "preview" plan) ^ s "stderr" (field "preview" plan))]];
                 (if ready then button ~kind:"primary" ~disabled:busy
-                  (if s "action" plan="launch" then "Launch worker in Ghostty" else "Resume worker in Ghostty")
+                  (if s "action" plan="launch" then "Launch worker in " ^ terminal else "Resume worker in " ^ terminal)
                   (command m inject(obj["op",str "task_apply";"preflight",field "preflight" plan;"confirm",`Bool true])) else N.none)]);
             (if closed then N.none else if not m.confirm_complete then button ~disabled:busy "Complete task…" (set(fun m->{m with confirm_complete=true})) else
               N.div ~attrs:[cls "notice"] [note(if has_worker then "Complete this task and archive its worker. Monty removes clean worktrees and refuses to discard local changes." else "Mark this task complete?");

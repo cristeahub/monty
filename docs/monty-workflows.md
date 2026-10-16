@@ -147,15 +147,34 @@ monty launch-many --terminal dry-run --manifest .monty/runs/<run-id>/jobs.json
 ```
 
 Dry-run runs the same complete preflight as real launch and performs no mutation.
+Rex is the default terminal, so the batch opens through the installed Rex CLI; see the Rex terminals topic for targets and recovery, and pass `--terminal ghostty` for Ghostty.
 Do not launch the real batch until every repo, context, project, task link, dependency, canonical path, and full-batch identity passes preflight.
 If a real batch partially fails, preserve Monty's full result in the handoff.
 Use the printed batch command to retry `prepared` and `launch-failed` workers.
 Never automatically relaunch a `launch-requested` worker.
 Use the printed `monty resume <worker-id>` command only when the user intentionally wants another terminal request.
 
+## Rex terminals
+
+Rex is the default native terminal backend; Ghostty remains available with `--terminal ghostty`, `MONTY_TERMINAL=ghostty`, or `monty settings set terminal ghostty`. `--terminal` wins over the environment, which wins over the setting, which wins over the Rex default. Check it with `monty doctor --terminal rex`, which requires the `rex` CLI and a reachable server (the Rex app runs it). Never script the app, type into shells, or talk to the server socket directly; every tab, pane and session goes through `rex run`, `rex split` and `rex new`.
+
+Terminology: a Rex session groups work and survives while no app views it; a Rex window is a tab inside a session; a block is a pane. `--target tab` creates a window in a session, `--target split` creates a block to the right of the caller's own pane, and `--target window` creates one dedicated Rex session per worker and shows it in the app. Rex sets `REX_SESSION`, `REX_BLOCK` and `REX_SERVER` in every terminal; Monty uses those exact IDs for the whole batch and never follows moving focus or infers anything from labels.
+
+```sh
+monty launch-many --terminal rex --manifest .monty/runs/<run-id>/jobs.json          # tabs in your session
+monty launch-many --terminal rex --target split --manifest .monty/runs/<run-id>/jobs.json
+monty launch-many --terminal rex --target window --manifest .monty/runs/<run-id>/jobs.json
+monty resume --terminal rex <worker-id>      # focuses a still-live Rex terminal, else opens a new tab
+monty rex status <worker-id>                 # recorded IDs, liveness and program status; read-only
+```
+
+From outside Rex (a plain shell, the web client or a service-owned chat) `tab` lands in one Monty-owned session labelled `monty` that is recorded under `.monty/rex-session.json` and verified live before reuse, `split` is refused in preflight, and `window` creates a session. Showing a session needs exactly one connected Rex app (or `REX_CLIENT`) with Remote Control enabled; otherwise preflight fails before any worker is reserved and names the fix.
+
+Each worker records `rex-terminal.json` (server, session, window, block, client, target, attempt) beside `job.json`; `job.json` never carries Rex IDs. A `rex` failure or garbled response after `launch-requested` keeps that state with the error; use the printed `monty resume` command only when another terminal request is intended, because the tab may already exist. Resume checks the recorded block: live means focus, exited or gone means a new tab for the same conversation, unreachable server means stop. Workers running inside Rex receive their own `REX_*` context through the service and may use the Rex agent guide (`rex skill show`) for their own tabs; label and ID conventions there do not identify Monty workers. Program status (OSC 7501) from the terminal client mirrors attachment, handoff outcome and exit; none of it completes a task.
+
 ## Headless
 
-Ghostty remains the default execution surface.
+Rex is the default execution surface; Ghostty remains available with `--terminal ghostty`.
 Use the headless harness flow only when the user explicitly requests headless or Pi-subagent execution.
 Headless commands must resolve the effective harness through the normal CLI, environment, and persisted-settings precedence.
 When `codex` is persisted as the selected harness, do not add a redundant `--harness codex` flag.
@@ -283,7 +302,7 @@ Any FAIL exits nonzero and must be resolved before relying on launch or lifecycl
 The implementation is OCaml built with Dune.
 Use Dune package management and dependencies in `dune-project`.
 Do not add opam files.
-Use Ghostty as the default terminal backend. Use `monty settings set harness pi|codex|claude` to persist the default agent harness; `--harness` remains the per-command override. Use `monty settings set branch-prefix <prefix>` to persist the default generated-branch prefix; `--branch-prefix` remains the per-command override.
+Rex is the default terminal backend; `monty settings set terminal ghostty|rex` persists another default and `--terminal` or `MONTY_TERMINAL` override it per command. Use `monty settings set harness pi|codex|claude` to persist the default agent harness; `--harness` remains the per-command override. Use `monty settings set branch-prefix <prefix>` to persist the default generated-branch prefix; `--branch-prefix` remains the per-command override.
 Use `monty settings set codex-yolo true|false` to control whether Monty-launched Codex sessions bypass approvals and sandboxing. Treat the enabled value as an explicit high-risk user choice.
 Keep headless state and payload generation in Monty.
 Pi and Codex headless execution use their configured non-interactive commands under Monty's shared background runner.
@@ -292,7 +311,7 @@ Use Monty's repo-scoped `ensure-worktree` flow for every workspace's worktree cr
 It must use the existing `wt` CLI, validate each selected repo, and automatically answer `wt` repo-selection prompts when branch names collide across repos.
 Never bypass `wt` with direct `git worktree` commands.
 All JSON mutations must use Monty's one-home lock and atomic replacement path.
-Never hold that lock while invoking `gh`, `wt`, Ghostty, pi, `osascript`, git, or other slow external commands.
+Never hold that lock while invoking `gh`, `wt`, Ghostty, `rex`, pi, `osascript`, git, or other slow external commands.
 When changing state or lifecycle behavior, add isolated checkout-binary E2E coverage with a unique `MONTY_HOME`, fake external tools, reliable cleanup, and real temporary Git repositories where identity matters.
 
 ## Findings
@@ -436,8 +455,11 @@ Task actions use `POST /v1/commands/ID` and its existing durable receipts:
   `context`. Monty adds the title, task identity and ordered workspace map, saves
   the plan in its run directory, and runs doctor plus the complete dry-run.
 - `task_apply`: successful `preflight` command ID and `confirm:true`. Monty checks
-  the task, account, role, settings and context again, repeats the dry-run, and
-  requests Ghostty once. Resume uses the exact saved worker and original native
+  the task, account, role, settings, terminal and context again, repeats the dry-run, and
+  requests the selected terminal once. The preflight result and plan carry
+  `terminal` (`ghostty` or `rex`, from the persisted setting or the service's
+  `MONTY_TERMINAL`); the UI labels its buttons with it, and an apply whose
+  terminal changed since preflight is refused. Resume uses the exact saved worker and original native
   account. A consumed plan cannot be submitted again under a different ID.
 - `task_complete`: canonical `task`, its `revision` and `confirm:true`. Linked
   workers go through `monty done`; dirty worktrees are refused. There is no
@@ -447,7 +469,9 @@ Task process results retain `exit_code`, `stdout` and `stderr`, including partia
 failure and recovery commands. A finished command receipt means the adapter
 finished: inspect the process result. A launch request does not establish that
 implementation succeeded or that the task is complete. Web worker launches use
-host worktrees and Ghostty; container workers keep their existing headless flow.
+host worktrees and the selected terminal (Rex launches from the web land in the
+Monty-owned Rex session because the service has no caller pane); container
+workers keep their existing headless flow.
 Codex web launches keep approvals and sandboxing enabled even when saved settings
 or the terminal's login environment enable bypass.
 
@@ -834,6 +858,10 @@ preserves later user mode changes, terminal resizing and native exit codes.
 Generated worker commands pass `--worker` to preserve their task link,
 workspace environment and `codex-session-id` sidecar. Task-free/head-butler
 terminals ignore ambient worker identity even when started from a worker shell.
+Every attachment also forwards the caller's `REX_SESSION`, `REX_BLOCK`,
+`REX_SERVER` and `REX_CLIENT` as `terminal_environment`; the service validates
+them and applies them to that native process (and, for Codex, to the thread's
+tool shell environment at start) without storing them in the session context.
 Native runtime IDs are not written to `job.json`. Headless phase supervision and
 Pi launches retain their existing paths. Old authenticated worker scripts are
 recognized for migration and rewritten on explicit resume.

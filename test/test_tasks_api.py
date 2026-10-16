@@ -78,6 +78,8 @@ else: raise AssertionError(sys.argv)
     service = Service(home, config, {'PATH': str(fake) + ':' + os.environ['PATH'],
         'MONTY_CODEX_YOLO': 'true', 'MONTY_BRANCH_PREFIX': 'testprefix'})
     cli(service, 'projects', 'add', '--repo', str(repo))
+    # Rex is the built-in default; these fixtures fake Ghostty unless a check opts in.
+    cli(service, 'settings', 'set', 'terminal', 'ghostty')
     return service, repo
 
 
@@ -179,7 +181,38 @@ def check(home):
         assert failed['process']['exit_code'] != 0
         assert 'recover' in (failed['process']['stdout'] + failed['process']['stderr']).lower()
         assert c.req('tasks/' + key)['status'] == 'open'
-        print('task API: create, preflight, duplicate/stale protection, launch, resume, dirty completion, archive/reopen and recovery passed')
+        # Rex is one shared terminal selection: preflight records it, apply re-checks
+        # it, and the launch goes through the rex CLI rather than AppleScript.
+        rex_state = home / 'rex-state.json'
+        rex_log = home / 'rex.log'
+        fake = home / 'fake-bin'
+        (fake / 'rex').write_text('#!/bin/sh\nREX_FAKE_STATE=%s REX_FAKE_LOG=%s exec %s -I %s "$@"\n' % (
+            shlex.quote(str(rex_state)), shlex.quote(str(rex_log)), shlex.quote(sys.executable),
+            shlex.quote(str(Path(__file__).with_name('fake_rex.py').resolve()))))
+        (fake / 'rex').chmod(0o700)
+        applescript_calls = (home / 'tools.log').read_text().count('osascript')
+        cli(service, 'settings', 'set', 'terminal', 'rex')
+        created = c.cmd('create-rex', {'op': 'task_create', 'project': 'repo', 'title': 'Rex web launch'})
+        key = created['key']
+        preview = preflight('rex-preview')
+        assert preview['ready'] and preview['terminal'] == 'rex', preview
+        assert not rex_log.exists() or not any('run' in row for row in rex_log.read_text().splitlines()), 'preflight must not create terminals'
+        cli(service, 'settings', 'set', 'terminal', 'ghostty')
+        c.cmd('rex-stale', {'op': 'task_apply', 'preflight': 'rex-preview', 'confirm': True}, status='rejected')
+        cli(service, 'settings', 'set', 'terminal', 'rex')
+        preview = preflight('rex-reviewed')
+        assert preview['terminal'] == 'rex', preview
+        applied = c.cmd('rex-launch', {'op': 'task_apply', 'preflight': 'rex-reviewed', 'confirm': True})
+        assert applied['process']['exit_code'] == 0 and applied['terminal'] == 'rex', applied
+        rows = [json.loads(line) for line in rex_log.read_text().splitlines()]
+        assert sum('run' in row for row in rows) == 1 and sum('new' in row for row in rows) == 1, rows
+        assert (home / 'tools.log').read_text().count('osascript') == applescript_calls, 'Rex launches never call AppleScript'
+        worker_dir = Path(c.req('tasks/' + key)['worker']['directory'])
+        ref = json.loads((worker_dir / 'rex-terminal.json').read_text())
+        assert ref['session_id'] == json.loads((home / '.monty/rex-session.json').read_text())['session_id']
+        assert c.req('tasks/' + key)['status'] == 'open', 'a Rex launch receipt never completes the task'
+        cli(service, 'settings', 'set', 'terminal', 'ghostty')
+        print('task API: create, preflight, duplicate/stale protection, launch, resume, dirty completion, archive/reopen, recovery and Rex selection passed')
     finally:
         service.close()
 

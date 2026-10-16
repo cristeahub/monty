@@ -1,7 +1,7 @@
 # Server-owned agents (implementation in progress)
 
 The authority is `clients → Monty server → native runtimes`. This includes web/API,
-CLI/head-butler conversations, Ghostty terminals, headless supervisors and the
+CLI/head-butler conversations, Ghostty and Rex terminals, headless supervisors and the
 optional tools-disabled context classifier. An unavailable server is an error;
 there is no independent vendor launch fallback.
 
@@ -56,6 +56,13 @@ and their socket connections are server children. Terminal clients forward bytes
 and size changes through authenticated Monty commands; EOF detaches the client.
 Retained output can be read with `/v1/terminals/<session>?offset=<byte-offset>`.
 Native exit status, initial geometry and Codex Vim initialization are preserved.
+A terminal client running inside Rex sends its `REX_*` placement as
+`terminal_environment` on `start` and `terminal_open`; the server accepts only the
+four Rex names with printable, prefix-checked values, applies them to the owned
+native process for that attachment (Codex additionally receives them in the
+thread's `shell_environment_policy.set` at start), and never writes them into the
+durable session context. Reviewer phases run headless without a terminal and
+therefore never receive Rex context.
 
 A terminal and a Pi/Claude RPC adapter cannot simultaneously write a native
 session. Opening its native terminal releases an idle RPC adapter. Structured

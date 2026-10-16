@@ -43,11 +43,6 @@ let harness_conv =
     ( Harness.of_string,
       fun ppf value -> Fmt.pf ppf "%s" (Harness.to_string value) )
 
-let backend_default getenv =
-  match Terminal.backend_of_string (env_default getenv "MONTY_TERMINAL" "ghostty") with
-  | Ok backend -> backend
-  | Error _ -> Terminal.Ghostty
-
 let target_default getenv =
   match Terminal.target_of_string (env_default getenv "MONTY_TARGET" "tab") with
   | Ok target -> target
@@ -90,8 +85,8 @@ let wt_command_arg =
   Cmdliner.Arg.(value & opt string (env_default getenv "MONTY_WT_COMMAND" "wt") & info [ "wt-command" ] ~docv:"COMMAND" ~doc)
  in
 let backend_arg =
-  let doc = "Terminal backend: ghostty or dry-run." in
-  Cmdliner.Arg.(value & opt backend_conv (backend_default getenv) & info [ "terminal" ] ~docv:"BACKEND" ~doc)
+  let doc = "Terminal backend: ghostty, rex, or dry-run. Overrides MONTY_TERMINAL and the persisted terminal setting." in
+  Cmdliner.Arg.(value & opt (some backend_conv) None & info [ "terminal" ] ~docv:"BACKEND" ~doc)
  in
 let target_arg =
   let doc = "Where to launch the worker: tab, window, or split." in
@@ -125,8 +120,9 @@ let monty_command () =
     | None -> Shell.normalize (Shell.abs_path executable)
   else Shell.normalize (Shell.abs_path executable)
  in
-let options backend target harness_override codex_yolo_override pi_command codex_command claude_command wt_command worktree_mode branch_prefix_override agent_profile_override fork home script_dir =
+let options backend_override target harness_override codex_yolo_override pi_command codex_command claude_command wt_command worktree_mode branch_prefix_override agent_profile_override fork home script_dir =
   let ( let* ) = Result.bind in
+  let* backend = Settings.effective_terminal ~getenv ~home backend_override in
   let* harness =
     Settings.effective_harness ~getenv ~home harness_override
   in
@@ -176,7 +172,7 @@ let headless_options harness_override codex_yolo_override pi_command codex_comma
   if Option.is_some fork then
     Error "headless profiles use fresh phases; --fork is supported only for interactive Pi workers"
   else
-    options Terminal.Dry_run Terminal.Tab harness_override codex_yolo_override
+    options (Some Terminal.Dry_run) Terminal.Tab harness_override codex_yolo_override
       pi_command codex_command claude_command wt_command Launcher.Always branch_prefix_override
       agent_profile_override fork home script_dir
  in
@@ -686,7 +682,7 @@ let resume archived fresh worker options =
         if archived then
           match options.backend with
           | Terminal.Dry_run -> Resume.plan_reactivate ~home:options.home record
-          | Terminal.Ghostty -> Resume.reactivate ~home:options.home record
+          | Terminal.Ghostty | Terminal.Rex -> Resume.reactivate ~home:options.home record
         else Ok record.job
       in
       let validate_open_task =
@@ -697,7 +693,7 @@ let resume archived fresh worker options =
     in
     match options.Launcher.backend with
     | Terminal.Dry_run -> execute ()
-    | Terminal.Ghostty ->
+    | Terminal.Ghostty | Terminal.Rex ->
         let* record = find_record () in
         Worker_lock.with_lock ~home:options.home ~record execute
   in
@@ -1116,13 +1112,14 @@ let task_merge_term =
   in
   Cmdliner.Term.(const task_merge $ source $ target $ home_arg)
  in
-let doctor home harness_override pi_command codex_command claude_command wt_command backend worktree_mode =
+let doctor home harness_override pi_command codex_command claude_command wt_command backend_override worktree_mode =
   match
     ( Settings.effective_harness ~getenv ~home harness_override,
-      Settings.load ~home )
+      Settings.load ~home,
+      Settings.effective_terminal ~getenv ~home backend_override )
   with
-  | Error message, _ | _, Error message -> exit_code (Error message)
-  | Ok harness, Ok settings ->
+  | Error message, _, _ | _, Error message, _ | _, _, Error message -> exit_code (Error message)
+  | Ok harness, Ok settings, Ok backend ->
       let harness_command =
         match harness with Harness.Pi -> pi_command | Harness.Codex -> codex_command | Harness.Claude -> claude_command
       in
@@ -1172,6 +1169,11 @@ let settings_get key home =
             (settings.Settings.agent_profile
             |> Option.value ~default:Agent_profile.default_id);
           0
+      | "terminal" ->
+          Fmt.pr "%s\n"
+            (settings.Settings.terminal
+            |> Option.value ~default:Terminal.Rex |> Terminal.backend_to_string);
+          0
       | _ -> exit_code (Error (Printf.sprintf "unknown setting %S" key)))
  in
 let settings_get_term =
@@ -1218,6 +1220,14 @@ let settings_set key value home =
       | Ok profile ->
           Settings.set_agent_profile ~home profile.id
           |> Result.map (fun () -> Fmt.pr "agent-profile = %s\n" profile.id)
+          |> exit_code)
+  | "terminal" -> (
+      match Terminal.backend_of_string value with
+      | Error _ | Ok Terminal.Dry_run ->
+          exit_code (Error "terminal setting must be ghostty or rex")
+      | Ok ((Terminal.Ghostty | Terminal.Rex) as terminal) ->
+          Settings.set_terminal ~home terminal
+          |> Result.map (fun () -> Fmt.pr "terminal = %s\n" (Terminal.backend_to_string terminal))
           |> exit_code)
   | _ -> exit_code (Error (Printf.sprintf "unknown setting %S" key))
  in
@@ -1516,6 +1526,57 @@ let doctor_cmd =
   let doc = "Check Monty launch dependencies." in
   Cmdliner.Cmd.v (Cmdliner.Cmd.info "doctor" ~doc) doctor_term
  in
+let rex_status worker home =
+  let ( let* ) = Result.bind in
+  let result =
+    let* record = Job_store.find ~home ~scope:Job_store.All worker in
+    let* reference = Rex.read_reference record.Job_store.worker_dir in
+    match reference with
+    | None ->
+        Error (Printf.sprintf "worker %s has no recorded Rex terminal" record.Job_store.id)
+    | Some reference ->
+        Fmt.pr "worker: %s\n%s\n" record.Job_store.id (Rex.describe reference);
+        let* liveness = Rex.liveness reference in
+        Fmt.pr "terminal: %s\n"
+          (match liveness with
+          | Rex.Live process -> "live (" ^ process ^ " running)"
+          | Rex.Exited (Some code) -> Printf.sprintf "exited (%d); output retained in Rex" code
+          | Rex.Exited None -> "exited; output retained in Rex"
+          | Rex.Gone -> "gone (block no longer exists)");
+        (match liveness with
+        | Rex.Gone -> Ok ()
+        | _ ->
+            let* status = Rex.program_status reference in
+            let records =
+              match Yojson.Safe.Util.member "records" status with `List records -> records | _ -> []
+            in
+            List.iter
+              (fun record ->
+                let field name =
+                  match Yojson.Safe.Util.member name record with `String v -> v | _ -> ""
+                in
+                Fmt.pr "status: %s%s%s%s\n" (field "state")
+                  (if field "kind" = "" then "" else " kind=" ^ field "kind")
+                  (if field "app" = "" then "" else " app=" ^ field "app")
+                  (if field "msg" = "" then "" else " msg=" ^ field "msg"))
+              records;
+            Ok ())
+  in
+  exit_code result
+ in
+let rex_cmd =
+  let worker =
+    let doc = "Worker id, branch leaf, branch, or title slug." in
+    Cmdliner.Arg.(required & pos 0 (some string) None & info [] ~docv:"WORKER" ~doc)
+  in
+  let status =
+    Cmdliner.Cmd.v
+      (Cmdliner.Cmd.info "status"
+         ~doc:"Show a worker's recorded Rex terminal, whether it is still live, and its program status records. Read-only.")
+      Cmdliner.Term.(const rex_status $ worker $ home_arg)
+  in
+  Cmdliner.Cmd.group (Cmdliner.Cmd.info "rex" ~doc:"Inspect native Rex terminals recorded for workers.") [ status ]
+ in
 let main_cmd =
   let doc = "Monty, the head butler for Pi and Codex worker sessions." in
   let man =
@@ -1553,6 +1614,7 @@ let main_cmd =
       handoff_cmd;
       ensure_worktree_cmd;
       doctor_cmd;
+      rex_cmd;
       Guide.command;
       Cmdliner.Cmd.group (Cmdliner.Cmd.info "mcp" ~doc:"Legacy CLI guide alias; the MCP server has been removed.") [Guide.command];
       Skill.command ~home_arg ~harness_arg ~getenv ~monty_command:(monty_command ());

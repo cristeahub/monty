@@ -309,9 +309,18 @@ let setup_environment ?(agent_profile = Some "reviewed") root =
              "" ]);
       Shell.chmod_executable path)
     [ "wt"; "gh"; "pi"; "codex"; "osascript"; "sdef"; "ghostty" ];
+  (* The default terminal is Rex; these scenarios pin Ghostty through the
+     environment and keep a fake rex whose server check passes for fallbacks. *)
+  let rex = Filename.concat fake_bin "rex" in
+  Shell.write_file rex
+    (String.concat "\n"
+       [ "#!/bin/sh"; "printf '%s\\n' \"$0 $*\" >> " ^ Shell.quote log;
+         "printf '%s\\n' '{\"endpoint\":\"unix:///fake/rex.sock\"}'"; "" ]);
+  Shell.chmod_executable rex;
   let env =
     env_with
       [ ("MONTY_HOME", home);
+        ("MONTY_TERMINAL", "ghostty");
         ("PI_CODING_AGENT_DIR", Filename.concat root "pi-agent");
         ("MANTLE_CONTEXT", "");
         ("CODEX_HOME", Filename.concat root "codex-home");

@@ -610,6 +610,16 @@ def fake_suite(home):
             args=json.loads((home/'terminal.json').read_text())
             assert args[:2]==['resume','--remote'] and args[2].startswith('unix://') and args[2]!='unix://'+str(home/'codex.sock'),args
             assert '--dangerously-bypass-approvals-and-sandbox' not in args,args
+        # Codex runs tools in the app-server: a terminal start passes the launching
+        # pane's Rex context to that thread only, never into the session context.
+        rex_run=subprocess.run([BIN,'terminal','--codex-command',str(codex),'--home',str(home)],cwd=repo,
+                               env={**launch_env,'REX_SESSION':'session:01a1-caller','REX_BLOCK':'block:01a1-caller'},capture_output=True,text=True)
+        assert rex_run.returncode==0,rex_run.stderr
+        params=next(p for method,p in reversed(server.calls) if method=='thread/start')
+        assert params['config']['shell_environment_policy.set']['REX_BLOCK']=='block:01a1-caller',params
+        rex_thread=json.loads((home/'terminal.json').read_text())[-1]
+        rex_chat=next(x for x in c.req('conversations') if x['sessions'][0]['native_id']==rex_thread)
+        assert 'REX_BLOCK' not in rex_chat['sessions'][0]['context'].get('environment',{}),rex_chat
         resumed=args[-1];count=len(server.threads)
         (native_home/'skills/monty/SKILL.md').unlink()
         run=subprocess.run([BIN,'continue',resumed,'--home',str(home)],env=launch_env,capture_output=True,text=True)
@@ -623,7 +633,8 @@ def fake_suite(home):
         # Structured worker chats hold the same fence as headless/TTY execution.
         worker_bin=home/'worker-bin';worker_bin.mkdir()
         shutil.copytree(Path(__file__).resolve().parent.parent/'agent-profiles',home/'agent-profiles')
-        osascript=worker_bin/'osascript';osascript.write_text('#!/bin/sh\nexit 0\n');osascript.chmod(0o700)
+        for name in ('ghostty','osascript'):
+            tool=worker_bin/name;tool.write_text('#!/bin/sh\nexit 0\n');tool.chmod(0o700)
         worker_env={**launch_env,'PATH':str(worker_bin)+os.pathsep+launch_env['PATH']}
         task_context=home/'context.md';task_context.write_text('Isolated structured worker.\n')
         for args in (['projects','add','--repo',str(repo)],

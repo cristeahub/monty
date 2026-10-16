@@ -1,13 +1,14 @@
-type backend = Ghostty | Dry_run
+type backend = Ghostty | Rex | Dry_run
 
 type target = Tab | Window | Split
 
 let backend_of_string = function
   | "ghostty" -> Ok Ghostty
+  | "rex" -> Ok Rex
   | "dry-run" | "dry_run" | "dryrun" -> Ok Dry_run
   | value -> Error (`Msg (Printf.sprintf "unknown terminal backend %S" value))
 
-let backend_to_string = function Ghostty -> "ghostty" | Dry_run -> "dry-run"
+let backend_to_string = function Ghostty -> "ghostty" | Rex -> "rex" | Dry_run -> "dry-run"
 
 let target_of_string = function
   | "tab" -> Ok Tab

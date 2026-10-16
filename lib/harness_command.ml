@@ -239,7 +239,7 @@ let launch_script_contents ?(pin_policy = true) ?(managed = true) ?(legacy_mcp =
                 ~default:(Option.value
                   ~default:"/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
                   (Sys.getenv_opt "PATH")) environment_path) ]
-      (* Ghostty's login shell may carry a different (or stale) Mantle profile. *)
+      (* The terminal's login shell may carry a different (or stale) Mantle profile. *)
       @ List.map
           (fun (name, value) ->
             match value with

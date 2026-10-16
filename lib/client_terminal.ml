@@ -101,9 +101,22 @@ let headless_async ~wait ~resume (options:Launcher.options) worker =
       | _ -> fail 409 (Yojson.Safe.to_string receipt) in poll () >|= fun result->Ok result)
     (function Failure(_,message)->Lwt.return(Error message)|_->Lwt.return(Error "Monty server unavailable; inspect receipts before retrying; no independent headless fallback"))
 let headless ~wait ~resume options worker = Lwt_main.run(headless_async ~wait ~resume options worker)
+(* The newest run handoff this worker published, for native status only. *)
+let handoff_outcome ~home =
+  match Sys.getenv_opt "MONTY_RUN_DIR",Sys.getenv_opt "MONTY_JOB_ID" with
+  | Some run_dir,Some id when id<>"" ->
+      let dir=Filename.concat (Filename.concat (Run_handoff.handoff_root home) (Filename.basename run_dir)) id in
+      let outcomes=try Sys.readdir dir |> Array.to_list |> List.filter (String.ends_with ~suffix:".json") |> List.filter_map (fun name ->
+          try let json=Yojson.Safe.from_file (Filename.concat dir name) in Some (s "finished_at" json,s "outcome" json) with _->None)
+        with Sys_error _ -> [] in
+      (match List.sort compare outcomes |> List.rev with (_,outcome)::_ -> Some outcome | [] -> None)
+  | _ -> None
 let launch ~home ~profile ~harness ~command_override ~fork ~mode ~session_id ~prompt ~instructions ~context ~request_id ~worker ~title ~codex_yolo =
   if not(List.mem mode ["fresh";"picker";"last";"exact"]) || (mode="exact" && session_id=None) then fail 400 "choose fresh, picker, last, or exact with --session";
   let home=Unix.realpath home in
+  (* The caller's own Rex placement travels with each attachment, never with the durable session. *)
+  let rex=Rex.context_of_env () in
+  let terminal_environment=`Assoc (List.map (fun (key,value)->key,string value) (Rex.bindings_of_context rex)) in
   let workspaces=if worker then (
     let id=match Sys.getenv_opt "MONTY_JOB_ID" with Some id when id<>""->id|_->fail 400 "worker terminal requires its durable worker identity" in
     let record=get(Job_store.find ~home ~scope:Job_store.Active id) in
@@ -127,7 +140,7 @@ let launch ~home ~profile ~harness ~command_override ~fork ~mode ~session_id ~pr
       | None -> (match List.filter matches profiles with [p]->p|[]->fail 409 "no service profile matches the selected native account directory; configure its account and roots before launching"|_->fail 409 "multiple service profiles match; select --profile") in
     let pid=s "id" p in
     (if mode="fresh" then command ~home (Option.value ~default:(random_id()) request_id)
-       (obj ["op",string "start";"profile",string pid;"command",Option.fold ~none:`Null ~some:string command_override;"context",context;"terminal",`Bool true;"fork",Option.fold ~none:`Null ~some:string fork;"codex_yolo",`Bool codex_yolo;
+       (obj ["op",string "start";"profile",string pid;"command",Option.fold ~none:`Null ~some:string command_override;"context",context;"terminal",`Bool true;"fork",Option.fold ~none:`Null ~some:string fork;"codex_yolo",`Bool codex_yolo;"terminal_environment",terminal_environment;
          "title",string title;"task_keys",`List(match if worker then Sys.getenv_opt "MONTY_TASK_KEY" else None with Some key when key<>""->[string key]|_->[])])
      else request ~home `GET "/v1/conversations" `Null >|= fun catalog ->
        let candidates=Context_store.list catalog |> List.filter(fun c -> field "purged" c<>`Bool true &&
@@ -150,7 +163,7 @@ let launch ~home ~profile ~harness ~command_override ~fork ~mode ~session_id ~pr
     let rows,cols=Terminal_size.get Unix.stdin in
     command ~home (random_id()) (obj ["op",string "terminal_open";"rows",`Int rows;"cols",`Int cols;"command",Option.fold ~none:`Null ~some:string command_override;"conversation",field "id" c;"selected_session",field "id" sess;
       "revision",field "revision" c;"fresh",`Bool(mode="fresh");"fork",Option.fold ~none:`Null ~some:string fork;"prompt",Option.fold ~none:`Null ~some:string prompt;
-      "term",string(Option.value ~default:"xterm-256color" (Sys.getenv_opt "TERM"))]) >|= fun sess ->
+      "term",string(Option.value ~default:"xterm-256color" (Sys.getenv_opt "TERM"));"terminal_environment",terminal_environment]) >|= fun sess ->
     s "id" c,s "id" sess in
   let cid,sid=try Lwt_main.run(flow()) with Failure _ as e->raise e|_->fail 503 "Monty service unavailable; inspect receipts before retrying; no independent harness fallback" in
   let original=if Unix.isatty Unix.stdin then Some(Unix.tcgetattr Unix.stdin) else None in
@@ -161,13 +174,36 @@ let launch ~home ~profile ~harness ~command_override ~fork ~mode ~session_id ~pr
     let prior=Sys.signal (Terminal_size.winch ()) (Sys.Signal_handle(fun _->resized:=true)) in
     Fun.protect ~finally:(fun () -> ignore(Sys.signal (Terminal_size.winch ()) prior)) (fun () ->
       let route op extra=command ~home (random_id()) (obj(["op",string op;"conversation",string cid;"selected_session",string sid] @ extra)) >|= ignore in
+      (* OSC 7501 lifecycle records under id=monty, only inside Rex; the harness keeps
+         the root record. A done record or zero exit never completes the Monty task. *)
+      let inside_rex=Rex.inside_rex rex in
+      let emit text=if inside_rex then Lwt_io.write Lwt_io.stdout text >>= fun () -> Lwt_io.flush Lwt_io.stdout else Lwt.return_unit in
+      let handoff=ref None and polls=ref 0 in
+      let report ?exit () =
+        let state,kind,msg=match !handoff,exit with
+          | Some "ready-for-review",_ -> "done",None,"handoff: ready for review"
+          | Some "needs-attention",_ -> "blocked",Some "question","handoff: needs attention"
+          | Some "failed",_ -> "error",None,"handoff: failed"
+          | _,Some 0 -> "done",None,"worker"
+          | _,Some _ -> "error",None,"worker"
+          | _,None -> "working",None,"worker terminal attached" in
+        let msg=match exit with Some code -> Printf.sprintf "%s · terminal exited (%d)" msg code | None -> msg in
+        emit (Rex.status_report ~title ?kind ~msg state) in
+      let poll_handoff () =
+        incr polls;
+        if not (worker && inside_rex) || !polls mod 50<>1 then Lwt.return_unit else
+        let current=handoff_outcome ~home in
+        if current = !handoff then Lwt.return_unit else (handoff:=current;report ()) in
       let rec output () = request ~home `GET ("/v1/terminals/" ^ sid ^ "?offset=" ^ string_of_int !offset) `Null >>= fun value ->
         let bytes=Base64.decode_exn(s "data" value) in
         Lwt_io.write Lwt_io.stdout bytes >>= fun () -> Lwt_io.flush Lwt_io.stdout >>= fun () ->
         offset:=i "offset" value;
         (if !resized && field "running" value=`Bool true then (resized:=false;let rows,cols=Terminal_size.get Unix.stdin in
           route "terminal_resize" ["rows",`Int rows;"cols",`Int cols]) else Lwt.return_unit) >>= fun () ->
-        if field "running" value=`Bool false && bytes="" then (match field "code" value with `Int code->Lwt.return code|_->fail 503 "native terminal outcome is unknown; inspect retained output") else Lwt_unix.sleep 0.04 >>= output in
+        poll_handoff () >>= fun () ->
+        if field "running" value=`Bool false && bytes="" then (match field "code" value with `Int code->Lwt.return (`Exited code)|_->fail 503 "native terminal outcome is unknown; inspect retained output") else Lwt_unix.sleep 0.04 >>= output in
       let rec input () = Lwt_io.read ~count:4096 Lwt_io.stdin >>= fun bytes ->
-        if bytes="" then Lwt.return 0 else route "terminal_input" ["data",string(Base64.encode_exn bytes)] >>= input in
-      Lwt_main.run(Lwt.pick [input();output()])))
+        if bytes="" then Lwt.return `Detached else route "terminal_input" ["data",string(Base64.encode_exn bytes)] >>= input in
+      Lwt_main.run(report () >>= fun () -> Lwt.pick [input();output()] >>= function
+        | `Detached -> emit (Rex.status_report "clear") >|= fun () -> 0
+        | `Exited code -> report ~exit:code () >|= fun () -> code)))

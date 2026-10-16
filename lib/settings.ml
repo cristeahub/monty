@@ -5,11 +5,12 @@ type t = {
   container_workers : bool;
   branch_prefix : string option;
   agent_profile : string option;
+  terminal : Terminal.backend option;
 }
 
 let empty =
   { harness = None; context_enabled = false; codex_yolo = false; container_workers = false;
-    branch_prefix = None; agent_profile = None }
+    branch_prefix = None; agent_profile = None; terminal = None }
 let path ~home = Filename.concat (Filename.concat home ".monty") "settings.json"
 
 let parse json =
@@ -57,7 +58,16 @@ let parse json =
           |> Result.map Option.some
       | _ -> Error "settings field \"agent_profile\" must be a string"
     in
-    Ok { harness; context_enabled; codex_yolo; container_workers; branch_prefix; agent_profile })
+    let* terminal =
+      match member "terminal" json with
+      | `Null -> Ok None
+      | `String value ->
+          Terminal.backend_of_string value
+          |> Result.map_error (fun (`Msg message) -> message)
+          |> Result.map Option.some
+      | _ -> Error "settings field \"terminal\" must be a string"
+    in
+    Ok { harness; context_enabled; codex_yolo; container_workers; branch_prefix; agent_profile; terminal })
 
 let load ~home =
   let settings_path = path ~home in
@@ -100,7 +110,11 @@ let to_json settings =
       ( "agent_profile",
         match settings.agent_profile with
         | None -> `Null
-        | Some agent_profile -> `String agent_profile ) ]
+        | Some agent_profile -> `String agent_profile );
+      ( "terminal",
+        match settings.terminal with
+        | None -> `Null
+        | Some terminal -> `String (Terminal.backend_to_string terminal) ) ]
 
 let set_harness ~home harness =
   State_store.with_lock ~home (fun () ->
@@ -176,6 +190,26 @@ let effective_branch_prefix ~getenv ~home override =
                  | Some value when String.trim value <> "" -> value
                  | _ -> "monty"))
 
+let set_terminal ~home terminal =
+  State_store.with_lock ~home (fun () ->
+      let ( let* ) = Result.bind in
+      let* settings = load ~home in
+      State_store.write_json_atomic ~path:(path ~home)
+        (to_json { settings with terminal = Some terminal }))
+
+(* --terminal, then a valid MONTY_TERMINAL, then the persisted setting, then
+   Rex. An unrecognized environment value falls through, as it always has. *)
+let effective_terminal ~getenv ~home override =
+  match override with
+  | Some terminal -> Ok terminal
+  | None -> (
+      match Option.map Terminal.backend_of_string (getenv "MONTY_TERMINAL") with
+      | Some (Ok terminal) -> Ok terminal
+      | _ ->
+          load ~home
+          |> Result.map (fun settings ->
+                 Option.value ~default:Terminal.Rex settings.terminal))
+
 let effective_agent_profile ~home override =
   match override with
   | Some agent_profile -> Ok agent_profile
@@ -197,7 +231,10 @@ let render settings =
       "branch-prefix "
       ^ Option.value ~default:"monty" settings.branch_prefix;
       "agent-profile "
-      ^ Option.value ~default:Agent_profile.default_id settings.agent_profile ]
+      ^ Option.value ~default:Agent_profile.default_id settings.agent_profile;
+      "terminal      "
+      ^ Terminal.backend_to_string
+          (Option.value ~default:Terminal.Rex settings.terminal) ]
   ^ "\n"
 
 let set_context_enabled ~home context_enabled =

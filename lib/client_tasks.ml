@@ -63,7 +63,8 @@ let environment make_env home p = make_env ["MONTY_HOME=" ^ home;"MONTY_CODEX_YO
 let options home p = ["--home";home;"--harness";s "harness" p;
   ("--" ^ s "harness" p ^ "-command");Shell.quote(s "command" p);
   "--wt-command";wt_command ();"--worktree";"always"]
-let doctor ~env home p = run ~env ("doctor" :: options home p @ ["--terminal";"ghostty"])
+let terminal home = Terminal.backend_to_string (value (Settings.effective_terminal ~getenv:Sys.getenv_opt ~home None))
+let doctor ~env home p terminal = run ~env ("doctor" :: options home p @ ["--terminal";terminal])
 let ready result = field "exit_code" result=`Int 0
 let plan_dir home id = Filename.concat home (".monty/runs/web-" ^ component id)
 let check_roots p workspaces = List.iter (fun (w:Overview_types.task_workspace) ->
@@ -124,16 +125,17 @@ let prepare ~home ~profiles ~make_env ~id request =
     List.iter (fun (path,contents)->get(State_store.write_file_atomic ~path ~perm:0o600 contents)) files);
   let env=environment make_env home p in
   let role=role home key in
-  doctor ~env home p >>= fun health ->
+  let terminal=terminal home in
+  doctor ~env home p terminal >>= fun health ->
   (if ready health then run ~env (args @ options home p @ ["--terminal";"dry-run"])
    else Lwt.return (obj ["exit_code",`Int 1;"stdout",string "";"stderr",string "Resolve doctor failures before preflight."])) >|= fun preview ->
   let plan=obj ["task",string key;"revision",field "revision" before;"action",string action;
     "profile",string(s "id" p);"profile_hash",string(sha(Yojson.Safe.to_string p));
-    "settings",Settings.to_json settings;"role",role;"wt_command",string(wt_command ());
+    "settings",Settings.to_json settings;"role",role;"wt_command",string(wt_command ());"terminal",string terminal;
     "args",`List(List.map string args);"files",`List(List.map (fun (path,contents)->obj["path",string path;"sha256",string(sha contents)]) files)] in
   locked home (fun () -> get(State_store.write_json_atomic ~path:(Filename.concat dir "plan.json") plan));
   obj ["task",string key;"preflight",string id;"action",string action;"ready",`Bool(ready health && ready preview);
-    "context",string context;"doctor",health;"preview",preview;"profile",string(s "id" p);"agent_profile",field "id" role;
+    "context",string context;"doctor",health;"preview",preview;"profile",string(s "id" p);"agent_profile",field "id" role;"terminal",string terminal;
     "workspaces",`List(List.map Task_storage.json_of_task_workspace workspaces)]
 let apply ~home ~profiles ~make_env ~id request =
   if field "confirm" request<>`Bool true then fail 400 "review the preflight and confirm this task action";
@@ -146,7 +148,7 @@ let apply ~home ~profiles ~make_env ~id request =
   let validate () =
     ignore(current home plan);
     (match worker home (s "task" plan) (task home (s "task" plan)) with Some r->check_account p r|None->());
-    if field "settings" plan<>Settings.to_json(settings home) || s "wt_command" plan<>wt_command () ||
+    if field "settings" plan<>Settings.to_json(settings home) || s "wt_command" plan<>wt_command () || s "terminal" plan<>terminal home ||
        field "role" plan<>role home (s "task" plan) ||
        s "profile_hash" plan<>sha(Yojson.Safe.to_string p) then fail 409 "launch configuration changed; run preflight again";
     List.iter (fun file ->
@@ -154,15 +156,16 @@ let apply ~home ~profiles ~make_env ~id request =
     if Sys.file_exists (Filename.concat dir "requested.json") then fail 409 "this preflight was already submitted; inspect its receipt and worker before requesting a resume" in
   locked home validate;
   let env=environment make_env home p in
-  doctor ~env home p >>= fun health ->
+  let terminal=s "terminal" plan in
+  doctor ~env home p terminal >>= fun health ->
   if not(ready health) then Lwt.return(obj["task",field "task" plan;"requested",`Bool false;"doctor",health]) else
   let args=List.map str (xs "args" plan) @ options home p in
   run ~env (args @ ["--terminal";"dry-run"]) >>= fun preview ->
   if not(ready preview) then Lwt.return(obj["task",field "task" plan;"requested",`Bool false;"preview",preview]) else (
     locked home (fun () -> validate ();
       get(State_store.write_json_atomic ~path:(Filename.concat dir "requested.json") (obj["command",string id])));
-    run ~env (args @ ["--terminal";"ghostty"]) >|= fun result ->
-    obj ["task",field "task" plan;"requested",`Bool true;"action",field "action" plan;"process",result])
+    run ~env (args @ ["--terminal";terminal]) >|= fun result ->
+    obj ["task",field "task" plan;"requested",`Bool true;"action",field "action" plan;"terminal",string terminal;"process",result])
 let execute ~home ~profiles ~make_env ~id request = match required "op" request with
   | "task_create" ->
       let title=String.trim(bounded 500 (field "title" request)) in
@@ -179,7 +182,7 @@ let execute ~home ~profiles ~make_env ~id request = match required "op" request 
       (match worker home key (task home key) with
       | None -> get(Task_storage.done_local_task ~home key);Lwt.return(obj["task",string key;"action",string "complete"])
       | Some _ ->
-          let failures=Doctor.state_checks ~home ~wt_command:(wt_command ()) |> List.filter (fun c->c.Doctor.level=Doctor.Fail) in
+          let failures=Doctor.state_checks ~home ~wt_command:(wt_command ()) () |> List.filter (fun c->c.Doctor.level=Doctor.Fail) in
           if failures<>[] then fail 409 (String.concat "\n" (List.map (fun c->c.Doctor.message) failures));
           ignore(current home request);
           run ~env:(make_env ["MONTY_HOME=" ^ home]) ["done";key;"--home";home;"--wt-command";wt_command ()] >|= fun result ->

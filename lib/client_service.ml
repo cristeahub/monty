@@ -354,11 +354,27 @@ let validate_context t pid request =
       ("MONTY_JOB_WORKTREE",string(List.hd workspaces))::List.mapi(fun i path->Printf.sprintf "MONTY_WORKSPACE_%d" (i+1),string path) workspaces in
   obj ["workspaces",`List (List.map string workspaces);"instructions",string instructions;
     "environment",`Assoc env;"objective",field "objective" context]
+(* Caller Rex placement for one attachment: validated here, applied to the owned
+   terminal process, and never written into the durable session context. *)
+let terminal_environment request =
+  match field "terminal_environment" request with
+  | `Null -> []
+  | `Assoc fields -> List.map (fun (key,value) ->
+      let value=match value with `String value->value|_->fail 400 "invalid terminal environment" in
+      (match Rex.validate_binding key value with Ok ()->()|Error message->fail 400 ("invalid terminal environment: " ^ message));
+      key,value) fields
+  | _ -> fail 400 "invalid terminal environment"
 let start_params context request =
   let codex_yolo=match field "codex_yolo" request with
     | `Null -> false | `Bool value -> value | _ -> fail 400 "codex_yolo must be a boolean" in
   let dirs=xs "workspaces" context in
-  let config = obj ["model_reasoning_effort",string "xhigh";"shell_environment_policy.set",field "environment" context;
+  (* Codex runs tools in the app-server, so a terminal start passes the launching
+     pane's Rex context to this thread only; the session context stays unchanged. *)
+  let tool_environment=match field "environment" context with
+    | `Assoc fields when field "terminal" request=`Bool true ->
+        `Assoc (fields @ List.map (fun (key,value) -> key,string value) (terminal_environment request))
+    | environment -> environment in
+  let config = obj ["model_reasoning_effort",string "xhigh";"shell_environment_policy.set",tool_environment;
     "sandbox_workspace_write.writable_roots",`List dirs] in
   obj (["cwd",List.hd dirs;"historyMode",string "legacy";"approvalPolicy",string (if codex_yolo then "never" else "on-request");
     "sandbox",string (if codex_yolo then "danger-full-access" else "workspace-write");
@@ -678,7 +694,8 @@ let terminal_start t cid sess request =
   let key=match harness with Harness.Pi->"PI_CODING_AGENT_DIR"|Codex->"CODEX_HOME"|Claude->"CLAUDE_CONFIG_DIR" in
   let env=native_environment (profile_auth p @ [key ^ "=" ^ directory;"MONTY_HOME=" ^ t.home;
     "MONTY_HARNESS=" ^ Harness.to_string harness;"MONTY_" ^ String.uppercase_ascii(Harness.to_string harness) ^ "_COMMAND=" ^ Native_command.shell(s "command" p);"MONTY_CODEX_YOLO=false";
-    "TERM=" ^ (match field "term" request with `String value when String.length value<=128->value|_->"xterm-256color")] @ bindings) in
+    "TERM=" ^ (match field "term" request with `String value when String.length value<=128->value|_->"xterm-256color")] @ bindings
+    @ List.map (fun (key,value) -> key ^ "=" ^ value) (terminal_environment request)) in
   let path=file t.home ["conversations";cid;"terminal-" ^ component sid ^ ".output"] in
   let notify json =
     if s "type" json="terminal_closed" then locked t.home (fun () ->
@@ -706,6 +723,7 @@ let terminal_command t op request =
   if field "selected_session" request<>field "id" sess then fail 409 "selected terminal session changed";
   if op="terminal_open" then (
     ensure_revision c request;
+    ignore (terminal_environment request);
     (match field "command" request with `Null->()|`String command->
       let p=session_profile t sess in
       if get(Process.absolute_command command)<>get(Process.absolute_command(Native_command.shell(s "command" p))) then fail 409 "native command override does not match the trusted server profile"|_->fail 400 "invalid native command");
