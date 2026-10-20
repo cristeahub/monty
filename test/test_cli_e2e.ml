@@ -170,7 +170,9 @@ let replace_env base overrides =
   (base @ List.map (fun (name, value) -> name ^ "=" ^ value) overrides)
   |> Array.of_list
 
-let env_with overrides = replace_env (Unix.environment () |> Array.to_list |> List.filter(fun value->not(String.starts_with ~prefix:"MONTY_" value)) |> Array.of_list) overrides
+(* NO_COLOR keeps cmdliner diagnostics plain whatever TERM the test runner inherited,
+   so assertions can match their text. *)
+let env_with overrides = replace_env (Unix.environment () |> Array.to_list |> List.filter(fun value->not(String.starts_with ~prefix:"MONTY_" value)) |> Array.of_list) (("NO_COLOR", "1") :: overrides)
 
 type child = {
   pid : int;

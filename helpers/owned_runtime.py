@@ -24,6 +24,9 @@ def main():
     mode = dimensions[0]
     rows, cols = map(int, dimensions[1:3]) if len(dimensions) > 1 else (24, 80)
     vim = len(dimensions) > 3 and dimensions[3] == 'vim'
+    # True when the display this terminal is shown on supports the Program Status
+    # Protocol (OSC 7501); the owned terminal then answers support probes itself.
+    status_display = bool(options.get('program_status'))
     vim_initialized = False
     footer = b''
     os.umask(0o077)
@@ -108,6 +111,50 @@ def main():
             selector.modify(child_in, selectors.EVENT_READ | selectors.EVENT_WRITE, 'child')
         elif not selector.get_map().get(child_in):
             selector.register(child_in, selectors.EVENT_WRITE, 'input')
+    def emit_output(data):
+        print(json.dumps({'type': 'output', 'data': base64.b64encode(data).decode()}), flush=True)
+
+    # Program Status Protocol support probe. A program sends it once at startup and
+    # treats the protocol as unsupported when the reply is late, so when the display is
+    # known to support the protocol the owned terminal answers at once, the way a
+    # multiplexer would, and keeps the probe away from the display. Status reports
+    # themselves pass through untouched.
+    PROBE = b'\x1b]7501;?'
+    PROBE_ENDS = (b'\x07', b'\x1b\\')
+    PROBE_REPLY = b'\x1b]7501;?:states=idle,working,done,blocked,error:kinds=permission,question,auth\x1b\\'
+    held = b''
+
+    def answer_probes(data):
+        """Strip complete probes from data and answer each; hold back a trailing partial probe."""
+        nonlocal held
+        data = held + data
+        held = b''
+        out = bytearray()
+        while True:
+            start = data.find(PROBE)
+            if start < 0:
+                break
+            rest = data[start + len(PROBE):]
+            end = next((end for end in PROBE_ENDS if rest.startswith(end)), None)
+            if end is None:
+                if len(rest) < 2:
+                    out += data[:start]
+                    held = data[start:]
+                    return bytes(out)
+                out += data[:start + len(PROBE)]
+                data = rest
+                continue
+            enqueue(PROBE_REPLY)
+            out += data[:start]
+            data = rest[len(end):]
+        for length in range(len(PROBE) - 1, 0, -1):
+            if data.endswith(PROBE[:length]):
+                held = data[-length:]
+                data = data[:-length]
+                break
+        out += data
+        return bytes(out)
+
     buffer = b''
     code = None
     owner_deadline = None
@@ -129,7 +176,12 @@ def main():
             if owner_deadline is not None and time.monotonic() >= owner_deadline:
                 stop()
                 break
-            for key, events in selector.select(0.1):
+            ready = selector.select(0.1)
+            # A lone trailing ESC is held only until the next read; nothing more follows a stalled program.
+            if not ready and held == b'\x1b':
+                emit_output(held)
+                held = b''
+            for key, events in ready:
                 if events & selectors.EVENT_WRITE:
                     try:
                         del queued[:os.write(child_in, queued)]
@@ -171,7 +223,10 @@ def main():
                                 vim_initialized = True
                                 if match[1] == b'Insert':
                                     enqueue(b'\x1b')
-                        print(json.dumps({'type': 'output', 'data': base64.b64encode(data).decode()}), flush=True)
+                        if status_display:
+                            data = answer_probes(data)
+                        if data:
+                            emit_output(data)
                     else:
                         sys.stdout.buffer.write(data)
                         sys.stdout.buffer.flush()
@@ -195,6 +250,8 @@ def main():
                         else:
                             raise ValueError('invalid terminal control')
     finally:
+        if held:
+            emit_output(held)
         stop()
         deadline = time.monotonic() + 3
         while code is None and time.monotonic() < deadline:

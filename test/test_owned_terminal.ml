@@ -12,7 +12,7 @@ let with_directory run =
     Unix.rmdir directory;Lwt.return_unit)
 
 let with_terminal directory notify args run =
-  Owned_terminal.start ~rows:24 ~cols:80 ~vim:false ~env:(Unix.environment ())
+  Owned_terminal.start ~rows:24 ~cols:80 ~vim:false ~program_status:false ~env:(Unix.environment ())
     ~cwd:directory ~lock:(Filename.concat directory "runtime.lock") ~locks:[]
     ~path:(Filename.concat directory "terminal.log") ~notify args >>= fun terminal ->
   Lwt.finalize (fun () -> run terminal)

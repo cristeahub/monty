@@ -111,6 +111,21 @@ let handoff_outcome ~home =
         with Sys_error _ -> [] in
       (match List.sort compare outcomes |> List.rev with (_,outcome)::_ -> Some outcome | [] -> None)
   | _ -> None
+(* Monty's own program status record (OSC 7501, id=monty) carries only worker lifecycle
+   facts: the run handoff outcome and how the native process ended. Whether the program is
+   working, idle or blocked right now is the harness's own root record, which Rex reads from
+   the proxied terminal bytes untouched, so merely attaching a terminal reports nothing;
+   a working claim here would outlive the harness going idle. *)
+let lifecycle_status ~title ~handoff ~exit =
+  let exited=Option.map (Printf.sprintf "terminal exited (%d)") exit in
+  let record ?kind state msg=Some (Rex.status_report ~title ?kind ~msg:(String.concat " · " (msg @ Option.to_list exited)) state) in
+  match handoff,exit with
+  | Some "ready-for-review",_ -> record "done" ["handoff: ready for review"]
+  | Some "needs-attention",_ -> record ~kind:"question" "blocked" ["handoff: needs attention"]
+  | Some "failed",_ -> record "error" ["handoff: failed"]
+  | _,Some 0 -> record "done" []
+  | _,Some _ -> record "error" []
+  | _,None -> None
 let launch ~home ~profile ~harness ~command_override ~fork ~mode ~session_id ~prompt ~instructions ~context ~request_id ~worker ~title ~codex_yolo =
   if not(List.mem mode ["fresh";"picker";"last";"exact"]) || (mode="exact" && session_id=None) then fail 400 "choose fresh, picker, last, or exact with --session";
   let home=Unix.realpath home in
@@ -187,24 +202,14 @@ let launch ~home ~profile ~harness ~command_override ~fork ~mode ~session_id ~pr
     let prior=Sys.signal (Terminal_size.winch ()) (Sys.Signal_handle(fun _->resized:=true)) in
     Fun.protect ~finally:(fun () -> ignore(Sys.signal (Terminal_size.winch ()) prior)) (fun () ->
       let route op extra=command ~home (random_id()) (obj(["op",string op;"conversation",string cid;"selected_session",string sid] @ extra)) >|= ignore in
-      (* OSC 7501 lifecycle records under id=monty, only inside Rex; the harness keeps
-         the root record. A done record or zero exit never completes the Monty task. *)
-      let inside_rex=Rex.inside_rex rex in
-      let emit text=if inside_rex then Lwt_io.write Lwt_io.stdout text >>= fun () -> Lwt_io.flush Lwt_io.stdout else Lwt.return_unit in
+      (* Lifecycle records go out only for workers inside Rex; see lifecycle_status. *)
+      let reporting=worker && Rex.inside_rex rex in
+      let emit text=if reporting then Lwt_io.write Lwt_io.stdout text >>= fun () -> Lwt_io.flush Lwt_io.stdout else Lwt.return_unit in
       let handoff=ref None and polls=ref 0 in
-      let report ?exit () =
-        let state,kind,msg=match !handoff,exit with
-          | Some "ready-for-review",_ -> "done",None,"handoff: ready for review"
-          | Some "needs-attention",_ -> "blocked",Some "question","handoff: needs attention"
-          | Some "failed",_ -> "error",None,"handoff: failed"
-          | _,Some 0 -> "done",None,"worker"
-          | _,Some _ -> "error",None,"worker"
-          | _,None -> "working",None,"worker terminal attached" in
-        let msg=match exit with Some code -> Printf.sprintf "%s · terminal exited (%d)" msg code | None -> msg in
-        emit (Rex.status_report ~title ?kind ~msg state) in
+      let report ?exit () = match lifecycle_status ~title ~handoff:!handoff ~exit with Some text -> emit text | None -> Lwt.return_unit in
       let poll_handoff () =
         incr polls;
-        if not (worker && inside_rex) || !polls mod 50<>1 then Lwt.return_unit else
+        if not reporting || !polls mod 50<>1 then Lwt.return_unit else
         let current=handoff_outcome ~home in
         if current = !handoff then Lwt.return_unit else (handoff:=current;report ()) in
       let rec output () = request ~home `GET ("/v1/terminals/" ^ sid ^ "?offset=" ^ string_of_int !offset) `Null >>= fun value ->
@@ -217,6 +222,6 @@ let launch ~home ~profile ~harness ~command_override ~fork ~mode ~session_id ~pr
         if field "running" value=`Bool false && bytes="" then (match field "code" value with `Int code->Lwt.return (`Exited code)|_->fail 503 "native terminal outcome is unknown; inspect retained output") else Lwt_unix.sleep 0.04 >>= output in
       let rec input () = Lwt_io.read ~count:4096 Lwt_io.stdin >>= fun bytes ->
         if bytes="" then Lwt.return `Detached else route "terminal_input" ["data",string(Base64.encode_exn bytes)] >>= input in
-      Lwt_main.run(report () >>= fun () -> Lwt.pick [input();output()] >>= function
+      Lwt_main.run(Lwt.pick [input();output()] >>= function
         | `Detached -> emit (Rex.status_report "clear") >|= fun () -> 0
         | `Exited code -> report ~exit:code () >|= fun () -> code)))

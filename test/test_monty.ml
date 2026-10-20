@@ -670,6 +670,25 @@ let test_rex_context_and_status () =
     ^ Base64.encode_exn "Worker \"x\"" ^ ":msg=" ^ Base64.encode_exn "handoff: ready" ^ "\027\\")
     report;
   assert_equal "clear report" "\027]7501;state=clear:id=monty:app=monty\027\\" (Rex.status_report "clear");
+  assert_bool "attachment alone reports no status"
+    (Client_terminal.lifecycle_status ~title:"T" ~handoff:None ~exit:None = None);
+  assert_bool "unknown handoff outcome reports no status"
+    (Client_terminal.lifecycle_status ~title:"T" ~handoff:(Some "weird") ~exit:None = None);
+  assert_equal "handoff reports done"
+    (Rex.status_report ~title:"T" ~msg:"handoff: ready for review" "done")
+    (Option.get (Client_terminal.lifecycle_status ~title:"T" ~handoff:(Some "ready-for-review") ~exit:None));
+  assert_equal "handoff needing attention reports blocked question"
+    (Rex.status_report ~title:"T" ~kind:"question" ~msg:"handoff: needs attention" "blocked")
+    (Option.get (Client_terminal.lifecycle_status ~title:"T" ~handoff:(Some "needs-attention") ~exit:None));
+  assert_equal "exit keeps the handoff outcome"
+    (Rex.status_report ~title:"T" ~msg:"handoff: failed · terminal exited (0)" "error")
+    (Option.get (Client_terminal.lifecycle_status ~title:"T" ~handoff:(Some "failed") ~exit:(Some 0)));
+  assert_equal "clean exit without handoff reports done"
+    (Rex.status_report ~title:"T" ~msg:"terminal exited (0)" "done")
+    (Option.get (Client_terminal.lifecycle_status ~title:"T" ~handoff:None ~exit:(Some 0)));
+  assert_equal "failed exit without handoff reports error"
+    (Rex.status_report ~title:"T" ~msg:"terminal exited (3)" "error")
+    (Option.get (Client_terminal.lifecycle_status ~title:"T" ~handoff:None ~exit:(Some 3)));
   assert_equal "blank label" "Monty worker" (Rex.label_of_title "   ");
   let long = String.concat "" (List.init 60 (fun _ -> "\xc3\xa6")) in
   assert_equal "utf8 label boundary" long (Rex.label_of_title (long ^ "x"))

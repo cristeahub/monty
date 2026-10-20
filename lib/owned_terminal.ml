@@ -3,11 +3,13 @@ open Json_fields
 open Conversation_store
 
 type t = {process:Lwt_process.process_full; path:string; mutable code:Yojson.Safe.t; mutable alive:bool}
-let start ~rows ~cols ~vim ~env ~cwd ~lock ~locks ~path ~notify args =
+let start ~rows ~cols ~vim ~program_status ~env ~cwd ~lock ~locks ~path ~notify args =
   let fd=get(State_store.open_verified_lock path [Unix.O_WRONLY;Unix.O_CREAT;Unix.O_APPEND]) in
   let process=try
     Unix.fchmod fd 0o600;
-    Owned_process.start ~mode:(Printf.sprintf "pty:%d:%d%s" rows cols (if vim then ":vim" else "")) ~lock ~locks ~env ~cwd args
+    let mode=Yojson.Safe.to_string (`Assoc ["mode",`String (Printf.sprintf "pty:%d:%d%s" rows cols (if vim then ":vim" else ""));
+      "program_status",`Bool program_status]) in
+    Owned_process.start ~mode ~lock ~locks ~env ~cwd args
     with error->Unix.close fd;raise error in
   Lwt.async (fun () -> Owned_process.drain process#stderr);
   Lwt.catch (fun () -> Lwt_unix.with_timeout 10. (fun () -> Lwt_io.read_line_opt process#stdout) >>= function

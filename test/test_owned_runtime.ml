@@ -3,6 +3,12 @@ open Test_support
 
 let self = Unix.realpath Sys.executable_name
 let contains = Monty.Home.contains_substring
+let occurrences needle hay =
+  let n = String.length needle in
+  let rec count from acc =
+    if from + n > String.length hay then acc
+    else if String.sub hay from n = needle then count (from + n) (acc + 1) else count (from + 1) acc in
+  count 0 0
 let fixture mode root = match mode with
   | "tree" ->
       let child = Unix.create_process "sleep" [|"sleep";"60"|] Unix.stdin Unix.stdout Unix.stderr in
@@ -12,6 +18,23 @@ let fixture mode root = match mode with
   | "terminal" ->
       Printf.printf "native tty %b\n%!" (Unix.isatty Unix.stdin);
       print_endline (read_line ())
+  | "probe" ->
+      (* Behave like a harness: raw mode, an OSC 7501 support probe split across writes,
+         then a status report; finally say how many probe replies came back. *)
+      let attrs = Unix.tcgetattr Unix.stdin in
+      Unix.tcsetattr Unix.stdin Unix.TCSANOW {attrs with c_icanon=false;c_echo=false;c_isig=false;c_opost=false;c_vmin=1;c_vtime=0};
+      let out text = ignore (Unix.write_substring Unix.stdout text 0 (String.length text)) in
+      out "before\027]7501;?\007middle\027]7501;"; Unix.sleepf 0.3;
+      out "?\027\\after\027]7501;state=working:app=test\027\\";
+      let got = Buffer.create 256 and deadline = Unix.gettimeofday () +. 2. in
+      let replies () = occurrences "7501;?:states=" (Buffer.contents got) in
+      while Unix.gettimeofday () < deadline && replies () < 2 do
+        match Unix.select [Unix.stdin] [] [] 0.1 with
+        | [], _, _ -> ()
+        | _ -> let chunk = Bytes.create 4096 in
+            let n = Unix.read Unix.stdin chunk 0 4096 in Buffer.add_subbytes got chunk 0 n
+      done;
+      out (Printf.sprintf "replies=%d" (replies ()))
   | "duplex" ->
       let size = 256 * 1024 in
       output_string stdout (String.make size 'o'); flush stdout;
@@ -89,6 +112,30 @@ let run helper = with_temp_dir ~prefix:"monty-owned-" (fun root ->
       Lwt_unix.with_timeout 8. drain >>= fun () -> wait_exit terminal >|= fun status ->
       check (contains (Buffer.contents output) "exact input" && !code=`Int 0 && status=Unix.WEXITED 0) "terminal input or native exit was lost")
       (fun () -> close terminal) >>= fun () ->
+    (* A display that supports the Program Status Protocol is answered by the owned terminal
+       itself: probes never reach the display, a probe split across writes is still answered,
+       and status reports pass through untouched. *)
+    let status_mode=Yojson.Safe.to_string(obj["mode",string "pty:24:80";"program_status",`Bool true]) in
+    let probing=spawn status_mode "" "probe" in
+    Lwt.finalize (fun () ->
+      ready probing >>= fun ready_text ->
+      check (Yojson.Safe.from_string ready_text=obj["type",string "ready"]) "probe terminal was not ready";
+      let output=Buffer.create 256 and code=ref `Null in
+      let rec drain () = Lwt_io.read_line_opt probing#stdout >>= function
+        | None -> Lwt.return_unit
+        | Some line ->
+            let frame=Yojson.Safe.from_string line in
+            (match s "type" frame with
+            | "output" -> Buffer.add_string output (Base64.decode_exn(s "data" frame))
+            | "exit" -> code:=field "code" frame
+            | _ -> failwith "invalid terminal fixture frame");drain () in
+      Lwt_unix.with_timeout 8. drain >>= fun () -> wait_exit probing >|= fun status ->
+      let output=Buffer.contents output in
+      check (status=Unix.WEXITED 0 && !code=`Int 0) "probe fixture did not exit cleanly";
+      check (not (contains output "\027]7501;?")) "support probe reached the display";
+      check (String.starts_with ~prefix:"beforemiddleafter\027]7501;state=working:app=test\027\\" output) "probe was not stripped cleanly or the report was altered";
+      check (String.ends_with ~suffix:"replies=2" output) "the owned terminal did not answer both probes")
+      (fun () -> close probing) >>= fun () ->
     let duplex=spawn "pipe" "" "duplex" in
     Lwt.finalize (fun () ->
       let sending=Lwt_io.write duplex#stdin (String.make (256*1024) 'i') >>= fun () -> Lwt_io.flush duplex#stdin in
@@ -96,7 +143,7 @@ let run helper = with_temp_dir ~prefix:"monty-owned-" (fun root ->
       wait_exit duplex >|= fun status ->
       check (status=Unix.WEXITED 0 && output=String.make (256*1024) 'o' ^ "complete\n") "full duplex pipe backpressure lost input or output")
       (fun () -> close duplex));
-  print_endline "Owned runtimes: lock fences, descendants, EOF, PTY input/resize and full duplex passed")
+  print_endline "Owned runtimes: lock fences, descendants, EOF, PTY input/resize, program status probe and full duplex passed")
 
 let () = match Array.to_list Sys.argv with
   | _::"--fixture"::mode::root::[] -> fixture mode root

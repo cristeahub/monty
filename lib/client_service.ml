@@ -694,10 +694,15 @@ let terminal_start t cid sess request =
   if t.stopping then fail 503 "Monty service is shutting down; no terminal started";
   let bindings=match field "environment" context with `Assoc fields->List.map (fun (k,v)->k ^ "=" ^ str v) fields|_->[] in
   let key=match harness with Harness.Pi->"PI_CODING_AGENT_DIR"|Codex->"CODEX_HOME"|Claude->"CLAUDE_CONFIG_DIR" in
+  (* A terminal opened from a Rex pane is displayed by Rex, which supports the Program
+     Status Protocol: the owned terminal answers the harness's support probe itself and
+     Pi is told to report without probing. Reports then show as Rex tab status. *)
+  let rex_display=List.mem_assoc "REX_SESSION" (terminal_environment request) in
   let env=native_environment (profile_auth p @ [key ^ "=" ^ directory;"MONTY_HOME=" ^ t.home;
     "MONTY_HARNESS=" ^ Harness.to_string harness;"MONTY_" ^ String.uppercase_ascii(Harness.to_string harness) ^ "_COMMAND=" ^ Native_command.shell(s "command" p);"MONTY_CODEX_YOLO=false";
     "TERM=" ^ (match field "term" request with `String value when String.length value<=128->value|_->"xterm-256color")] @ bindings
-    @ List.map (fun (key,value) -> key ^ "=" ^ value) (terminal_environment request)) in
+    @ List.map (fun (key,value) -> key ^ "=" ^ value) (terminal_environment request)
+    @ (if harness=Harness.Pi && rex_display then ["PI_PROGRAM_STATUS=1"] else [])) in
   let path=file t.home ["conversations";cid;"terminal-" ^ component sid ^ ".output"] in
   let notify json =
     if s "type" json="terminal_closed" then locked t.home (fun () ->
@@ -708,7 +713,7 @@ let terminal_start t cid sess request =
   let rows=if field "rows" request=`Null then 24 else i "rows" request and cols=if field "cols" request=`Null then 80 else i "cols" request in
   if rows<1 || rows>1000 || cols<1 || cols>1000 then fail 400 "invalid terminal dimensions";
   let locks=worker_locks t sess in
-  Owned_terminal.start ~rows ~cols ~vim:(harness=Harness.Codex) ~env ~cwd ~locks
+  Owned_terminal.start ~rows ~cols ~vim:(harness=Harness.Codex) ~program_status:rex_display ~env ~cwd ~locks
     ~lock:(if harness=Harness.Codex then "" else Filename.concat directory (".monty-session-" ^ sha native ^ ".lock"))
     ~path ~notify (Native_command.argv (List.hd args) (List.tl args)) >>= fun terminal ->
   Hashtbl.replace t.terminals sid terminal;
