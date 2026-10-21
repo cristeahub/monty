@@ -34,11 +34,12 @@ The lock is generated with Dune 3.24.2 and uses its upstream relocatable OCaml
 or global service installation are required.
 
 Interactive and headless launches use a Monty client service in the
-same Monty home and an explicitly configured account profile. See the
-[service workflow](docs/monty-workflows.md#client-service) before rolling out
-this binary. After that one-time setup, plain `monty` starts the service in the
-background when needed and reuses it on later launches; no separate service
-terminal is needed. Use `monty service start` and `monty service stop` to manage
+same Monty home and a configured account profile. The first launch generates
+profiles for the native account directories it finds (`~/.codex`, `~/.claude`,
+Mantle profiles) with the registered project repos as roots; see the
+[service workflow](docs/monty-workflows.md#client-service) to supply your own
+configuration instead. Plain `monty` starts the service in the background when
+needed and reuses it on later launches; no separate service terminal is needed. Use `monty service start` and `monty service stop` to manage
 it explicitly. The service owns native Pi, Codex and Claude processes, including
 terminal sessions and headless supervisors. It also supports read-only mirroring
 of explicitly selected native history. See [Pi history and RPC](docs/monty-workflows.md#pi-history-and-rpc)

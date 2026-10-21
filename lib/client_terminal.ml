@@ -25,9 +25,12 @@ let ensure_service ?config_path ?port ~home () =
   | Some result -> ready result
   | None ->
       let state=saved () in
+      (* A saved hand-maintained configuration is reused as is; Monty's own
+         generated file is rebuilt so newly registered projects are allowed. *)
       let path=match config_path,field "config_path" state with
-        | Some path,_ | None,`String path when path<>"" -> path
-        | _ -> fail 503 "Monty client service is not running and no startup configuration is saved; run monty service start --config FILE" in
+        | Some path,_ -> path
+        | None,`String path when path<>"" && path<>Service_profiles.path ~home -> path
+        | _ -> Service_profiles.generate ~home in
       let port=match port,field "port" state with Some port,_->port|None,`Null->0|None,_->i "port" state in
       Client_service.start_background ~home ~config_path:path ~port;
       let deadline=Unix.gettimeofday ()+.15. in
@@ -69,9 +72,14 @@ let command ~home id json =
     | "finished" -> Lwt.return (field "result" receipt)
     | "accepted"|"running" -> Lwt_unix.sleep 0.2 >>= poll
     | _ -> Lwt.fail (Failure (409,"command " ^ id ^ ": " ^ Yojson.Safe.to_string receipt)) in poll ()
+(* The caller's native account directory, canonical when it exists. A missing
+   directory simply matches no profile instead of failing the lookup. *)
+let account_directory harness =
+  let directory=get(Skill.agent_directory harness) in
+  try Unix.realpath directory with Unix.Unix_error _ -> directory
 let profile_for ~home harness =
   ensure_service ~home () >|= fun health ->
-  let directory=get(Skill.agent_directory harness) |> Unix.realpath in
+  let directory=account_directory harness in
   let candidates=xs "profiles" health |> List.filter(fun p -> field "harness" p=string(Harness.to_string harness) && field "scope" p=string(sha directory)) in
   match Sys.getenv_opt "MONTY_API_PROFILE",candidates with
   | Some id,_ -> (match List.find_opt(fun p->s "id" p=id) candidates with Some p->s "id" p|None->fail 409 "selected service profile does not match the account scope")
@@ -160,7 +168,7 @@ let launch ~home ~profile ~harness ~command_override ~fork ~mode ~session_id ~pr
   let context=obj["workspaces",`List workspaces;"instructions",string(String.concat "\n\n" [contents instructions;contents context]);"environment",`Assoc environment] in
   let flow () =
     ensure_service ~home () >>= fun health ->
-    let directory=get(Skill.agent_directory harness) |> Unix.realpath in
+    let directory=account_directory harness in
     let matches p=field "harness" p=string(Harness.to_string harness) && field "scope" p=string(sha directory) in
     let profiles=xs "profiles" health in
     let p=match profile with

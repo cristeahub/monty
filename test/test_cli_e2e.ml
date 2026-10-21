@@ -273,9 +273,14 @@ let setup_environment ?(agent_profile = Some "reviewed") root =
        [ "#!/bin/sh"; "printf '%s\\n' \"$0 $*\" >> " ^ Shell.quote log;
          "printf '%s\\n' '{\"endpoint\":\"unix:///fake/rex.sock\"}'"; "" ]);
   Shell.chmod_executable rex;
+  (* An empty HOME keeps the operator's real account directories out of the
+     service configuration Monty generates for a first launch. *)
+  let user_home = Filename.concat root "user-home" in
+  Shell.ensure_dir user_home;
   let env =
     env_with
       [ ("MONTY_HOME", home);
+        ("HOME", user_home);
         ("MONTY_TERMINAL", "ghostty");
         ("PI_CODING_AGENT_DIR", Filename.concat root "pi-agent");
         ("MANTLE_CONTEXT", "");

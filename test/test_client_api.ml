@@ -69,7 +69,7 @@ let autostart_suite home=
   let unlocked ()=
     let fd=Unix.openfile(home/".monty/client-service.lock")[Unix.O_RDWR]0 in
     Fun.protect ~finally:(fun()->Unix.close fd)(fun()->try Unix.lockf fd Unix.F_TLOCK 0;true with Unix.Unix_error((Unix.EACCES|Unix.EAGAIN),_,_)->false)in
-  let lifecycle ?(target=home) args=cli ~cwd:repo ~env:service.env ~timeout:25.(["service"]@args@["--home";target])in
+  let lifecycle ?(target=home) ?(env=service.env) args=cli ~cwd:repo ~env ~timeout:25.(["service"]@args@["--home";target])in
   let launch ()=cli ~cwd:repo ~env:(merge_env service.env["MONTY_CODEX_COMMAND",codex]) ~timeout:25.[]in
   let fresh=home/"fresh"in mkdir fresh;
   Fun.protect ~finally:(fun()->ignore(lifecycle ~target:fresh["stop"]);Service.close service;
@@ -77,7 +77,17 @@ let autostart_suite home=
       (try Unix.kill(i"pid"(json_file metadata))Sys.sigterm with Unix.Unix_error(Unix.ESRCH,_,_)->());false));Native.close server)(fun()->
     let stopped=lifecycle ~target:fresh["stop"]in ok stopped;check(contains stopped.stdout"already stopped")"fresh stop";
     check(not(Sys.file_exists(fresh/".monty")))"fresh stop created state";
-    let missing=lifecycle ~target:fresh["start"]in check(missing.code=1&&contains missing.stderr"service start --config FILE")"missing startup config";
+    let user=fresh/"user"in mkdir user;
+    let missing=lifecycle ~target:fresh ~env:(merge_env service.env["HOME",user])["start"]in check(missing.code=1&&contains missing.stderr"service start --config FILE")"missing startup config";
+    (* Account directories found under HOME generate Monty's own configuration. *)
+    let bin_dir=fresh/"bin"in mkdir bin_dir;shell(bin_dir/"codex")"exit 0";
+    List.iter mkdir[user/".codex";user/".local";user/".local/share";user/".local/share/mantle";user/".local/share/mantle/profiles";user/".local/share/mantle/profiles/work";user/".local/share/mantle/profiles/work/codex"];
+    ok(lifecycle ~target:fresh ~env:(merge_env service.env["HOME",user;"PATH",bin_dir^":"^Sys.getenv"PATH"])["start"]);
+    let generated=json_file(fresh/".monty/service-profiles.json")in
+    equal(List.map(fun p->s"id"p,s"codex_home"p,s"command"p,xs"roots"p)(xs"profiles"generated))
+      [("codex",user/".codex",bin_dir/"codex",[string(Unix.realpath fresh)]);("codex-work",user/".local/share/mantle/profiles/work/codex",bin_dir/"codex",[string(Unix.realpath fresh)])];
+    equal(List.map(s"id")(xs"profiles"(Client.req(Client.create fresh)"health")))["codex";"codex-work"];
+    ok(lifecycle ~target:fresh["stop"]);
     List.iter(fun port->let result=lifecycle ~target:fresh["start";"--config";config;"--port="^port]in check(result.code=1&&contains result.stderr"port must be")"invalid service port")["-1";"65536"];
     ok(lifecycle ~target:fresh["start";"--config";config]);
     let client=Client.create fresh in

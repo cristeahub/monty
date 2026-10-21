@@ -104,7 +104,11 @@ let suite () = with_temp_dir ~prefix:"monty-skills-" (fun root ->
   write config (Yojson.Safe.to_string (obj [ "profiles", `List [ obj [ "id", string "pi";
     "harness", string "pi"; "command", string fake; "pi_home", string agent;
     "roots", `List [ string root ] ] ] ]));
-  ignore (cli ~ok:false [ "start"; "--harness"; "pi"; "--pi-command"; Monty.Shell.quote fake ]);
+  (* Skill installs above created account directories under HOME; an empty HOME
+     keeps this launch from generating a service configuration out of them. *)
+  let no_accounts = root / "no accounts" in mkdir no_accounts;
+  ignore (cli ~ok:false ~environment:(merge_env environment [ "HOME", no_accounts ])
+    [ "start"; "--harness"; "pi"; "--pi-command"; Monty.Shell.quote fake ]);
   check (not (Sys.file_exists log)) "unavailable service started independent native harness";
   ignore (cli [ "service"; "start"; "--config"; config ]);
   Fun.protect ~finally:(fun () -> ignore (cli [ "service"; "stop" ])) (fun () ->

@@ -438,7 +438,14 @@ needed and wait for authenticated health before opening the terminal. A healthy
 service is reused; concurrent launches share the existing service lock. Logs go
 to `.monty/client-service.log`, and the service survives terminal exit. No login
 agent or background supervisor is installed. A first launch without a saved
-configuration gives the setup command instead of guessing account homes or roots.
+configuration generates `.monty/service-profiles.json`: one profile per native
+account directory whose CLI is on PATH (`~/.codex`, `~/.claude`, `~/.pi/agent`,
+and each Mantle profile's `codex` and `claude` homes as `codex-work` or
+`claude-work`), each allowing the Monty home, `~/.local/share/wt` and every
+registered project repo as roots. Monty rewrites that file on every service
+start it owns, so projects registered later are allowed without edits; pass
+`--config FILE` once for a hand-maintained configuration. With no account
+directory to discover, the launch gives that setup command instead.
 
 ```sh
 monty service start  # Reuse the running service or start from saved configuration.
