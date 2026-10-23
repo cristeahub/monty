@@ -2,15 +2,16 @@ open Lwt.Infix
 open Json_fields
 open Conversation_store
 let request=Client_http.request
+(* Is a service answering? Only an HTTP answer proves one is there: a missing
+   metadata file (503), a refused, reset or timed-out connection, a connection
+   closed mid-response (cohttp wraps that read error in its own exception) and
+   a cancelled probe all mean no usable service. *)
 let health ~home = Lwt.catch (fun () ->
-    Cohttp_lwt_unix.Private.IO.catch (fun () ->
-      Lwt_unix.with_timeout 1. (fun () -> request ~home `GET "/v1/health" `Null)) >>= function
-    | Ok result -> Lwt.return_some result
-    | Error error -> Lwt.fail error)
+    Lwt_unix.with_timeout 1. (fun () -> request ~home `GET "/v1/health" `Null) >|= Option.some)
     (function
-      | Failure(503,_) | Lwt_unix.Timeout
-      | Unix.Unix_error((Unix.ECONNREFUSED|Unix.ECONNRESET|Unix.ETIMEDOUT),_,_) -> Lwt.return_none
-      | error -> Lwt.fail error)
+      | Failure(503,_) -> Lwt.return_none
+      | Failure _ as error -> Lwt.fail error
+      | _ -> Lwt.return_none)
 let ensure_service ?config_path ?port ~home () =
   let config_path=Option.map Unix.realpath config_path in
   let metadata=file home ["client-service.json"] in
@@ -201,7 +202,9 @@ let launch ~home ~profile ~harness ~command_override ~fork ~mode ~session_id ~pr
       "revision",field "revision" c;"fresh",`Bool(mode="fresh");"fork",Option.fold ~none:`Null ~some:string fork;"prompt",Option.fold ~none:`Null ~some:string prompt;
       "term",string(Option.value ~default:"xterm-256color" (Sys.getenv_opt "TERM"));"terminal_environment",terminal_environment]) >|= fun sess ->
     s "id" c,s "id" sess in
-  let cid,sid=try Lwt_main.run(flow()) with Failure _ as e->raise e|_->fail 503 "Monty service unavailable; inspect receipts before retrying; no independent harness fallback" in
+  let cid,sid=try Lwt_main.run(flow()) with Failure _ as e->raise e|e->
+    let url=try s "url" (read (file home ["client-service.json"])) with _->"unknown" in
+    fail 503 ("Monty service at " ^ url ^ " unavailable (" ^ Printexc.to_string e ^ "); inspect receipts before retrying; no independent harness fallback") in
   let original=if Unix.isatty Unix.stdin then Some(Unix.tcgetattr Unix.stdin) else None in
   Fun.protect ~finally:(fun () -> Option.iter(fun attrs->Unix.tcsetattr Unix.stdin Unix.TCSANOW attrs) original) (fun () ->
     Option.iter(fun attrs->Unix.tcsetattr Unix.stdin Unix.TCSANOW {attrs with

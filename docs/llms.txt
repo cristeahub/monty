@@ -1,0 +1,26 @@
+# Monty Docs
+
+> Monty is the head butler: a small OCaml launcher that plans work in a head agent
+> session and runs Pi, Codex or Claude workers in managed worktrees through Rex,
+> Ghostty or headless chains. Every page below is Markdown in this repository.
+> The CLI embeds the workflow manual (`monty guide`), the agent skill
+> (`monty skill show`) and the service API catalog (`monty api list --json`,
+> also served at /v1/help and /v1/llms.txt).
+
+- [README](../README.md): Requirements, build, install, starting the head butler, launching and resuming workers, handoffs, archiving, the Rex terminal backend, dry run, configuration, doctor, settings and tests.
+- [Workflow manual](monty-workflows.md): The embedded manual agents read through `monty guide`: inventory, launch, Rex terminals, headless, lifecycle, projects, workers, settings, handoffs, agents and the client service.
+
+## Agents
+
+- [Agents](agents.md): The built-in agent skill and session hook: what agents can do, setup with `monty skill setup`, supported agents, how it works, removal and debugging with `monty skill status`.
+- [Service API](api.md): The self-describing client service API: `monty api list`, `describe` and `call`, JSON Schemas, examples, errors and the machine-readable catalog.
+
+## Server
+
+- [Server-owned agents](server-owned-agents.md): The authority model `clients → Monty server → native runtimes`, profile configuration, Claude SDK bridge, terminals, headless supervisors and rollout status.
+- [Run handoff v1](run-handoff-v1.md): The durable handoff record a worker publishes and the head butler reads.
+
+## Source
+
+- [AGENTS.md](../AGENTS.md): Head-butler role and user instructions for the control room.
+- [VISION.md](../VISION.md): Why Monty exists and where it is going.

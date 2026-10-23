@@ -1428,7 +1428,7 @@ let rex_cmd =
   Cmdliner.Cmd.group (Cmdliner.Cmd.info "rex" ~doc:"Inspect native Rex terminals recorded for workers.") [ status ]
  in
 let main_cmd =
-  let doc = "Monty, the head butler for Pi and Codex worker sessions." in
+  let doc = "Monty, the head butler for Pi, Codex and Claude worker sessions." in
   let man =
     [ `S Cmdliner.Manpage.s_description;
       `P "Run monty with no subcommand to start the head-butler agent session in this repo.";
@@ -1461,9 +1461,15 @@ let main_cmd =
       doctor_cmd;
       rex_cmd;
       Guide.command;
-      Skill.command ~home_arg ~harness_arg ~getenv;
+      Skill.command ~home_arg ~getenv;
+      Api_cli.command ~home_arg;
     ]
  in
 main_cmd
 
-let eval ?getenv argv = Cmdliner.Cmd.eval' ~argv (make_cmd ?getenv ())
+(* `monty __internal ...` runs the commands the installed hook files invoke. It
+   is kept out of the help, as Rex keeps its own, because it is not for people. *)
+let eval ?(getenv = Sys.getenv_opt) argv =
+  match Array.to_list argv with
+  | _ :: "__internal" :: rest -> Session_start.internal ~getenv rest
+  | _ -> Cmdliner.Cmd.eval' ~argv (make_cmd ~getenv ())

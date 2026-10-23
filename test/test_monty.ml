@@ -1446,6 +1446,73 @@ let run_named name test =
     Fmt.pr "PASS %s\n" name
   with exn -> failwith (Printf.sprintf "%s: %s" name (Printexc.to_string exn))
 
+(* The catalog is the one description of the API: the generic submit enum and the
+   per-op entries must agree, names must be unique, and every entry must survive a
+   JSON round trip so the CLI reads the service's copy without loss. *)
+let test_api_catalog_consistency () =
+  let open Monty.Api_catalog in
+  let names = names () in
+  assert (List.sort_uniq compare names = List.sort compare names);
+  let ops = List.filter_map (fun operation -> operation.op) operations in
+  let submit = Option.get (find "commands.submit") in
+  let enum =
+    match Yojson.Safe.Util.(member "enum" (member "op" (member "properties" submit.input))) with
+    | `List values -> List.map Yojson.Safe.Util.to_string values
+    | _ -> []
+  in
+  assert (List.sort compare enum = List.sort compare ops);
+  List.iter
+    (fun operation ->
+      match operation.op with
+      | None -> ()
+      | Some op ->
+          assert (operation.name = "command." ^ op && operation.meth = "POST" && operation.path = "/v1/commands/{id}");
+          assert (Yojson.Safe.Util.(member "const" (member "op" (member "properties" operation.input))) = `String op))
+    operations;
+  let round = of_json (to_json ()) in
+  assert (List.map operation_json round = List.map operation_json operations);
+  assert (Monty.Home.contains_substring (llms_txt ()) "`command.headless_start`")
+
+(* Monty's hook joins other people's SessionStart hooks and leaves when asked
+   without touching them. *)
+let test_skill_hook_merge () =
+  let open Monty.Skill in
+  let theirs = `Assoc [ ("matcher", `String "startup"); ("hooks", `List [ `Assoc [ ("type", `String "command"); ("command", `String "echo mine") ] ]) ] in
+  let stale = `Assoc [ ("hooks", `List [ `Assoc [ ("type", `String "command"); ("command", `String "monty __internal session-start --harness claude") ] ]) ] in
+  let mixed = `Assoc [ ("hooks", `List [ `Assoc [ ("command", `String "echo first") ]; `Assoc [ ("command", `String "sh -c 'monty __internal session-start'") ] ]) ] in
+  assert (strip [ theirs; stale; mixed ] = [ theirs; `Assoc [ ("hooks", `List [ `Assoc [ ("command", `String "echo first") ] ]) ] ]);
+  assert (strip [ theirs; hook_entry Monty.Harness.Claude ] @ [ hook_entry Monty.Harness.Claude ] = [ theirs; hook_entry Monty.Harness.Claude ]);
+  let file = { json = `Assoc [ ("theme", `String "dark"); ("hooks", `Assoc [ ("SessionStart", `List [ theirs; stale ]) ]) ]; hooks = `Assoc [ ("SessionStart", `List [ theirs; stale ]) ]; groups = [ theirs; stale ] } in
+  let installed = Yojson.Safe.from_string (installed_hook_text Monty.Harness.Claude file) in
+  assert (Yojson.Safe.Util.(member "SessionStart" (member "hooks" installed)) = `List [ theirs; hook_entry Monty.Harness.Claude ]);
+  assert (Yojson.Safe.Util.member "theme" installed = `String "dark");
+  let removed = Yojson.Safe.from_string (removed_hook_text file) in
+  assert (Yojson.Safe.Util.(member "SessionStart" (member "hooks" removed)) = `List [ theirs ]);
+  let only_ours = { json = `Assoc [ ("hooks", `Assoc [ ("SessionStart", `List [ stale ]) ]) ]; hooks = `Assoc [ ("SessionStart", `List [ stale ]) ]; groups = [ stale ] } in
+  assert (Yojson.Safe.from_string (removed_hook_text only_ours) = `Assoc []);
+  assert (hook_file Monty.Harness.Pi "/account" = None)
+
+(* The hook speaks only inside a Monty session, and says which one. *)
+let test_session_start_contexts () =
+  let open Monty.Session_start in
+  let env bindings name = List.assoc_opt name bindings in
+  assert (render ~getenv:(env []) ~cwd:"/repo" ~harness:Monty.Harness.Claude = None);
+  assert (render ~getenv:(env [ ("MONTY_HOME", "/monty-home") ]) ~cwd:"/repo" ~harness:Monty.Harness.Claude = None);
+  let worker = render ~getenv:(env [ ("MONTY_HOME", "/monty-home"); ("MONTY_JOB_ID", "w-1"); ("MONTY_TASK_KEY", "local:3"); ("MONTY_WORKSPACE_1", "/wt/a") ]) ~cwd:"/wt/a" ~harness:Monty.Harness.Codex in
+  (match worker with
+   | Some text ->
+       List.iter (fun needle -> assert (Monty.Home.contains_substring text needle))
+         [ "Monty worker w-1"; "MONTY_TASK_KEY=local:3"; "MONTY_WORKSPACE_1=/wt/a"; "monty handoff publish"; "($monty)" ]
+   | None -> assert false);
+  let home = Filename.concat (Filename.get_temp_dir_name ()) ("monty-session-start-" ^ string_of_int (Unix.getpid ())) in
+  Monty.Shell.ensure_dir home;
+  Fun.protect ~finally:(fun () -> Unix.rmdir home) (fun () ->
+    match render ~getenv:(env [ ("MONTY_HOME", home) ]) ~cwd:home ~harness:Monty.Harness.Claude with
+    | Some text ->
+        List.iter (fun needle -> assert (Monty.Home.contains_substring text needle))
+          [ "Monty control room"; "No worker handoffs are pending"; "monty handoff pending"; "(/monty)" ]
+    | None -> assert false)
+
 let () =
   Unix.putenv "GIT_CONFIG_NOSYSTEM" "1";
   Unix.putenv "GIT_CONFIG_SYSTEM" "/dev/null";
@@ -1491,5 +1558,8 @@ let () =
     ("pi_final_message", test_pi_final_message);
     ("claude_final_message", test_claude_final_message);
     ("review_command", test_review_command);
-    ("codex_review_config", test_codex_review_config) ]
+    ("codex_review_config", test_codex_review_config);
+    ("api_catalog_consistency", test_api_catalog_consistency);
+    ("skill_hook_merge", test_skill_hook_merge);
+    ("session_start_contexts", test_session_start_contexts) ]
   |> List.iter (fun (name, test) -> run_named name test)

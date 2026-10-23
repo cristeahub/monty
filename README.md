@@ -97,11 +97,12 @@ Preview the commands without changing anything:
 
 ## Start the head butler
 
-Monty automatically installs its CLI skill for Pi, Codex and Claude using the
-active native profile. The skill includes the workflow manual;
-role instructions remain in AGENTS.md / worker MONTY.md. See
-[Skill installation](docs/skills.md). `monty guide` reads the same
-embedded manual without a skill-aware client.
+Monty automatically installs its agent skill and session hook for Pi, Codex and
+Claude into the account it launches into. The skill defers to `monty guide`, the
+embedded workflow manual, and the hook tells each session whether it is a worker
+or the head butler; role instructions remain in AGENTS.md / worker MONTY.md. See
+[Agents](docs/agents.md) for setup, status and removal, and
+[Service API](docs/api.md) for `monty api`, the self-describing client API.
 
 Use the installed `monty` command from any directory:
 
@@ -902,6 +903,25 @@ Persisted launch-script paths are accepted only when the complete script bytes p
 Scripts are published through same-directory atomic replacement so a destination symlink swap cannot redirect the write.
 Interactive Codex session sidecars use the same home lock and atomic file
 replacement while remaining separate from lifecycle `job.json` state.
+
+## Agents and the service API
+
+Agents operate Monty through the `monty` CLI. Monty supports them the way Rex
+supports agents: a skill that sends the agent to the installed binary's guide, a
+SessionStart hook that tells the agent which Monty session it is in, and a
+service API that describes itself.
+
+```sh
+monty skill status                       # skill and hook state per agent and service profile
+monty skill setup                        # only needed for sessions started outside Monty
+monty guide                              # the workflow manual, by topic
+monty api list                           # every service operation
+monty api describe command.send          # JSON Schemas, examples and validation notes
+monty api call inventory '{"scope":"all"}'
+```
+
+See [Agents](docs/agents.md) and [Service API](docs/api.md). The docs index for
+agents and tools is [docs/llms.txt](docs/llms.txt).
 
 ## Tests
 

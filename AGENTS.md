@@ -7,7 +7,9 @@ unit of work; the local task registry is authoritative.
 ## Operating Monty
 
 Before operating Monty, use the installed Monty skill and read the relevant
-workflow with `monty guide <topic>`. Use `monty <command> --help=plain` for exact
+workflow with `monty guide <topic>`. The session hook says whether this session
+is the head butler or a worker and what is pending; `monty skill status` shows
+what is installed. Use `monty <command> --help=plain` for exact
 syntax. The skill also bundles the workflow manual for file-only access.
 Invoke the installed `monty` directly; never use `dune exec -- monty` for
 Monty workflows.

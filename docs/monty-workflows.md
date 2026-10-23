@@ -342,31 +342,44 @@ monty handoff publish "$MONTY_JOB_ID" --summary 'Implemented and validated the c
 Publication leaves the task open and its worktrees intact. Headless children
 return their handoff to the supervisor instead; the supervisor publishes.
 
-## Skills
+## Agents
 
-Monty automatically installs or refreshes its `monty` CLI skill before starting
-Pi, Codex or Claude sessions. This covers head-butler start/continue, worker launch/resume,
-headless phases, and service-managed native sessions. Installation uses the
-selected native profile: `${CODEX_HOME:-$HOME/.codex}/skills/monty`,
-`${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/skills/monty` or
-`${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills/monty`. Service sessions use
-their configured native profile rather than the service process's ambient account.
-Read-only reviewers can read `references/workflows.md` without a shell or host CLI.
+Monty installs its agent skill and session hook into the account it launches
+into before Pi, Codex or Claude starts: head-butler start/continue, worker
+launch/resume, headless phases and service-owned native sessions. The account is
+the selected native profile, `${CODEX_HOME:-$HOME/.codex}`,
+`${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}` or `${CLAUDE_CONFIG_DIR:-$HOME/.claude}`,
+or a service profile's configured `codex_home`, `pi_home` or `claude_home`; never
+the service process's ambient account.
 
-`monty guide` lists topics; `monty guide workers` reads a topic without needing
-an initialized Monty home. To install explicitly without starting an agent:
+The skill at `skills/monty` is a stub that sends the agent to `monty guide`, so
+the guide always comes from the installed binary; `references/workflows.md`
+beside it holds the same manual for agents with file tools but no shell. The
+hook, in Claude Code's `settings.json` and Codex's `hooks.json` (Pi has no
+hooks), runs `monty __internal session-start` when a session starts and tells
+the agent whether it is a Monty worker (with its task, context file and
+workspaces) or the head butler (with the pending handoff count); outside a Monty
+session it prints nothing. It reads durable state only and never acknowledges,
+reconciles or starts the service.
 
 ```sh
-monty skills install --harness codex
-monty skills install --harness pi
-monty skills install --harness claude
+monty skill status                 # what is installed where, with one state per item
+monty skill setup                  # every agent found on this machine and every service profile
+monty skill setup --harness codex  # one harness, found or not; --dry-run, --force, --json
+monty skill remove                 # only what Monty installed; other hooks and settings stay
+monty skill show                   # the guide the skill gives agents
+monty guide [TOPIC|all] [--json]   # the same manual by topic
 ```
 
-The skill and manual are embedded in the executable. Identical files are left
-untouched, generated files are refreshed atomically, and unmanaged files or
-unsafe symlinks are rejected instead of overwritten. Read-only inventory, help,
-and dry-run commands do not install skills. Skills do not grant new permissions
-or override role instructions. Native settings that disable skills remain in effect.
+States are `current`, `outdated`, `missing`, `foreign`, `unreadable` and
+`unsupported`. Identical files keep their timestamps, managed files are
+refreshed atomically, and foreign or unreadable files are never overwritten:
+setup reports a conflict, and a launch into such an account fails with the path.
+Read-only inventory, help and dry-run commands install nothing. The skill and
+hook supply guidance and context, not permissions; role instructions stay in
+`AGENTS.md` and each worker's `MONTY.md`, and native settings that disable skills
+or hooks remain in effect. Codex approves a new hook with `/hooks`; Claude Code
+runs hooks once the session's folder is trusted.
 
 ## Client service
 
@@ -378,6 +391,11 @@ Codex versions are informational: Monty attempts the native connection regardles
 of version and reports connection or protocol failures. Other Pi runtime versions
 fail closed. Pi also supports read-only native JSONL
 history mirroring without starting its runtime. CLI guidance comes from the Monty skill.
+The service describes its own API: `monty api list` names every operation,
+`monty api describe NAME` prints its JSON Schemas, examples and validation notes,
+and `monty api call NAME [JSON]` runs it; the same catalog is served at
+`GET /v1/help` and, as Markdown, `GET /v1/llms.txt`. The CLI lifecycle commands
+stay authoritative; the API adds no shortcut around their safeguards.
 
 Codex connects through a private server-owned app-server, rather than adopting
 the account's independently launched daemon. `/health` lists protocol baselines in

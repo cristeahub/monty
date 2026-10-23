@@ -133,7 +133,11 @@ let autostart_suite home=
     Lwt_main.run(Lwt_unix.bind listener(Unix.ADDR_INET(Unix.inet_addr_loopback,0)));Lwt_unix.listen listener 1;
     let port=match Lwt_unix.getsockname listener with Unix.ADDR_INET(_,port)->port|_->assert false in
     save metadata(puts["port",`Int 0;"url",string("http://127.0.0.1:"^string_of_int port)](json_file metadata));
-    Lwt.async(fun()->Lwt.bind(Lwt_unix.accept listener)(fun(connection,_)->Lwt_unix.setsockopt_optint connection Unix.SO_LINGER(Some 0);Lwt_unix.close connection));
+    (* The stale address answers the probe's request with a reset mid-response,
+       the failure cohttp-lwt's default client lets escape Lwt_main.run. *)
+    Lwt.async(fun()->Lwt.bind(Lwt_unix.accept listener)(fun(connection,_)->
+      Lwt.bind(Lwt_unix.read connection(Bytes.create 4096)0 4096)(fun _->
+        Lwt_unix.setsockopt_optint connection Unix.SO_LINGER(Some 0);Lwt_unix.close connection)));
     Fun.protect ~finally:(fun()->Lwt_main.run(Lwt_unix.close listener))(fun()->ok(launch()));
     print_endline"client service autostart, startup reuse, concurrency, authentication and stale metadata recovery passed")
 
@@ -318,6 +322,28 @@ let rec fake_suite home=
     http_error 403(fun()->req ~headers:["Origin","https://evil.example"]"health");
     http_error 403(fun()->req ~headers:["Host","evil.example"]"health");
     check(not(has_field"storage_scope"(req"health")))"removed storage scope advertised";
+    (* The service describes its own API; the CLI reads that description. *)
+    let help=req"help"in
+    let catalog=Monty.Api_catalog.of_json help in
+    equal(List.map(fun(o:Monty.Api_catalog.operation)->o.name)catalog)(Monty.Api_catalog.names())~label:"service help differs from the binary catalog";
+    equal(s"help_path"(field"http"help))"/v1/help";
+    let status,markdown=Client.raw !c"/v1/llms.txt"in equal status 200;check(contains markdown"# Monty service API"&&contains markdown"`command.send`")"llms.txt lacks the catalog";
+    let api args=let result=cli ~env:service.env(["api"]@args@["--home";home])in
+      check(String.trim result.stdout<>""||result.code<>0)("api printed nothing: "^String.concat" "args^"\n"^result.stderr);result in
+    let listed=api["list";"-q"]in ok listed;equal(String.split_on_char '\n'(String.trim listed.stdout))(Monty.Api_catalog.names());
+    check(not(contains listed.stderr"not running"))"api list used the binary catalog while the service ran";
+    let described=api["describe";"command.send";"--json"]in ok described;equal(s"name"(json described.stdout))"command.send";
+    check((api["describe";"no.such"]).code<>0)"unknown operation accepted";
+    let inventory=api["call";"inventory";{|{"all_groups":"true"}|}]in ok inventory;equal(xs"tasks"(json inventory.stdout))[];
+    let llms=api["call";"llms"]in ok llms;equal llms.stdout markdown;
+    let rejected=api["call";"command.sync";{|{"conversation":"missing"}|};"--request-id";"api-sync-missing"]in
+    check(rejected.code=1)("rejected command exited zero: "^rejected.stdout^rejected.stderr);
+    check(String.trim rejected.stdout<>"")("rejected command printed no receipt: "^rejected.stderr);equal(s"status"(json rejected.stdout))"rejected";equal(s"op"(field"request"(req"commands/api-sync-missing")))"sync";
+    check((api["call";"command.send";{|{"op":"sync"}|}]).code<>0)"op mismatch accepted";
+    (* Every documented op reaches its handler: none is an unknown command. *)
+    List.iter(fun(o:Monty.Api_catalog.operation)->match o.op with None->()|Some op->
+      let receipt=cmd ~status:"rejected"("catalog-"^op)(obj["op",string op])in
+      check(s"message"receipt<>"unknown command")("catalog op is not dispatched: "^op))catalog;
     let port=Option.get(Uri.port(Uri.of_string !c.url))in
     http_error 401(fun()->req ~headers:["Authorization","";"Cookie",Printf.sprintf"monty_session_%d=%s"port !c.token;"Origin",!c.url]"health");
     List.iter(fun route->http_error 404(fun()->req ~data:(obj[])route))["browser/pair";"browser/session";"browser/logout"];
