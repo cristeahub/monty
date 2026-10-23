@@ -8,14 +8,15 @@ let () = with_temp_dir ~prefix:"monty-claude-" (fun home ->
   let repo=home / "repo" and second_repo=home / "other" in
   List.iter(fun directory->mkdir directory;equal 0(run "git"["init";"-q";directory]).code)[repo;second_repo];
   copy_tree (Filename.dirname bin / ".." / "agent-profiles") (home / "agent-profiles");
-  let account=home / "claude" and other=home / "other-account" in mkdir account;mkdir other;
+  let account=home / "claude" and other=home / "other-account" and default_account=home / ".claude" in
+  List.iter mkdir [account;other;default_account];
   let python=sdk_python home in let cli=home / "claude-cli" in
   write cli ("#!/bin/sh\nexec " ^ Monty.Shell.quote fixture ^ " \"$@\"\n");Unix.chmod cli 0o700;
   let config=home / "profiles.json" in
   let profile name directory=obj["id",string name;"harness",string "claude";"command",string cli;"python",string python;
     "claude_home",string directory;"roots",`List[string repo;string second_repo]] in
-  write config(json(obj["profiles",`List[profile "claude" account;profile "other" other]]));
-  let service=Service.create home config in
+  write config(json(obj["profiles",`List[profile "claude" account;profile "other" other;profile "default" default_account]]));
+  let service=Service.create ~extra:["HOME",home] home config in
   Fun.protect ~finally:(fun ()->Service.close service)(fun ()->
     let c ()=Service.client service in let req path=Client.req(c ())path in
     let cmd ?status key request=Client.cmd ?status (c ())key request in
@@ -48,6 +49,12 @@ let () = with_temp_dir ~prefix:"monty-claude-" (fun home ->
     equal 1(List.length(starts ()));
     let started=List.hd(starts ()) in check(i "pid" started<>Service.pid service && i "ppid" started<>Unix.getpid ()) "SDK process not independently owned";
     equal[string second_repo](xs "add_dirs" started);check(not(Sys.file_exists(other / "calls.jsonl"))) "wrong Claude account started";
+    equal(string account)(field "config_dir" started);
+    (* The default ~/.claude account is selected by leaving CLAUDE_CONFIG_DIR unset, so Claude finds its plain login. *)
+    let default_chat=cmd "start-default"(obj["op",string "start";"profile",string "default";"context",context]) in
+    let default_start=List.find(fun row->field "start" row<>`Null)(json_lines(default_account / "calls.jsonl")) in
+    equal `Null(field "config_dir" default_start);equal "default"(s "profile"(first default_chat));
+    ignore(cmd "release-default"(obj["op",string "release_runtime";"conversation",field "id" default_chat;"revision",revision(s "id" default_chat)]));
     check(Sys.file_exists(account / "skills/monty/SKILL.md")) "Claude skill missing";
     let rejected=cmd ~status:"rejected" "purge-owned-rpc"(obj["op",string "purge";"conversation",string cid;"confirm",`Bool true]) in
     equal 409(i "code" rejected);check(Monty.Home.contains_substring(s "message" rejected)"owned runtimes") "owned Claude purge accepted";
@@ -102,6 +109,13 @@ let () = with_temp_dir ~prefix:"monty-claude-" (fun home ->
     let out=until ~predicate:(fun value->Monty.Home.contains_substring(Base64.decode_exn(s "data" value))"RECEIVED hello")(fun ()->req("terminals/" ^ sid ^ "?offset=0")) in equal(`Bool true)(field "running" out);
     input "exit" cid sid "/exit\n";exited sid;
     ignore(cmd "purge-ended-terminal"(obj["op",string "purge";"conversation",string cid;"confirm",`Bool true]));http_error 410(fun ()->Client.history(c ())cid);
+    (* Without CLAUDE_CONFIG_DIR the terminal scopes to the default account, which runs on the plain login. *)
+    terminal_run ~environment:(List.filter(fun (key,_)->key<>"CLAUDE_CONFIG_DIR")service.env) ();
+    let default_file=default_account / "terminal.json" in
+    let default_terminal=until ~predicate:(fun row->row<>`Null)(fun ()->if Sys.file_exists default_file then Yojson.Safe.from_file default_file else `Null) in
+    equal `Null(field "config_dir" default_terminal);
+    let chat=find_chat(s "native" default_terminal) in equal "default"(s "profile"(first chat));
+    let cid=s "id" chat and sid=s "id"(first chat) in input "default-exit" cid sid "/exit\n";exited sid;
     let task_context=home / "context.md" in write task_context "Bounded native worker fixture.\n";
     let fake_bin=home / "fake-bin" in mkdir fake_bin;
     List.iter(fun name->write(fake_bin / name)"#!/bin/sh\nexit 0\n";Unix.chmod(fake_bin / name)0o700)["ghostty";"osascript"];
@@ -161,4 +175,4 @@ let () = with_temp_dir ~prefix:"monty-claude-" (fun home ->
     check(queries<>[]) "SDK fixture observed no queries";
     List.iter(fun row->equal ~label:"SDK query selected a different connected session"
       (field "session" row)(field "requested_session" row))queries;
-    print_endline "Claude API: scoped SDK, ordered workspaces, receipts, approvals/questions, detach, exact resume, restart and server-owned PTY passed"))
+    print_endline "Claude API: scoped SDK, default account login, ordered workspaces, receipts, approvals/questions, detach, exact resume, restart and server-owned PTY passed"))

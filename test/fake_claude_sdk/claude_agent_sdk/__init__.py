@@ -28,7 +28,8 @@ class AssistantMessage:
 class ClaudeAgentOptions:
     def __init__(self, **options):self.__dict__.update(options)
 
-def home():return Path(os.environ['CLAUDE_CONFIG_DIR'])
+# Like Claude, an unset CLAUDE_CONFIG_DIR selects the default ~/.claude account.
+def home():return Path(os.environ.get('CLAUDE_CONFIG_DIR') or Path(os.environ['HOME'])/'.claude')
 def log(value):
     with (home()/'calls.jsonl').open('a') as output:output.write(json.dumps(value)+'\n')
 def path(native):return home()/'sessions'/(native+'.json')
@@ -75,7 +76,7 @@ class ClaudeSDKClient:
         if self.options.resume and not p.exists():raise ValueError('absent session')
         p.parent.mkdir(exist_ok=True)
         if not p.exists():p.write_text(json.dumps({'cwd':self.options.cwd,'entries':[]}))
-        log({'start':self.native,'pid':os.getpid(),'ppid':os.getppid(),'cwd':self.options.cwd,'add_dirs':self.options.add_dirs,'instructions':self.options.system_prompt['append']})
+        log({'start':self.native,'pid':os.getpid(),'ppid':os.getppid(),'cwd':self.options.cwd,'config_dir':os.environ.get('CLAUDE_CONFIG_DIR'),'add_dirs':self.options.add_dirs,'instructions':self.options.system_prompt['append']})
     def append(self,role,content):
         p=path(self.native);raw=json.loads(p.read_text());entry={'type':role,'uuid':str(uuid.uuid4()),'message':{'role':role,'content':content}}
         raw['entries'].append(entry);p.write_text(json.dumps(raw));return entry

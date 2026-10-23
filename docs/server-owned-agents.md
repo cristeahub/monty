@@ -8,8 +8,13 @@ Configure the loopback service before using these entry points. All native runti
 roots remain the workspace permission boundary. Account directories are explicit:
 `pi_home`, `codex_home`, or `claude_home`. Terminal account selection uses
 `PI_CODING_AGENT_DIR`, `CODEX_HOME`, or `CLAUDE_CONFIG_DIR`; generated login-shell
-scripts preserve that selection. Native command overrides must match the trusted
-profile command. Commands may include fixed arguments.
+scripts preserve that selection. Claude keys its stored login by whether
+`CLAUDE_CONFIG_DIR` is set, even when it names the default `~/.claude`, so a
+profile whose `claude_home` is that default directory runs every owned Claude
+process with the variable unset and therefore on the plain `claude` login. That
+is the account a shell without an active Mantle profile selects; Mantle
+profiles keep their own directory and login. Native command overrides must
+match the trusted profile command. Commands may include fixed arguments.
 
 For example, a Claude profile is:
 

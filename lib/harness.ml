@@ -11,6 +11,39 @@ let to_string = function Pi -> "pi" | Codex -> "codex" | Claude -> "claude"
 
 let supports_fork = function Pi -> true | Codex | Claude -> false
 
+(* Each harness selects its native account directory with one environment
+   variable; profiles record the directory under the matching field. *)
+let account_variable = function
+  | Pi -> "PI_CODING_AGENT_DIR" | Codex -> "CODEX_HOME" | Claude -> "CLAUDE_CONFIG_DIR"
+
+let account_field = function Pi -> "pi_home" | Codex -> "codex_home" | Claude -> "claude_home"
+
+let default_account_directory ~getenv harness =
+  match getenv "HOME" with
+  | Some home when String.trim home <> "" ->
+      Some (Filename.concat home (match harness with Pi -> ".pi/agent" | Codex -> ".codex" | Claude -> ".claude"))
+  | _ -> None
+
+let same_directory a b =
+  let real path = try Unix.realpath path with Unix.Unix_error _ -> path in
+  a = b || real a = real b
+
+(* Claude Code keys its stored login by whether CLAUDE_CONFIG_DIR is set, even
+   when the variable names the default ~/.claude, so the plain `claude` login is
+   invisible to a process that exports it. The default Claude account, which is
+   what a shell without an active Mantle profile uses, is therefore selected by
+   leaving the variable unset. Codex and Pi read credentials from the directory
+   itself, so their variable is always exported. *)
+let uses_default_login ~getenv harness directory =
+  harness = Claude
+  && (match default_account_directory ~getenv harness with
+      | Some default -> same_directory default directory
+      | None -> false)
+
+let account_environment ~getenv harness directory =
+  if uses_default_login ~getenv harness directory then []
+  else [ account_variable harness ^ "=" ^ directory ]
+
 let check_review_command harness command =
   let forbidden = match harness with
     | Pi -> ["--extension";"-e";"--skill";"--prompt-template";"--tools";"-t";"--builtin-tools"]

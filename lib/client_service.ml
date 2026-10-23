@@ -229,7 +229,7 @@ let pi_start t cid sess request ~fresh =
     (fun error -> Pi_rpc.close rpc >>= fun () -> Lwt.fail error)
 let claude_env t p context =
   let bindings=match field "environment" context with `Assoc fields -> List.map (fun (k,v)->k ^ "=" ^ str v) fields|_->[] in
-  native_environment (profile_auth p @ ["CLAUDE_CONFIG_DIR=" ^ s "claude_home" p;"MONTY_HOME=" ^ t.home;
+  native_environment (profile_auth p @ Harness.account_environment ~getenv:Sys.getenv_opt Harness.Claude (s "claude_home" p) @ ["MONTY_HOME=" ^ t.home;
     "MONTY_HARNESS=claude";"MONTY_CLAUDE_COMMAND=" ^ Native_command.shell(s "command" p);"MONTY_CODEX_YOLO=false"] @ bindings)
 let claude_find t sess =
   ignore(session_profile t sess);
@@ -649,7 +649,7 @@ let terminal_start t cid sess request =
   List.iter (fun value -> let path=Unix.realpath(str value) in
     if path<>str value || not(List.exists (fun root -> within (str root) path) (xs "roots" p)) then fail 403 "terminal workspace is no longer allowed") (xs "workspaces" context);
   let harness=get(Harness.of_string(s "harness" sess) |> Result.map_error (fun (`Msg m)->m)) in
-  let directory=s (match harness with Harness.Pi->"pi_home"|Codex->"codex_home"|Claude->"claude_home") p in
+  let directory=s (Harness.account_field harness) p in
   get(Skill.ensure_at ~home:t.home ~directory);
   let native=s "native_id" sess in
   let fork=match field "fork" request with `Null->[]|`String selector when harness=Harness.Pi && field "fresh" request=`Bool true ->
@@ -693,12 +693,11 @@ let terminal_start t cid sess request =
   stop >>= fun () ->
   if t.stopping then fail 503 "Monty service is shutting down; no terminal started";
   let bindings=match field "environment" context with `Assoc fields->List.map (fun (k,v)->k ^ "=" ^ str v) fields|_->[] in
-  let key=match harness with Harness.Pi->"PI_CODING_AGENT_DIR"|Codex->"CODEX_HOME"|Claude->"CLAUDE_CONFIG_DIR" in
   (* A terminal opened from a Rex pane is displayed by Rex, which supports the Program
      Status Protocol: the owned terminal answers the harness's support probe itself and
      Pi is told to report without probing. Reports then show as Rex tab status. *)
   let rex_display=List.mem_assoc "REX_SESSION" (terminal_environment request) in
-  let env=native_environment (profile_auth p @ [key ^ "=" ^ directory;"MONTY_HOME=" ^ t.home;
+  let env=native_environment (profile_auth p @ Harness.account_environment ~getenv:Sys.getenv_opt harness directory @ ["MONTY_HOME=" ^ t.home;
     "MONTY_HARNESS=" ^ Harness.to_string harness;"MONTY_" ^ String.uppercase_ascii(Harness.to_string harness) ^ "_COMMAND=" ^ Native_command.shell(s "command" p);"MONTY_CODEX_YOLO=false";
     "TERM=" ^ (match field "term" request with `String value when String.length value<=128->value|_->"xterm-256color")] @ bindings
     @ List.map (fun (key,value) -> key ^ "=" ^ value) (terminal_environment request)
@@ -787,8 +786,7 @@ let headless_start t id request =
     branch_prefix=Option.value ~default:"monty" settings.branch_prefix;agent_profile=Option.value ~default:Agent_profile.default_id settings.agent_profile;
     fork=None;home=t.home;script_dir=Home.runtime_script_dir ~home:t.home ();monty_command=Unix.realpath Sys.executable_name} in
   let plan,_=get(Headless.preflight_worker ~explicit_resume:resume options worker) in
-  let key=match harness with Harness.Pi->"PI_CODING_AGENT_DIR"|Codex->"CODEX_HOME"|Claude->"CLAUDE_CONFIG_DIR" in
-  let directory=s (match harness with Harness.Pi->"pi_home"|Codex->"codex_home"|Claude->"claude_home") p in
+  let directory=s (Harness.account_field harness) p in
   let environment=match field "environment" request with `Assoc fields ->
     List.filter_map(fun (key,value)->
       if not(Worker_environment.allowed key) then fail 400 "invalid headless environment";
@@ -799,7 +797,7 @@ let headless_start t id request =
    else Lwt.return []) >>= fun review_config ->
   if t.stopping then fail 503 "Monty service is shutting down; no headless phase started";
   let nonce=random_id () in
-  let env=native_environment (profile_auth p @ [key ^ "=" ^ directory;"MONTY_HOME=" ^ t.home;"MONTY_SERVER_EPOCH=" ^ t.epoch;
+  let env=native_environment (profile_auth p @ Harness.account_environment ~getenv:Sys.getenv_opt harness directory @ ["MONTY_HOME=" ^ t.home;"MONTY_SERVER_EPOCH=" ^ t.epoch;
     "MONTY_SERVER_EXECUTION=" ^ id;"MONTY_SERVER_NONCE=" ^ nonce;"MONTY_CODEX_YOLO=" ^ string_of_bool codex_yolo] @ review_config @ environment) in
   let args=[Unix.realpath Sys.executable_name;"headless";(if resume then "resume" else "run");record.id;"--wait";
     "--home";t.home;"--harness";Harness.to_string harness;"--" ^ Harness.to_string harness ^ "-command";command;

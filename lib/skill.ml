@@ -6,15 +6,12 @@ let files =
       "<!-- Managed by Monty. -->\n" ^ Embedded_manual.text ]
 
 let agent_directory harness =
-  let variable, fallback = match harness with
-    | Harness.Codex -> "CODEX_HOME", ".codex"
-    | Harness.Claude -> "CLAUDE_CONFIG_DIR", ".claude"
-    | Harness.Pi -> "PI_CODING_AGENT_DIR", ".pi/agent" in
+  let variable = Harness.account_variable harness in
   match Sys.getenv_opt variable with
   | Some path when String.trim path <> "" -> Ok (Shell.abs_path path)
-  | _ -> (match Sys.getenv_opt "HOME" with
-      | Some home when String.trim home <> "" -> Ok (Filename.concat home fallback)
-      | _ -> Error ("set " ^ variable ^ " or HOME to install the Monty skill"))
+  | _ -> (match Harness.default_account_directory ~getenv:Sys.getenv_opt harness with
+      | Some directory -> Ok directory
+      | None -> Error ("set " ^ variable ^ " or HOME to install the Monty skill"))
 
 let ensure_at ~home ~directory =
   State_store.protect_result ~action:"install Monty skill" ~path:directory (fun () ->

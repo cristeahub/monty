@@ -58,8 +58,11 @@ let role home key =
 let profile profiles id = match List.find_opt (fun p->s "id" p=id) profiles with
   | Some p when List.mem (s "harness" p) ["codex";"pi";"claude"] -> p
   | _ -> fail 400 "select a configured Pi, Codex or Claude account"
-let environment make_env home p = make_env ["MONTY_HOME=" ^ home;"MONTY_CODEX_YOLO=false";
-  (match s "harness" p with "codex"->"CODEX_HOME=" ^ s "codex_home" p|"claude"->"CLAUDE_CONFIG_DIR=" ^ s "claude_home" p|_->"PI_CODING_AGENT_DIR=" ^ s "pi_home" p)]
+let harness p = match Harness.of_string (s "harness" p) with Ok harness -> harness | Error _ -> fail 400 "select a configured Pi, Codex or Claude account"
+let account p = let harness=harness p in harness,s (Harness.account_field harness) p
+let environment make_env home p =
+  let harness,directory=account p in
+  make_env (["MONTY_HOME=" ^ home;"MONTY_CODEX_YOLO=false"] @ Harness.account_environment ~getenv:Sys.getenv_opt harness directory)
 let options home p = ["--home";home;"--harness";s "harness" p;
   ("--" ^ s "harness" p ^ "-command");Shell.quote(s "command" p);
   "--wt-command";wt_command ();"--worktree";"always"]
@@ -78,9 +81,12 @@ let check_account p (record:Job_store.record) =
         (match value(State_store.lstat (safe path)) with
         | Some {Unix.st_kind=Unix.S_REG;_} -> Launcher.script_environment (Shell.read_file path)
         | _ -> None) in
-  let key,expected=match s "harness" p with "codex"->"CODEX_HOME",s "codex_home" p|"claude"->"CLAUDE_CONFIG_DIR",s "claude_home" p|_->"PI_CODING_AGENT_DIR",s "pi_home" p in
+  let harness,expected=account p in
+  let key=Harness.account_variable harness in
   match environment with
   | Some (_,bindings) when List.assoc_opt key bindings=Some(Some expected) -> ()
+  (* A worker launched without the variable runs on the default login. *)
+  | Some (_,bindings) when List.assoc_opt key bindings=Some None && Harness.uses_default_login ~getenv:Sys.getenv_opt harness expected -> ()
   | _ -> fail 409 "the selected account does not match this worker's saved launch environment; select its original account or inspect its CLI recovery"
 let prepare ~home ~profiles ~make_env ~id request =
   let key,before=current home request in

@@ -19,8 +19,12 @@ let () =
     let key=String.sub binding 0 boundary in
     if String.starts_with ~prefix:"REX_" key then
       Some(key,string(String.sub binding (boundary+1) (String.length binding-boundary-1))) else None) in
-  Yojson.Safe.to_file (Filename.concat(Sys.getenv "CLAUDE_CONFIG_DIR") "terminal.json")
+  (* Like Claude, an unset CLAUDE_CONFIG_DIR selects the default ~/.claude account. *)
+  let config_dir=Sys.getenv_opt "CLAUDE_CONFIG_DIR" in
+  let account=match config_dir with Some dir->dir|None->Filename.concat(Sys.getenv "HOME")".claude" in
+  Yojson.Safe.to_file (Filename.concat account "terminal.json")
     (obj["pid",`Int(Unix.getpid ());"ppid",`Int(Unix.getppid ());"native",string native;
+      "config_dir",(match config_dir with Some dir->string dir|None->`Null);
       "tty",`Bool(Unix.isatty Unix.stdin);"args",`List(List.map string args);"rex",`Assoc rex]);
   print_endline("NATIVE CLAUDE " ^ native);flush stdout;
   let rec read () = match input_line stdin with

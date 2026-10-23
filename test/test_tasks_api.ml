@@ -119,7 +119,41 @@ let suite () = with_temp_dir ~prefix:"monty-tasks-api-" (fun home ->
       (s "session_id" (Yojson.Safe.from_file (worker / "rex-terminal.json")));
     equal "open" (s "status" (req ("tasks/" ^ !key)));
     ignore (cli [ "settings"; "set"; "terminal"; "ghostty" ]);
-    print_endline "Task API: create, preflight, receipts, launch/resume, dirty completion, reopen/recovery and Rex selection passed"))
+    (* A Claude worker on the default ~/.claude account launches without
+       CLAUDE_CONFIG_DIR so the plain login applies; resume accepts that
+       recorded environment and still rejects a different account. *)
+    Unix.unlink (home / "fail-terminal");
+    let fake = home / "fake-bin" in
+    let actor = Filename.dirname Sys.executable_name / "fake_task_tools.exe" |> Unix.realpath in
+    write (fake / "claude") ("#!/bin/sh\nexec " ^ Monty.Shell.quote actor ^ " tool " ^ Monty.Shell.quote home ^ " claude \"$@\"\n");
+    Unix.chmod (fake / "claude") 0o700;
+    List.iter (fun name -> mkdir (home / name)) [ ".claude"; "other-claude" ];
+    let claude_profile id directory = obj [ "id", string id; "harness", string "claude"; "command", string (fake / "claude");
+      "claude_home", string (home / directory); "roots", `List [ string repo ] ] in
+    let config = Yojson.Safe.from_file service.config in
+    Service.stop service;
+    write service.config (Yojson.Safe.to_string (put "profiles"
+      (`List (xs "profiles" config @ [ claude_profile "claude-default" ".claude"; claude_profile "claude-other" "other-claude" ])) config));
+    service.env <- merge_env service.env [ "HOME", home ]; Service.start service; client := Service.client service;
+    let launch_script key =
+      let worker = s "directory" (field "worker" (req ("tasks/" ^ key))) in
+      let name = "monty-" ^ Filename.basename worker ^ "-launch.sh" in
+      read (List.find (fun path -> Filename.basename path = name) (files (home / ".monty"))) in
+    let claude_task profile =
+      key := s "key" (cmd ("create-" ^ profile) (obj [ "op", string "task_create"; "project", string "repo"; "title", string ("Claude " ^ profile) ]));
+      let preview = cmd (profile ^ "-preview") (request "task_preflight"
+        [ "action", string "launch"; "profile", string profile; "context", string "Claude account context" ]) in
+      equal (`Bool true) (field "ready" preview);
+      let applied = apply (profile ^ "-launch") (profile ^ "-preview") in equal 0 (i "exit_code" (field "process" applied));
+      launch_script !key in
+    let script = claude_task "claude-default" in
+    require script "unset CLAUDE_CONFIG_DIR"; check (not (contains script "export CLAUDE_CONFIG_DIR")) "default Claude account exported CLAUDE_CONFIG_DIR";
+    ignore (cmd ~status:"rejected" "claude-wrong-account" (request "task_preflight" [ "action", string "resume"; "profile", string "claude-other" ]));
+    equal (`Bool true) (field "ready" (cmd "claude-default-resume" (request "task_preflight" [ "action", string "resume"; "profile", string "claude-default" ])));
+    let script = claude_task "claude-other" in
+    require script ("export CLAUDE_CONFIG_DIR=" ^ Monty.Shell.quote (home / "other-claude"));
+    ignore (cmd ~status:"rejected" "claude-default-wrong-account" (request "task_preflight" [ "action", string "resume"; "profile", string "claude-default" ]));
+    print_endline "Task API: create, preflight, receipts, launch/resume, dirty completion, reopen/recovery, Rex selection and default Claude account passed"))
 
 let () = match Array.to_list Sys.argv with
   | _ :: "--fixture-rex" :: args -> Fake_rex.run args
