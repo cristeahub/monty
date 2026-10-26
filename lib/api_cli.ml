@@ -98,17 +98,18 @@ let raw ~home meth path body =
       ([ ("authorization", "Bearer " ^ token) ] @ match body with Some _ -> [ ("content-type", "application/json") ] | None -> [])
   in
   let body = Cohttp_lwt.Body.of_string (match body with Some json -> Yojson.Safe.to_string json | None -> "") in
-  Lwt_unix.with_timeout 35. (fun () ->
+  Lwt_unix.with_timeout (Client_http.timeout ()) (fun () ->
       Client_http.call ~headers ~body meth (Uri.of_string (base ^ path)) >>= fun (response, body) ->
       Cohttp_lwt.Body.to_string body >|= fun text ->
       (Cohttp.Code.code_of_status (Cohttp.Response.status response), Cohttp.Header.get (Cohttp.Response.headers response) "content-type", text))
 
 let settled status = not (List.mem status [ "accepted"; "running" ])
 
-let wait_receipt ~home ~timeout id =
+(* Receipt reads outlast a slow or sleeping service, as long as it is the one that took the command. *)
+let wait_receipt ~home ~epoch ~timeout id =
   let deadline = Unix.gettimeofday () +. timeout in
   let rec poll () =
-    Client_http.request ~home `GET ("/v1/commands/" ^ id) `Null >>= fun receipt ->
+    Client_terminal.retrying ~home ~epoch (fun () -> Client_http.request ~home `GET ("/v1/commands/" ^ id) `Null) >>= fun receipt ->
     if settled (s "status" receipt) || Unix.gettimeofday () >= deadline then Lwt.return receipt
     else Lwt_unix.sleep 0.2 >>= poll
   in
@@ -158,12 +159,13 @@ let call ~home ~name ~args ~request_id ~wait ~timeout =
             | _ -> ("op", `String op) :: List.remove_assoc "op" fields)
         | None -> fields
       in
+      let epoch = Client_terminal.saved_epoch ~home in
       let code, _, text = Lwt_main.run (raw ~home `POST path (Some (`Assoc fields))) in
       if code >= 400 then fail code text;
       let receipt = Yojson.Safe.from_string text in
       let receipt =
         if is_command && wait && not (settled (s "status" receipt)) then
-          Lwt_main.run (wait_receipt ~home ~timeout (Filename.basename path))
+          Lwt_main.run (wait_receipt ~home ~epoch ~timeout (Filename.basename path))
         else receipt
       in
       print_json receipt;

@@ -157,11 +157,32 @@ let ensure_worker_workspaces_unlocked ~home ~(record : Job_store.record)
   let* workspaces = ensure record.workspaces targets in
   Ok (List.filter selected workspaces)
 
-let ensure_task_workspaces ~home ~id ?repo ~wt_command () =
+(* While a worker's live service terminal holds its lock, a client reattaching to that
+   runtime reads the worktrees it already runs in; anything still to materialize waits
+   for the lock. [live] proves the runtime from the service. *)
+let live_workspaces ~live ~(record : Job_store.record) select =
+  let selected = List.filter select record.workspaces in
+  let materialized (workspace : Job_store.workspace_state) =
+    match workspace.worktree with
+    | Some path -> Sys.file_exists path && Sys.is_directory path
+    | None -> false
+  in
+  if record.transition = None && selected <> [] && List.for_all materialized selected && live record
+  then Some selected
+  else None
+
+let ensure_task_workspaces ~live ~home ~id ?repo ~wt_command () =
   let ( let* ) = Result.bind in
   let task_id = Task_storage.normalize_local_id id in
   let* _, initial_record = open_task_worker ~home task_id in
-  Worker_lock.with_lock ~home ~record:initial_record (fun () ->
+  let reattach () =
+    live_workspaces ~live ~record:initial_record (fun workspace ->
+        match repo with
+        | None -> true
+        | Some repo -> String.equal workspace.Job_store.repo (Shell.normalize repo))
+    |> Option.map Result.ok
+  in
+  Worker_lock.with_lock ~runtime:reattach ~home ~record:initial_record (fun () ->
       let* record =
         State_store.with_lock ~home (fun () ->
             let* _, record = open_task_worker ~home task_id in
@@ -176,11 +197,19 @@ let ensure_task_workspaces ~home ~id ?repo ~wt_command () =
       in
       ensure_worker_workspaces_unlocked ~home ~record ?repo ~wt_command ())
 
-let ensure_worker_workspace ~(state : State_path.t) ~repo ~branch ~wt_command () =
+let ensure_worker_workspace ~live ~(state : State_path.t) ~repo ~branch ~wt_command () =
   let ( let* ) = Result.bind in
   let home = state.home in
   let* initial = Job_store.parse_job_file ~home state.job_file in
-  Worker_lock.with_lock ~home ~record:initial (fun () ->
+  let reattach () =
+    match
+      live_workspaces ~live ~record:initial (fun workspace ->
+          workspace.Job_store.repo = repo && workspace.branch = Some branch)
+    with
+    | Some [ { worktree = Some path; _ } ] -> Some (Ok path)
+    | _ -> None
+  in
+  Worker_lock.with_lock ~runtime:reattach ~home ~record:initial (fun () ->
       let* record =
         State_store.with_lock ~home (fun () ->
             let* current = Job_store.parse_job_file ~home state.job_file in

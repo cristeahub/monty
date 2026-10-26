@@ -2,6 +2,9 @@ open Conversation_store
 let exit f = try f ();0 with
   | Failure(_,m) | Sys_error m | Invalid_argument m -> Fmt.epr "monty: %s\n" m;1
   | Unix.Unix_error(e,f,_) -> Fmt.epr "monty: %s: %s\n" f (Unix.error_message e);1
+  | Lwt_unix.Timeout -> Fmt.epr "monty: the Monty service did not answer in time\n";1
+  (* A lost service connection is a Monty error, never an internal one. *)
+  | e -> Fmt.epr "monty: %s\n" (Printexc.to_string e);1
 let command ~home_arg =
   let open Cmdliner in
   let config=Arg.(required & opt (some string) None & info ["config"] ~docv:"FILE" ~doc:"Trusted JSON profiles and workspace roots.") in

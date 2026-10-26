@@ -600,19 +600,19 @@ let resume archived fresh worker options =
       if archived then Resume.find_reactivatable ~home:options.Launcher.home worker
       else Resume.find_resumable ~home:options.Launcher.home worker
     in
+    let resume_mode (record : Job_store.record) =
+      match options.harness with
+      | Harness.Pi -> Native_session.resume_mode ~harness:Harness.Pi ~fresh ~worker_dir:record.worker_dir
+      | Codex -> Codex_session.resume_mode ~fresh ~worker_dir:record.worker_dir
+      | Claude -> Native_session.resume_mode ~harness:Harness.Claude ~fresh ~worker_dir:record.worker_dir
+    in
     let execute () =
       let* record = find_record () in
       let* profile =
         Agent_profile.load_pinned ~home:options.home
           ~worker_dir:record.Job_store.worker_dir record.job.Job.agent_profile
       in
-      let* codex_mode =
-        match options.harness with
-        | Harness.Pi -> Native_session.resume_mode ~harness:Harness.Pi ~fresh ~worker_dir:record.worker_dir
-        | Codex ->
-            Codex_session.resume_mode ~fresh ~worker_dir:record.worker_dir
-        | Claude -> Native_session.resume_mode ~harness:Harness.Claude ~fresh ~worker_dir:record.worker_dir
-      in
+      let* codex_mode = resume_mode record in
       let* job =
         if archived then
           match options.backend with
@@ -631,7 +631,17 @@ let resume archived fresh worker options =
       | Terminal.Dry_run -> execute ()
       | Terminal.Ghostty | Terminal.Rex ->
           let* record = find_record () in
-          Worker_lock.with_lock ~home:options.home ~record execute
+          (* The worker's live service terminal holds its lock. Resuming that exact
+             session only attaches a new client, under the runtime's own fence. *)
+          let reattach () =
+            match resume_mode record with
+            | Ok (Codex_session.Exact native)
+              when (not archived)
+                   && Client_terminal.live_worker_terminal ~native ~home:options.home record ->
+                Some (execute ())
+            | _ -> None
+          in
+          Worker_lock.with_lock ~runtime:reattach ~home:options.home ~record execute
     in
     dispatch ()
   in
@@ -653,7 +663,8 @@ let resume_term =
   Cmdliner.Term.(const resume $ archived $ fresh $ worker $ options_term)
  in
 let complete worker force home wt_command =
-  Done.complete ?worker ~home ~wt_command ~force () |> exit_code
+  Done.complete ~live:(Client_terminal.live_worker_terminal ~home) ?worker ~home ~wt_command ~force ()
+  |> exit_code
  in
 let complete_term =
   let worker =
@@ -721,7 +732,9 @@ let ensure_worktree repo branch wt_command =
           State_path.of_worker_identity ~worker_dir ~id ~job_file
             ?run_dir:(Sys.getenv_opt "MONTY_RUN_DIR") ()
         in
-        Project_overview.ensure_worker_workspace ~state ~repo ~branch ~wt_command ()
+        Project_overview.ensure_worker_workspace
+          ~live:(Client_terminal.live_worker_terminal ~home:state.home)
+          ~state ~repo ~branch ~wt_command ()
     | _ -> Error "worker workspace materialization requires the complete MONTY_WORKER_DIR, MONTY_JOB_ID and MONTY_JOB_FILE identity"
   in
   match result with
@@ -930,7 +943,8 @@ let task_workspace_add_term =
  in
 let task_workspace_ensure id repo home wt_command =
   match
-    Project_overview.ensure_task_workspaces ~home ~id ?repo ~wt_command ()
+    Project_overview.ensure_task_workspaces
+      ~live:(Client_terminal.live_worker_terminal ~home) ~home ~id ?repo ~wt_command ()
   with
   | Error msg -> exit_code (Error msg)
   | Ok workspaces ->

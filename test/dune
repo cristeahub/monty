@@ -175,3 +175,10 @@
  (name test_headless_boundaries)
  (modules test_headless_boundaries)
  (libraries monty unix yojson))
+
+(test
+ (name test_client_reconnect)
+ (modules test_client_reconnect)
+ (libraries monty_test_support monty unix yojson lwt.unix)
+ (deps ../bin/main.exe (source_tree ../agent-profiles) fake_claude_cli.exe)
+ (action (run %{test} %{dep:../bin/main.exe} %{dep:fake_claude_cli.exe})))

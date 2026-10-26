@@ -244,7 +244,14 @@ let complete_record ~home ~wt_command ~force initial =
   else Fmt.pr "Deleted workspaces: <skipped, worktree mode never>\n";
   Ok ()
 
-let complete ?worker ~home ~wt_command ~force () =
+(* Whether this process runs in the worker's own session, which carries its identity. *)
+let inside (record : Job_store.record) =
+  let normalized = Option.map Shell.normalize in
+  env_job_id () = Some record.id
+  && env_worker_dir () = Some (Shell.normalize record.worker_dir)
+  && normalized (Sys.getenv_opt "MONTY_JOB_FILE") = Some (Shell.normalize record.path)
+
+let complete ?(live = fun _ -> false) ?worker ~home ~wt_command ~force () =
   let home = Shell.normalize (Shell.abs_path home) in
   let ( let* ) = Result.bind in
   let* initial = resolve ~home worker in
@@ -252,4 +259,17 @@ let complete ?worker ~home ~wt_command ~force () =
     let* current = resolve ~home worker in
     complete_record ~home ~wt_command ~force current
   in
-  Worker_lock.with_lock ~home ~record:initial operation
+  (* [live] asks the service whether the worker's native terminal is still running; that
+     runtime holds the worker lock. Completing from inside that session runs under its
+     lock; from anywhere else the session has to finish first. *)
+  let runtime () =
+    if not (live initial) then None
+    else if inside initial then Some (operation ())
+    else
+      Some
+        (Error
+           (Printf.sprintf
+              "worker %s still runs a native terminal in the Monty service; run monty done inside that session, or exit it first"
+              initial.id))
+  in
+  Worker_lock.with_lock ~runtime ~home ~record:initial operation

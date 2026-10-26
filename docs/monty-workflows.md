@@ -775,6 +775,32 @@ Native runtime IDs are not written to `job.json`. Interactive workers use
 harness-specific session sidecars. Launch scripts must match the current
 Monty-generated template before resume can rewrite them.
 
+A terminal client outlasts a slow, sleeping or briefly stopped service. When a
+request goes unanswered for 35 seconds, the client shows `monty: reconnecting to
+the Monty service...` on the bottom row and resends the same command IDs and
+output offset, so input is neither lost nor delivered twice and output is neither
+repeated nor skipped; once the service answers, a size change makes the native
+redraw. It keeps retrying while health checks show the same service epoch. It
+stops when the saved metadata or a health check shows another epoch (restarted
+or replaced), when nothing answers and the service lock is free (stopped), or
+after ten request timeouts' worth of unanswered checks a second apart while the
+silent service still holds its lock. It then restores the terminal, reports a Rex
+`error` status for workers and exits with code 69, naming the reattach command:
+`monty resume WORKER --harness HARNESS --home HOME` for a worker, or `monty
+continue SESSION --harness HARNESS --home HOME` otherwise. The native process may still be running
+in the service, and reattaching attaches to it rather than starting another.
+Headless `--wait` and `monty api call` receipt waits retry the same way.
+
+A worker's live runtime holds its worker lock. `monty resume` and the launch
+script's workspace step proceed without that lock only after the service confirms
+a live owned terminal for the exact worker identity (and, for resume, its recorded
+session); the workspace step then only reads already materialized worktrees.
+`monty done` run inside that worker session (its own worker identity in the
+environment) completes the worker under the runtime's lock and leaves the native
+session running; from anywhere else it asks to run it there or to exit the terminal
+first. `resume --fresh`, headless runs and other lifecycle operations still report
+the worker as busy.
+
 For ad hoc use, invoke `monty terminal --home ...` explicitly. There is no vendor
 binary replacement or shell alias. A stopped service starts from its saved
 configuration; missing setup or startup failure produces actionable guidance.

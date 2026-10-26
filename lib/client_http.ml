@@ -21,11 +21,15 @@ let endpoint ~home =
   if Uri.scheme uri<>Some "http" || Uri.host uri<>Some "127.0.0.1" then fail 500 "unsafe service address";
   base,String.trim (Shell.read_file (file home ["client-service-token"]))
 
+(* How long one request waits for an answer; tests shorten it with MONTY_TEST_CLIENT_TIMEOUT. *)
+let timeout () = match Option.bind (Sys.getenv_opt "MONTY_TEST_CLIENT_TIMEOUT") float_of_string_opt with
+  | Some seconds when seconds>0. -> seconds | _ -> 35.
+
 let request ~home meth path body =
   let base,token=endpoint ~home in
   let headers=Cohttp.Header.of_list ["authorization","Bearer " ^ token;"content-type","application/json"] in
   let body=Cohttp_lwt.Body.of_string (Yojson.Safe.to_string body) in
-  Lwt_unix.with_timeout 35. (fun () ->
+  Lwt_unix.with_timeout (timeout ()) (fun () ->
     call ~headers ~body meth (Uri.of_string (base ^ path)) >>= fun (response,body) ->
     Cohttp_lwt.Body.to_string body >|= fun text ->
     let json=Yojson.Safe.from_string text in
