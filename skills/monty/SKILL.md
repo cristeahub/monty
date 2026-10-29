@@ -10,6 +10,10 @@ metadata:
 
 Run `monty guide` and follow the topic it names for your task, then
 `monty guide TOPIC` and `monty COMMAND --help=plain` for its current syntax.
+When the user says "swarm" or wants many agents on one goal, that is the
+`swarm` agent profile: read `monty guide swarm` and launch the task with
+`"agent_profile": "swarm"`; inside a swarm driver session use the
+`monty swarm` commands, never ad-hoc worktrees or subagents.
 The guide comes from the installed `monty`, so it describes the commands that
 version has. `monty skill show` prints the whole guide at once.
 

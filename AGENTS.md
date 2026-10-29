@@ -65,7 +65,13 @@ Keep planning artifacts in the run directory. Do not duplicate profile role
 instructions or hard-code headless phase counts in context files.
 
 Use the configured branch prefix and the default `simplified` agent profile
-unless the user selects another. Preserve persisted worker branches and exact
+unless the user selects another. When the user says "swarm", asks for many
+agents on one goal, or hands over a large goal that splits into independent
+areas with disjoint files (roughly four or more worker-sized pieces), that is
+the `swarm` profile: propose it with the areas and the landing check before
+launching, and launch the task with `"agent_profile": "swarm"` and a `swarm`
+block once agreed. Read `monty guide swarm` first. A small or sequential task
+stays on the default profile. Preserve persisted worker branches and exact
 worker identity. Workspaces are ordered; the first is only the launch directory.
 Use Monty's existing repo-scoped `wt` flow; never create worktrees directly.
 Treat worktrees as ephemeral and preserve discoveries in durable worker memory.

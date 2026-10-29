@@ -54,6 +54,7 @@ Each context file should be specific enough that a fresh worker agent can start 
 Include the task summary, repo path, issue or PR links, relevant constraints, acceptance criteria, and any important planning notes.
 Do not duplicate interactive review wording or hard-code a headless phase count in task context; the selected agent profile supplies those role instructions.
 Use the default `simplified` profile unless the user selects another profile for the invocation or manifest job.
+When the user says "swarm", asks for many agents on one goal, or the task is a large goal that splits into independent areas with disjoint files, propose the `swarm` profile (see the Swarm topic): name the areas and the landing check, then launch with `"agent_profile": "swarm"` and a `swarm` block in the manifest job. Keep small or strictly sequential tasks on the default profile.
 Workers must not post review comments, push, or open PRs unless explicitly approved.
 
 Create `.monty/runs/<run-id>/jobs.json` with this shape:
@@ -343,6 +344,12 @@ Publication leaves the task open and its worktrees intact. Headless children
 return their handoff to the supervisor instead; the supervisor publishes.
 
 ## Swarm
+
+Choose this profile when the user says "swarm" or wants many agents on one
+goal, or when a goal splits into independent areas with disjoint files that
+would each be a worker-sized task of its own; suggest it in those cases even if
+the user did not ask, and stay on the default profile for small or strictly
+sequential work.
 
 The `swarm` agent profile runs one hard, overarching goal as one task: an
 interactive driver (the coordinating butler, launched like any other
