@@ -127,6 +127,66 @@ let duplicate_identity_checks records =
   check "worker id" ids @ check "repo+branch" repo_branches
   @ check "task link" task_links
 
+(* Swarm children need a live driver, and a ledger entry that says running
+   needs a supervisor holding the child's lock. *)
+let swarm_checks ~home records =
+  let active = List.filter (fun record -> not (Job_store.is_archived record)) records in
+  let find_active id =
+    List.find_opt (fun record -> String.equal record.Job_store.id id) active
+  in
+  let orphans =
+    active
+    |> List.filter_map (fun (record : Job_store.record) ->
+           match record.job.Job.swarm_parent with
+           | Some parent when find_active parent = None ->
+               Some
+                 {
+                   name = "swarm child " ^ record.id;
+                   level = Warn;
+                   message = Printf.sprintf "driver %s is missing or archived at %s" parent record.path;
+                   recovery =
+                     [ Printf.sprintf "monty done %s --force --home %s" (Shell.quote record.id)
+                         (Shell.quote home) ];
+                 }
+           | _ -> None)
+  in
+  let stale =
+    active
+    |> List.concat_map (fun (driver : Job_store.record) ->
+           match Swarm_ledger.load_opt ~worker_dir:driver.worker_dir with
+           | Error message ->
+               [ { name = "swarm ledger " ^ driver.id; level = Fail; message;
+                   recovery = [ "Repair or remove the reported swarm ledger, then rerun monty doctor." ] } ]
+           | Ok None -> []
+           | Ok (Some ledger) ->
+               Swarm_ledger.running ledger
+               |> List.filter_map (fun (child : Swarm_ledger.child) ->
+                      let idle =
+                        match find_active child.id with
+                        | None -> true
+                        | Some record -> (
+                            match Worker_lock.is_busy ~home ~record with
+                            | Ok busy -> not busy
+                            | Error _ -> false)
+                      in
+                      if not idle then None
+                      else
+                        Some
+                          {
+                            name = "swarm child " ^ child.id;
+                            level = Warn;
+                            message =
+                              Printf.sprintf
+                                "ledger of driver %s records %s as running but no supervisor holds its worker lock"
+                                driver.id child.name;
+                            recovery =
+                              [ "From the driver session: monty swarm status, then monty swarm resume "
+                                ^ Shell.quote child.name ^ " --brief FILE or monty swarm retire "
+                                ^ Shell.quote child.name ^ " --force" ];
+                          }))
+  in
+  orphans @ stale
+
 let state_checks ?(backend = Terminal.Rex) ~home ~wt_command () =
   match Job_store.scan ~home with
   | Error message ->
@@ -158,9 +218,10 @@ let state_checks ?(backend = Terminal.Rex) ~home ~wt_command () =
                | None -> launch_state_check ~home record)
       in
       let identity_checks = duplicate_identity_checks scan.records in
-      if warning_checks = [] && record_checks = [] && identity_checks = [] then
+      let swarm_checks = swarm_checks ~home scan.records in
+      if warning_checks = [] && record_checks = [] && identity_checks = [] && swarm_checks = [] then
         [ { name = "worker state"; level = Pass; message = "records are readable and no recovery is pending"; recovery = [] } ]
-      else warning_checks @ identity_checks @ record_checks
+      else warning_checks @ identity_checks @ record_checks @ swarm_checks
 
 let checks ?(find_command = Process.command_exists_with_arguments)
     ~home ~harness ~harness_command ~wt_command

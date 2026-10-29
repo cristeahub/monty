@@ -93,7 +93,7 @@ let suite installer source_version = with_temp_dir ~prefix:"monty-install-" (fun
       Array.iter (fun name ->
         if Sys.is_directory (source/name) then compare_tree (source/name) (destination/name)
         else check (read (source/name)=read (destination/name)) ("profile differs: " ^ name)) (Sys.readdir source) in
-    compare_tree (repo/"agent-profiles"/profile) (installed/"agent-profiles"/profile)) ["simplified";"reviewed";"solo"];
+    compare_tree (repo/"agent-profiles"/profile) (installed/"agent-profiles"/profile)) ["simplified";"reviewed";"solo";"swarm"];
   let profile = run ~env:(merge_env env ["MONTY_HOME",installed]) bin ["agent-profiles";"show"] in
   check (profile.code=0 && contains profile.stdout "\"id\": \"simplified\"" && contains profile.stdout "\"fix_role\": \"simplifier\"") "installed default profile lost simplifier";
   release "binary one";

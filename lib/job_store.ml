@@ -280,6 +280,24 @@ let parse_job_file ?home path =
           State_path.safe_component ~label:"persisted agent profile" value
           |> Result.map Option.some
     in
+    let* swarm = Job.swarm_config_of_json json in
+    let* swarm_parent = optional_string json "swarm_parent" in
+    let* swarm_parent =
+      match swarm_parent with
+      | None -> Ok None
+      | Some value ->
+          State_path.safe_component ~label:"persisted swarm parent" value
+          |> Result.map Option.some
+    in
+    let* swarm_name = optional_string json "swarm_name" in
+    let* swarm_name =
+      match (swarm_parent, swarm_name) with
+      | None, None -> Ok None
+      | Some _, Some value ->
+          State_path.safe_component ~label:"persisted swarm name" value
+          |> Result.map Option.some
+      | _ -> Error "job.json swarm_parent and swarm_name must be present together"
+    in
     let* persisted_status = optional_string json "status" in
     let* persisted_run_dir = optional_string json "run_dir" in
     let* worktree_mode = optional_string json "worktree_mode" in
@@ -415,7 +433,8 @@ let parse_job_file ?home path =
     in
     let job =
       Job.make ~id ?branch ~workspaces:job_workspaces ~worker_dir ?prompt
-        ?task_key ?agent_profile ~title ~repo ~context ()
+        ?task_key ?agent_profile ?swarm ?swarm_parent ?swarm_name ~title ~repo
+        ~context ()
     in
     Ok
       {

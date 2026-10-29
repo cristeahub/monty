@@ -16,6 +16,16 @@ type review = {
   instructions : string;
 }
 
+(* A swarm profile pins one interactive driver that spawns headless children.
+   The driver mandate is the profile's interactive instructions; the worker
+   brief is appended to every child's MONTY.md. *)
+type swarm = {
+  worker_brief : string;
+  worker_profile : string;
+  max_workers : int;
+  max_spawns : int;
+}
+
 type t = {
   id : string;
   description : string;
@@ -24,7 +34,11 @@ type t = {
   reviews : review list;
   fix : string option;
   fix_role : fix_role;
+  swarm : swarm option;
 }
+
+let default_max_workers = 6
+let default_max_spawns = 40
 
 let ( let* ) = Result.bind
 
@@ -87,6 +101,28 @@ let parse_reviews ~instructions json =
       else Ok reviews
   | _ -> Error "agent profile headless field \"reviews\" must be an array"
 
+let positive_int_field json name default =
+  match Util.member name json with
+  | `Null -> Ok default
+  | `Int value when value > 0 -> Ok value
+  | _ -> Error (Printf.sprintf "agent profile swarm field %S must be a positive integer" name)
+
+let parse_swarm ~instructions json =
+  match Util.member "swarm" json with
+  | `Null -> Ok None
+  | `Assoc _ as swarm ->
+      let* brief_name = string_field swarm "worker_brief" in
+      let* worker_brief = instructions brief_name in
+      let* worker_profile = optional_string_field swarm "worker_profile" in
+      let* worker_profile =
+        safe_id "agent profile swarm worker_profile"
+          (Option.value ~default:"solo" worker_profile)
+      in
+      let* max_workers = positive_int_field swarm "max_workers" default_max_workers in
+      let* max_spawns = positive_int_field swarm "max_spawns" default_max_spawns in
+      Ok (Some { worker_brief; worker_profile; max_workers; max_spawns })
+  | _ -> Error "agent profile field \"swarm\" must be an object when present"
+
 let parse ?(path = "agent profile") ~expected_schema ~instructions json =
   State_store.decode_json ~path (fun () ->
     let* parsed_schema = string_field json "schema" in
@@ -98,7 +134,13 @@ let parse ?(path = "agent profile") ~expected_schema ~instructions json =
       let* description = string_field json "description" in
       let* interactive_name = string_field json "interactive" in
       let* interactive = instructions interactive_name in
+      let* swarm = parse_swarm ~instructions json in
       let headless = Util.member "headless" json in
+      (* A swarm driver never runs a headless chain of its own. *)
+      if headless = `Null && swarm <> None then
+        Ok { id; description; interactive; implementation = ""; reviews = [];
+             fix = None; fix_role = Fixer; swarm }
+      else
       let* implementation_name = string_field headless "implementation" in
       let* implementation = instructions implementation_name in
       let* reviews = parse_reviews ~instructions headless in
@@ -115,7 +157,7 @@ let parse ?(path = "agent profile") ~expected_schema ~instructions json =
         | `String "simplifier" -> Error "agent profile simplifier requires a fix stage"
         | _ -> Error "agent profile fix_role must be fixer or simplifier"
       in
-      Ok { id; description; interactive; implementation; reviews; fix; fix_role })
+      Ok { id; description; interactive; implementation; reviews; fix; fix_role; swarm })
 
 let load_directory path =
   let* state = State_store.lstat path in
@@ -212,18 +254,30 @@ let review_json (review : review) =
       ("title", `String review.title);
       ("instructions", `String review.instructions) ]
 
+let swarm_json swarm =
+  `Assoc
+    [ ("worker_brief", `String swarm.worker_brief);
+      ("worker_profile", `String swarm.worker_profile);
+      ("max_workers", `Int swarm.max_workers);
+      ("max_spawns", `Int swarm.max_spawns) ]
+
 let to_snapshot_json profile =
   `Assoc
-    [ ("schema", `String snapshot_schema);
-      ("id", `String profile.id);
-      ("description", `String profile.description);
-      ("interactive", `String profile.interactive);
-      ( "headless",
-        `Assoc
-          [ ("implementation", `String profile.implementation);
-            ("reviews", `List (List.map review_json profile.reviews));
-            ("fix_role", `String (fix_role_name profile.fix_role));
-            ("fix", Option.fold ~none:`Null ~some:(fun value -> `String value) profile.fix) ] ) ]
+    ([ ("schema", `String snapshot_schema);
+       ("id", `String profile.id);
+       ("description", `String profile.description);
+       ("interactive", `String profile.interactive);
+       ( "headless",
+         if profile.implementation = "" then `Null
+         else
+           `Assoc
+             [ ("implementation", `String profile.implementation);
+               ("reviews", `List (List.map review_json profile.reviews));
+               ("fix_role", `String (fix_role_name profile.fix_role));
+               ("fix", Option.fold ~none:`Null ~some:(fun value -> `String value) profile.fix) ] ) ]
+    @ match profile.swarm with
+      | None -> []
+      | Some swarm -> [ ("swarm", swarm_json swarm) ])
 
 let write_snapshot ~worker_dir profile =
   State_store.write_json_atomic ~path:(snapshot_path worker_dir)
@@ -273,6 +327,11 @@ let fix_stage profile =
   match profile.fix_role with Fixer -> "fix" | Simplifier -> "simplification"
 
 let stage_summary profile =
+  match profile.swarm with
+  | Some swarm ->
+      Printf.sprintf "interactive driver -> up to %d %s children" swarm.max_workers
+        swarm.worker_profile
+  | None ->
   String.concat " -> "
     ([ "implementation" ]
     @ (if profile.reviews = [] then []

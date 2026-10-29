@@ -2,6 +2,9 @@ let ( let* ) = Result.bind
 
 let try_lock = Process.try_worker_lock
 
+let busy_message (record : Job_store.record) =
+  Printf.sprintf "worker %s is busy with a headless run or lifecycle operation" record.id
+
 let with_lock ~home ~(record : Job_store.record) operation =
   let directory = Filename.concat record.run_dir ".worker-locks" in
   let path = Filename.concat directory (record.id ^ ".lock") in
@@ -18,7 +21,7 @@ let with_lock ~home ~(record : Job_store.record) operation =
       let* () =
         try try_lock fd; Ok () with
         | Unix.Unix_error ((Unix.EAGAIN | Unix.EACCES), _, _) ->
-            Error (Printf.sprintf "worker %s is busy with a headless run or lifecycle operation" record.id)
+            Error (busy_message record)
         | Unix.Unix_error (err, fn, arg) ->
             Error (State_store.error_of_unix "lock worker" path err fn arg)
       in
@@ -27,3 +30,12 @@ let with_lock ~home ~(record : Job_store.record) operation =
          descriptor on exit; an explicit unlock would also unlock live children. *)
       Unix.clear_close_on_exec fd;
       operation ())
+
+(* Whether a supervisor or lifecycle command currently holds the lock. The
+   probe takes and immediately releases the lock, so call it before, never
+   inside, the one-home state lock. *)
+let is_busy ~home ~(record : Job_store.record) =
+  match with_lock ~home ~record (fun () -> Ok ()) with
+  | Ok () -> Ok false
+  | Error message when String.equal message (busy_message record) -> Ok true
+  | Error _ as error -> error

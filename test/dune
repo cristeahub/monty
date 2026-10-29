@@ -175,3 +175,10 @@
  (name test_headless_boundaries)
  (modules test_headless_boundaries)
  (libraries monty unix yojson))
+
+(test
+ (name test_swarm_e2e)
+ (modules test_swarm_e2e)
+ (libraries monty unix yojson)
+ (deps ../bin/main.exe (source_tree ../agent-profiles))
+ (action (run %{test})))

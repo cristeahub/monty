@@ -209,8 +209,8 @@ monitoring. Let the process finish independently and recover its result from the
 durable handoff inbox at the next safe message boundary.
 
 Each chain gets fresh minimal context and follows its pinned agent profile: one implementer, zero or more mutually isolated reviewers in parallel, then an optional final writer (simplifier or fixer).
-The default `simplified` profile runs one implementer followed by one separate editing simplifier, sequentially in the same workspaces. The explicit `reviewed` profile runs one implementer, two reviewers, and one fixer; `solo` runs only the implementer with self-validation. Legacy workers without profile metadata retain `reviewed` behavior.
-Monty captures reviewer reports outside the worktree. Pi reviewers use read-only file tools without bash; Codex reviewers use a read-only sandbox with hooks, MCP integrations and delegation disabled; Claude reviewers expose only read/search tools with those integrations disabled.
+The default `simplified` profile runs one implementer followed by one separate editing simplifier, sequentially in the same workspaces. The explicit `reviewed` profile runs one implementer, two reviewers, and one fixer; `solo` runs only the implementer with self-validation; `swarm` drivers are interactive only and are refused here (see the Swarm topic). Legacy workers without profile metadata retain `reviewed` behavior.
+Monty captures reviewer reports outside the worktree. Pi reviewers use read-only file tools without bash; Codex reviewers use a read-only sandbox with hooks, MCP integrations and delegation disabled; Claude reviewers expose only read/search tools with those integrations disabled, while Claude writers pre-allow the editing tools (`Bash,Edit,MultiEdit,Write,NotebookEdit,Read,Glob,Grep`) because print mode cannot prompt.
 No child may create worktrees, stage, commit, push, open a PR, post remotely, or run `monty done`.
 A successful chain leaves the task open and its worktree intact.
 Never infer task completion from native runtime status.
@@ -341,6 +341,75 @@ monty handoff publish "$MONTY_JOB_ID" --summary 'Implemented and validated the c
 
 Publication leaves the task open and its worktrees intact. Headless children
 return their handoff to the supervisor instead; the supervisor publishes.
+
+## Swarm
+
+The `swarm` agent profile runs one hard, overarching goal as one task: an
+interactive driver (the coordinating butler, launched like any other
+interactive worker) decomposes the goal into areas and asks Monty to spawn
+Monty-owned child workers (worker butlers). Each child is a worker record in
+the driver's run, id `<driver>--<name>`, on branch `<driver-branch>--<name>`
+forked from the driver branch and materialized through `wt`. Children run the
+headless chain of the worker profile (`solo` by default), commit freely on
+their own branch, and publish their run handoff to the driver's inbox. The
+driver lands checked child heads into its branch by merge, retires landed
+children, and finishes with one aggregated handoff. Push, pull requests, remote
+writes and `monty done` stay forbidden for everyone in the swarm, and a swarm
+driver is refused by `monty headless run`, `run-many` and `resume`.
+
+Select the profile per manifest job and configure the landing gate there:
+
+```json
+{
+  "id": "goal",
+  "title": "Ship the goal",
+  "repo": "/absolute/path/to/repo",
+  "branch": "monty/goal",
+  "context": ".monty/runs/<run-id>/goal.md",
+  "agent_profile": "swarm",
+  "swarm": { "check": "dune build 2>&1 && dune runtest", "max_workers": 6, "worker_profile": "solo" }
+}
+```
+
+`check` runs in a child's worktree before every landing; `max_workers` caps
+concurrently running children (profile default 6, `max_spawns` 40 in total).
+Monty enforces both. All `monty swarm` commands run inside the driver session
+and refuse a child or a non-swarm worker:
+
+```sh
+monty swarm init --check 'dune build 2>&1 && dune runtest'   # when the manifest set no check
+monty swarm spawn NAME --brief FILE [--profile ID]            # fork a branch, start a headless child
+monty swarm status [--json]                                    # ledger, job status, landed?, pending handoffs
+monty handoff pending                                          # the driver's own inbox; acknowledge as usual
+monty swarm resume NAME --brief FILE                           # answer a question or request a fix (fresh chain)
+monty swarm land NAME [-m MESSAGE]                             # merge driver into child, run the check, merge child
+monty swarm retire NAME [--force]                              # remove worktree and branch, archive the record
+```
+
+The driver loop: write one shared worker brief in durable worker memory,
+decompose into areas with one owner each, spawn up to the limit, read and
+acknowledge child handoffs, resume children with precise follow-up briefs,
+land finished children, retire landed ones, and repeat until the acceptance
+criteria hold. Never do the volume work in the driver session and never loop
+on one problem: after two failed resumes, split the area.
+
+`land` requires a clean driver worktree on the driver branch and a clean,
+finished child. It merges the driver branch into the child, runs the check
+with its output captured under the driver's `artifacts/swarm/NAME/`, and only
+then merges the child into the driver worktree with `--no-ff`. A failed check
+leaves both branches as they are, records the output path in the ledger and
+exits nonzero. `retire` refuses a child whose head is not in the driver branch
+unless `--force` discards it. `monty done <driver>` refuses while any child is
+unretired and lists the retire commands; `--force` retires every child first.
+`monty list --swarm` shows children indented under their driver; by default
+they are hidden, and reconciliation never turns a child into a task.
+
+Durable state: the ledger `swarm/ledger.json` and the briefs under
+`swarm/briefs/` in the driver's worker directory; each child's own worker
+directory beside the driver's; child handoffs under `.monty/handoffs/` with
+inbox notices addressed to the driver. `monty doctor` warns about children
+whose driver is missing or archived and about ledger entries recorded running
+without a supervisor holding the child's worker lock.
 
 ## Agents
 

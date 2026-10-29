@@ -56,7 +56,48 @@ let task_matches_run task_keys task =
 let print_warnings warnings =
   List.iter (fun warning -> Fmt.epr "monty: warning: %s\n" warning) warnings
 
-let inventory ~home ~scope ?run ?project ?group ?(sync = false) () =
+(* Swarm children are not tasks. With --swarm they are shown indented under
+   their driver's row, keyed after it so sorting keeps them together. *)
+let swarm_child_rows (scan : Job_store.scan_result) tasks =
+  let ( let* ) = Option.bind in
+  scan.records
+  |> List.filter_map (fun (record : Job_store.record) ->
+         match Job.swarm_child record.job with
+         | Some (parent, name) when not (Job_store.is_archived record) ->
+             let* driver =
+               List.find_opt
+                 (fun (candidate : Job_store.record) -> String.equal candidate.id parent)
+                 scan.records
+             in
+             let key =
+               match driver.job.Job.task_key with
+               | Some key -> key
+               | None -> Project_overview.diagnostic_task_key driver
+             in
+             let* task =
+               List.find_opt (fun (task : Overview_types.task) -> String.equal task.key key) tasks
+             in
+             let status =
+               match Swarm_ledger.load_opt ~worker_dir:driver.worker_dir with
+               | Ok (Some ledger) -> (
+                   match Swarm_ledger.find_child ledger name with
+                   | Some child -> Swarm_ledger.state_to_string child.state
+                   | None -> record.status)
+               | Ok None | Error _ -> record.status
+             in
+             Some
+               { Overview_types.key = task.key ^ "/" ^ name;
+                 display_id = "  " ^ record.id;
+                 project = task.project;
+                 origin = Overview_render.swarm_child_origin;
+                 title = name;
+                 status;
+                 branch = record.job.Job.branch;
+                 workspaces = [];
+                 url = None }
+         | _ -> None)
+
+let inventory ~home ~scope ?run ?project ?group ?(sync = false) ?(swarm = false) () =
   let ( let* ) = Result.bind in
   let* () =
     match group with
@@ -79,11 +120,12 @@ let inventory ~home ~scope ?run ?project ?group ?(sync = false) () =
     tasks |> List.filter (task_in_scope scope)
     |> List.filter (task_matches_run task_keys)
   in
+  let tasks = if swarm then tasks @ swarm_child_rows scan tasks else tasks in
   Ok (tasks, warnings)
 
-let run ~home ~scope ?run ?project ?group ?(banner = "") ?(sync = true) () =
+let run ~home ~scope ?run ?project ?group ?(banner = "") ?(sync = true) ?swarm () =
   let ( let* ) = Result.bind in
-  let* tasks, warnings = inventory ~home ~scope ?run ?project ?group ~sync () in
+  let* tasks, warnings = inventory ~home ~scope ?run ?project ?group ~sync ?swarm () in
   print_warnings warnings;
   Fmt.pr "%s%s" banner (Project_overview.render_tasks tasks);
   Ok ()

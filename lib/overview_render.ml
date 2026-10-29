@@ -34,6 +34,8 @@ let show_project ~home (project : project) =
       "";
       memory_text ]
 
+let swarm_child_origin = "swarm-child"
+
 let compare_tasks left right =
   match String.compare left.project right.project with
   | 0 -> String.compare left.key right.key
@@ -82,14 +84,21 @@ let render_tasks tasks =
         branch ]
   in
   let header = render_row "#" "ID" "PROJECT" "STATUS" "TITLE" "BRANCH" in
-  let lines =
-    List.mapi
-      (fun index task ->
-        render_row (string_of_int (index + 1)) task.display_id task.project task.status
-          task.title (branch_label task))
-      tasks
+  (* Swarm children sit under their driver without a row number, so the
+     numbered references the user remembers stay the task rows. *)
+  let _, lines =
+    List.fold_left
+      (fun (number, lines) task ->
+        if String.equal task.origin swarm_child_origin then
+          (number, render_row "" task.display_id task.project task.status task.title (branch_label task) :: lines)
+        else
+          ( number + 1,
+            render_row (string_of_int number) task.display_id task.project task.status task.title
+              (branch_label task)
+            :: lines ))
+      (1, []) tasks
   in
-  String.concat "\n" (header :: lines) ^ "\n"
+  String.concat "\n" (header :: List.rev lines) ^ "\n"
 
 let render_active_jobs jobs =
   let header = Printf.sprintf "%-16s %-32s %-24s %s" "ID" "TITLE" "BRANCH" "DIR" in

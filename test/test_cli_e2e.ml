@@ -114,7 +114,7 @@ let reviewed_profile =
             title = "Quality and tests review";
             instructions = "Review quality and tests." } ];
       fix = Some "Verify findings and fix valid issues.";
-      fix_role = Fixer }
+      fix_role = Fixer; swarm = None }
 
 let solo_profile =
   Agent_profile.
@@ -123,7 +123,7 @@ let solo_profile =
       interactive = "Self-validate the task.";
       implementation = "Implement, self-validate, and report the task.";
       reviews = [];
-      fix = None; fix_role = Fixer }
+      fix = None; fix_role = Fixer; swarm = None }
 
 let install_profile home (profile : Agent_profile.t) =
   let directory = Filename.concat (Filename.concat home "agent-profiles") profile.id in

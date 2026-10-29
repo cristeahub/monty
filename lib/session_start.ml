@@ -11,7 +11,7 @@ let skill_reference = function
 let worker_variables =
   [ "MONTY_JOB_ID"; "MONTY_JOB_TITLE"; "MONTY_TASK_KEY"; "MONTY_JOB_FILE"; "MONTY_JOB_CONTEXT";
     "MONTY_WORKER_DIR"; "MONTY_RUN_DIR"; "MONTY_JOB_WORKTREE"; "MONTY_JOB_REPO"; "MONTY_JOB_BRANCH";
-    "MONTY_WORKTREE_MODE"; "MONTY_HOME" ]
+    "MONTY_WORKTREE_MODE"; "MONTY_HOME"; "MONTY_SWARM_PARENT"; "MONTY_SWARM_NAME" ]
 
 let bindings getenv names =
   List.filter_map (fun name -> Option.map (fun value -> name ^ "=" ^ value) (getenv name)) names
@@ -27,11 +27,39 @@ let workspace_bindings getenv =
 
 let block lines = "```text\n" ^ String.concat "\n" lines ^ "\n```"
 
+(* A swarm driver's children report to its inbox, not the head butler's. *)
+let swarm_driver ~getenv =
+  match (getenv "MONTY_HOME", getenv "MONTY_WORKER_DIR") with
+  | Some home, Some worker_dir when String.trim home <> "" && String.trim worker_dir <> "" -> (
+      match Agent_profile.load_snapshot worker_dir with
+      | Ok { Agent_profile.swarm = Some _; _ } -> (
+          match Run_handoff.pending ~inbox:(Option.value ~default:"" (getenv "MONTY_JOB_ID")) ~home () with
+          | Ok notices ->
+              [ Printf.sprintf
+                  "You are the swarm driver: %d child handoff%s %s waiting in your inbox. `monty swarm status` lists your children, `monty handoff pending` shows their handoffs, and `monty guide swarm` has the driver loop and command recipes."
+                  (List.length notices) (if List.length notices = 1 then "" else "s")
+                  (if List.length notices = 1 then "is" else "are") ]
+          | Error message ->
+              [ "You are the swarm driver; its child inbox could not be read (" ^ message
+                ^ "). Run `monty swarm status` and `monty guide swarm`." ])
+      | _ -> [])
+  | _ -> []
+
+let swarm_child ~getenv =
+  match (getenv "MONTY_SWARM_PARENT", getenv "MONTY_SWARM_NAME") with
+  | Some parent, Some name when String.trim parent <> "" && String.trim name <> "" ->
+      [ Printf.sprintf
+          "You are swarm child `%s` of driver `%s`: commit your work on the current branch in small commits and leave the tree clean; your handoff goes to the driver."
+          name parent ]
+  | _ -> []
+
 let worker ~getenv ~harness id =
   let title = match getenv "MONTY_JOB_TITLE" with Some title when String.trim title <> "" -> ": " ^ title | _ -> "" in
   String.concat "\n\n"
-    [ Printf.sprintf "You're running as Monty worker %s%s." id title;
-      block (bindings getenv worker_variables @ workspace_bindings getenv);
+    ([ Printf.sprintf "You're running as Monty worker %s%s." id title;
+      block (bindings getenv worker_variables @ workspace_bindings getenv) ]
+    @ swarm_driver ~getenv @ swarm_child ~getenv
+    @ [
       "`MONTY_JOB_CONTEXT` is your task context file: read it first. It holds the task summary, the \
        ordered workspace map, links, constraints and acceptance criteria. `MONTY_JOB_FILE` is the \
        authoritative workspace map and `MONTY_WORKER_DIR` is your durable memory; worktrees are \
@@ -44,10 +72,10 @@ let worker ~getenv ~harness id =
       Printf.sprintf
         "The monty skill (%s) explains the worker workflow; `monty guide workers` and `monty guide \
          handoffs` print the same guidance, and `monty COMMAND --help=plain` gives exact syntax."
-        (skill_reference harness) ]
+        (skill_reference harness) ])
 
 let pending_handoffs ~home =
-  match Run_handoff.pending ~home with
+  match Run_handoff.pending ~home () with
   | Error message -> Printf.sprintf "Pending worker handoffs could not be read (%s); run `monty handoff pending` before presenting the task inventory." message
   | Ok [] -> "No worker handoffs are pending right now. Run `monty handoff pending` again before presenting the task inventory, because workers publish while you plan."
   | Ok notices ->

@@ -29,6 +29,7 @@ type dispatch = {
   context : string;
   home : string;
   profile : Agent_profile.t;
+  swarm_child : (string * string) option;
 }
 
 type review_path = {
@@ -162,14 +163,23 @@ let prepare_attempt (plan : begin_plan) (dispatch : dispatch)
       State_store.write_json_atomic ~path:paths.descriptor
         (attempt_descriptor_json dispatch paths source))
 
-let mutation_prohibitions =
+(* Swarm children commit on their own branch; every other chain leaves the
+   tree unstaged. Reviewers always get the read-only list. *)
+let mutation_prohibitions ?(writable = true) (dispatch : dispatch) =
+  let commit_rule =
+    match dispatch.swarm_child with
+    | Some _ when writable ->
+        [ "Commit all your work on the current branch as small imperative commits; leave the tree clean (git status prints nothing) when you finish.";
+          "Do not run monty swarm." ]
+    | _ -> [ "Do not stage or commit changes." ]
+  in
   String.concat "\n"
-    [ "Do not run monty done.";
-      "Do not invoke /review or launch subagents.";
-      "Do not create, switch, or remove worktrees.";
-      "Do not modify job.json or Monty task, settings, or project state.";
-      "Do not stage or commit changes.";
-      "Do not push, open a pull request, submit a review, post comments, or perform any other remote write." ]
+    ([ "Do not run monty done.";
+       "Do not invoke /review or launch subagents.";
+       "Do not create, switch, or remove worktrees.";
+       "Do not modify job.json or Monty task, settings, or project state." ]
+    @ commit_rule
+    @ [ "Do not push, open a pull request, submit a review, post comments, or perform any other remote write." ])
 
 let implementation_task (dispatch : dispatch) =
   let worktree_setup =
@@ -187,7 +197,7 @@ let implementation_task (dispatch : dispatch) =
       "You are the only writer in this phase.";
       dispatch.profile.implementation;
       "Include important implementation discoveries and handoff notes in the final response so Monty can persist them.";
-      mutation_prohibitions;
+      mutation_prohibitions dispatch;
       "Finish with a compact handoff containing changed files, validation commands and results, unresolved risks, and a concise diff summary." ]
 
 let reviewer_task (dispatch : dispatch) (review : Agent_profile.review) implementation_handoff =
@@ -198,7 +208,7 @@ let reviewer_task (dispatch : dispatch) (review : Agent_profile.review) implemen
       review.instructions;
       Reviewer_prompt.read_only_worktree_rule;
       "Use shell commands only for read-only inspection and non-mutating validation.";
-      mutation_prohibitions;
+      mutation_prohibitions ~writable:false dispatch;
       "Implementation handoff for orientation only; verify every claim against the worktree:";
       implementation_handoff;
       String.concat "\n" Reviewer_prompt.review_output_requirements ]
@@ -215,13 +225,14 @@ let fixer_task (dispatch : dispatch) (paths : review_path list) reports implemen
       "You are the only writer in this phase.";
       Option.value ~default:"" dispatch.profile.fix;
       "Include changes, validation, and the final handoff in the final response so Monty can persist them.";
-      mutation_prohibitions;
+      mutation_prohibitions dispatch;
       "Implementation handoff:";
       implementation_handoff ]
     @ reports
     @ [ "Finish with changed files, "
         ^ (if paths = [] then "" else "accepted and rejected findings, ")
-        ^ "validation commands and results, residual risks, and git status confirming nothing is staged." ])
+        ^ "validation commands and results, residual risks, and git status confirming "
+        ^ (if dispatch.swarm_child = None then "nothing is staged." else "a clean, fully committed tree.") ])
 
 let print_json json = Fmt.pr "%s\n" (Yojson.Safe.pretty_to_string json)
 
@@ -360,6 +371,14 @@ let prepare_existing options (record : Job_store.record) =
     Agent_profile.load_pinned ~home:options.home ~worker_dir:record.worker_dir
       record.job.Job.agent_profile
   in
+  let* () =
+    if profile.swarm = None then Ok ()
+    else
+      Error
+        (Printf.sprintf
+           "worker %s is pinned to the swarm agent profile; a swarm driver runs interactively (monty launch or monty resume) and spawns its headless children with monty swarm spawn"
+           record.id)
+  in
   let* prepared = Launcher.prepare_identity ~profile options 1 record.job in
   let* _ = Project_overview.validate_worker_task_link ~home:options.home record in
   let* () =
@@ -381,6 +400,13 @@ let prepare_begin ~explicit_resume options worker =
   let* () = validate_worktree_mode record in
   let* options, prepared = prepare_existing options record in
   Ok { options; prepared; record }
+
+let swarm_child (plan : begin_plan) = Job.swarm_child plan.record.job
+
+let handoff_recipient (plan : begin_plan) =
+  match swarm_child plan with
+  | Some (parent, _) -> parent
+  | None -> Run_handoff.head_butler_inbox
 
 let claim_begin (plan : begin_plan) =
   let requested =
@@ -410,6 +436,7 @@ let claim_begin (plan : begin_plan) =
           context = plan.prepared.context;
           home = plan.options.home;
           profile = plan.prepared.profile;
+          swarm_child = swarm_child plan;
         }
 
 let provisional_dispatch (plan : begin_plan) =
@@ -426,6 +453,7 @@ let provisional_dispatch (plan : begin_plan) =
     context = plan.prepared.context;
     home = plan.options.home;
     profile = plan.prepared.profile;
+    swarm_child = swarm_child plan;
   }
 
 let read_required_file ~label path =
@@ -669,11 +697,16 @@ let claude_final_message events =
     | _ -> Error "Claude stream has no valid final result, or contains permission denials; inspect retained events"
   with Sys_error message | Yojson.Json_error message -> Error message
 
+let claude_writer_tools = "Bash,Edit,MultiEdit,Write,NotebookEdit,Read,Glob,Grep"
+
 let run_claude_phase (options:Launcher.options) (dispatch:dispatch) (paths:attempt_paths) ~name ~writable ~prompt ~output =
   let events=phase_path paths.events name ".jsonl" and progress=phase_path paths.logs name ".log" in
   let* ()=Skill.ensure ~home:dispatch.home ~harness:Harness.Claude in
   let dirs=dispatch.workspaces |> List.filter_map (fun (w:Job_store.workspace_state)->w.worktree) in
-  let policy=if writable then "" else
+  (* Print mode never prompts, so a writer must have its editing tools
+     pre-allowed, like Pi's writer tool list and Codex's workspace-write
+     sandbox; otherwise every edit is a permission denial. *)
+  let policy=if writable then " --allowedTools " ^ claude_writer_tools else
     " --restricted --safe-mode --tools Read,Grep,Glob --allowedTools Read,Grep,Glob --strict-mcp-config --mcp-config " ^ Shell.quote "{\"mcpServers\":{}}"
     ^ " --setting-sources " ^ Shell.quote "" ^ " --settings " ^ Shell.quote "{\"disableAllHooks\":true}" in
   let command="umask 077 && " ^ options.harness_command ^ " --print --verbose --output-format stream-json --no-session-persistence"
@@ -863,7 +896,9 @@ let set_worker_environment (plan : begin_plan) (dispatch : dispatch) =
       "MONTY_JOB_FILE", plan.record.path;
       "MONTY_TASK_KEY", Option.value ~default:"" plan.record.job.task_key;
       "MONTY_JOB_WORKTREE", dispatch.worktree;
-      "MONTY_WORKTREE_MODE", plan.record.worktree_mode ];
+      "MONTY_WORKTREE_MODE", plan.record.worktree_mode;
+      "MONTY_SWARM_PARENT", Option.fold ~none:"" ~some:fst dispatch.swarm_child;
+      "MONTY_SWARM_NAME", Option.fold ~none:"" ~some:snd dispatch.swarm_child ];
   List.iteri (fun index (workspace : Job_store.workspace_state) ->
       Unix.putenv (Printf.sprintf "MONTY_WORKSPACE_%d" (index + 1))
         (Option.value ~default:"" workspace.worktree)) dispatch.workspaces
@@ -964,7 +999,7 @@ let run_worker_unlocked ~on_started ~explicit_resume options worker =
   | Error message ->
       let handoff =
         Run_handoff.publish ~home:plan.options.home ~record:plan.record
-          ~handoff_id:paths.id ~source
+          ~handoff_id:paths.id ~source ~recipient:(handoff_recipient plan)
           ~outcome:Run_handoff.Failed
           ~summary:(Printf.sprintf "Headless %s run failed during %s."
                       (Harness.to_string options.harness) !phase)
@@ -986,7 +1021,7 @@ let run_worker_unlocked ~on_started ~explicit_resume options worker =
       let* published =
         let review_summary = review_summary dispatch.profile in
         Run_handoff.publish ~home:plan.options.home ~record:plan.record
-          ~handoff_id:paths.id ~source
+          ~handoff_id:paths.id ~source ~recipient:(handoff_recipient plan)
           ~outcome:Run_handoff.Ready_for_review
           ~summary:(Run_handoff.compact_summary final_handoff)
           ~validation:[ validation_summary dispatch.profile ]

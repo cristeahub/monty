@@ -52,11 +52,15 @@ type evidence = {
   artifacts : artifact list;
 }
 
+(* Who reads a handoff: the head butler by default, or a swarm driver's id. *)
+let head_butler_inbox = "head-butler"
+
 type t = {
   id : string;
   finished_at : string;
   source : source;
   outcome : outcome;
+  recipient : string;
   worker_run_id : string;
   worker_id : string;
   title : string;
@@ -84,6 +88,7 @@ type notice = {
   id : string;
   created_at : string;
   acknowledged_at : string option;
+  recipient : string;
   reference : reference;
   handoff_path : string;
 }
@@ -241,6 +246,15 @@ let optional_assoc json name =
   | `Assoc _ as value -> Ok value
   | _ -> Error (Printf.sprintf "run handoff field %S must be an object" name)
 
+let validate_recipient value =
+  if String.equal value head_butler_inbox then Ok value
+  else State_path.safe_component ~label:"run handoff recipient" value
+
+(* Records written before recipients existed are head-butler notices. *)
+let parse_recipient json =
+  let* recipient = optional_string json "recipient" in
+  validate_recipient (Option.value ~default:head_butler_inbox recipient)
+
 let json_of_workspace = Job_store.json_of_workspace
 
 let json_of_workspace_change (change : workspace_change) =
@@ -279,6 +293,7 @@ let to_json (handoff : t) =
       ("finished_at", `String handoff.finished_at);
       ("source", `String (source_to_string handoff.source));
       ("outcome", `String (outcome_to_string handoff.outcome));
+      ("recipient", `String handoff.recipient);
       ( "worker",
         `Assoc
           ([ ("run_id", `String handoff.worker_run_id);
@@ -330,6 +345,7 @@ let of_json json =
     let* source = source_of_string source in
     let* outcome = required_string json "outcome" in
     let* outcome = outcome_of_string outcome in
+    let* recipient = parse_recipient json in
     let* worker = optional_assoc json "worker" in
     let* worker_run_id = required_string worker "run_id" in
     let* worker_run_id = State_path.safe_component ~label:"worker run id" worker_run_id in
@@ -380,6 +396,7 @@ let of_json json =
         finished_at;
         source;
         outcome;
+        recipient;
         worker_run_id;
         worker_id;
         title;
@@ -784,6 +801,7 @@ let notice_to_json notice =
       ( "acknowledged_at",
         Option.fold ~none:`Null ~some:(fun value -> `String value)
           notice.acknowledged_at );
+      ("recipient", `String notice.recipient);
       ( "handoff",
         `Assoc
           [ ("worker_run_id", `String notice.reference.worker_run_id);
@@ -801,6 +819,7 @@ let notice_of_json ~home json =
     let* id = State_path.safe_component ~label:"run-handoff notice id" id in
     let* created_at = required_string json "created_at" in
     let* acknowledged_at = optional_string json "acknowledged_at" in
+    let* recipient = parse_recipient json in
     let* handoff = optional_assoc json "handoff" in
     let* worker_run_id = required_string handoff "worker_run_id" in
     let* worker_run_id = State_path.safe_component ~label:"worker run id" worker_run_id in
@@ -827,6 +846,7 @@ let notice_of_json ~home json =
           id;
           created_at;
           acknowledged_at;
+          recipient;
           reference;
           handoff_path = handoff_path_value;
         }
@@ -893,14 +913,15 @@ let publication_checkpoint name =
   | _ -> Ok ()
 
 let publish ~home ~(record : Job_store.record) ?handoff_id ~source ~outcome
-    ~summary ?(validation = []) ?(accepted = []) ?(fixed = []) ?(rejected = [])
-    ?(unresolved = []) ?review_summary ?(risks = []) ?last_phase ?error
-    ?(artifacts = []) () =
+    ?(recipient = head_butler_inbox) ~summary ?(validation = []) ?(accepted = [])
+    ?(fixed = []) ?(rejected = []) ?(unresolved = []) ?review_summary ?(risks = [])
+    ?last_phase ?error ?(artifacts = []) () =
   let summary = compact_summary summary in
   if summary = "" then Error "run handoff summary must not be empty"
   else
     let handoff_id = Option.value ~default:(fresh_handoff_id ()) handoff_id in
     let* handoff_id = State_path.safe_component ~label:"run handoff id" handoff_id in
+    let* recipient = validate_recipient recipient in
     let* reference = reference_of_record record handoff_id in
     let state_home = Option.value ~default:home record.home in
     let* home = State_path.canonicalize home in
@@ -958,6 +979,7 @@ let publish ~home ~(record : Job_store.record) ?handoff_id ~source ~outcome
             finished_at;
             source;
             outcome;
+            recipient;
             worker_run_id = reference.worker_run_id;
             worker_id = reference.worker_id;
             title = current.job.Job.title;
@@ -1040,6 +1062,7 @@ let publish ~home ~(record : Job_store.record) ?handoff_id ~source ~outcome
               (match handoff.source with
               | Interactive -> Some handoff.finished_at
               | Headless_codex | Headless_pi | Headless_claude -> None);
+            recipient = handoff.recipient;
             reference;
             handoff_path = json_path;
           }
@@ -1176,6 +1199,7 @@ let recover_orphaned_notices ~home =
                                      (match handoff.source with
                                      | Interactive -> Some handoff.finished_at
                                      | Headless_codex | Headless_pi | Headless_claude -> None);
+                                   recipient = handoff.recipient;
                                    reference;
                                    handoff_path = handoff_path home reference;
                                  }
@@ -1224,7 +1248,7 @@ let directory_json_files ~label root =
       with Sys_error message -> Error message)
   | Some _ -> Error (Printf.sprintf "%s is not a directory: %s" label root)
 
-let pending ~home =
+let pending ?(inbox = head_butler_inbox) ~home () =
   let* home = State_path.canonicalize home in
   let* hierarchy =
     directory_chain_state ~label:"run-handoff inbox hierarchy"
@@ -1238,7 +1262,8 @@ let pending ~home =
          (fun result path ->
            let* values = result in
            let* notice = load_notice_file ~home path in
-           if notice.acknowledged_at <> None then Ok values
+           if notice.acknowledged_at <> None || not (String.equal notice.recipient inbox)
+           then Ok values
            else
              let* handoff = load_reference ~home notice.reference in
              Ok ((notice, handoff) :: values))

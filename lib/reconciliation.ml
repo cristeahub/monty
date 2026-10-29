@@ -401,6 +401,9 @@ let plan_jobs ~home projects initial_tasks records initial_warnings =
   in
   List.fold_left
     (fun (tasks, patches, created, warnings) (record : Job_store.record) ->
+      (* Swarm children belong to their driver's task and never become tasks. *)
+      if record.job.Job.swarm_parent <> None then (tasks, patches, created, warnings)
+      else
       match projects_for_job ~home projects record.job with
       | Error message ->
           ( tasks,
@@ -674,7 +677,8 @@ let load_tasks_with_warnings ~home ?project ?group ?(all = false) ?scan () =
                          | _ -> missing_workspace_warnings @ warnings)
                      | _ -> missing_workspace_warnings @ warnings))
            in
-           if linked || not selected || not visible then (items, warnings)
+           if linked || not selected || not visible || record.job.Job.swarm_parent <> None
+           then (items, warnings)
            else (diagnostic_task projects record :: items, warnings))
          ([], [])
   in

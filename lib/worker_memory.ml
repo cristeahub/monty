@@ -54,6 +54,11 @@ let job_json ?(status = "active") ?launch_script ?launch_error
     @ maybe_assoc "prompt" job.Job.prompt
     @ maybe_assoc "task_key" job.Job.task_key
     @ maybe_assoc "agent_profile" job.Job.agent_profile
+    @ (match job.Job.swarm with
+      | None -> []
+      | Some config -> [ ("swarm", Job.swarm_config_json config) ])
+    @ maybe_assoc "swarm_parent" job.Job.swarm_parent
+    @ maybe_assoc "swarm_name" job.Job.swarm_name
     @ maybe_assoc "last_known_worktree" last_known_worktree
     @ maybe_assoc "launch_script" launch_script
     @ maybe_assoc "launch_error" launch_error)
@@ -78,12 +83,33 @@ let init_memory ~worker_dir ~title =
            "Keep durable notes here, not only in the worktree, because wt worktrees may be deleted and recreated.";
            "" ])
 
-let write_instructions ?destination_dir ~worker_dir ~id ~job ~profile ~branch
-    ~repo ~context ~worktree_mode () =
+let write_instructions ?destination_dir ?swarm_brief ~worker_dir ~id ~job ~profile
+    ~branch ~repo ~context ~worktree_mode () =
   let destination_dir = Option.value ~default:worker_dir destination_dir in
   Shell.ensure_dir (artifacts_dir destination_dir);
   init_memory ~worker_dir:destination_dir ~title:job.Job.title;
   let run_dir = run_dir_of_worker_dir worker_dir in
+  let swarm_child = Job.swarm_child job in
+  let swarm_section =
+    match swarm_child with
+    | None -> []
+    | Some (parent, name) ->
+        [ "## Swarm worker";
+          "";
+          Printf.sprintf
+            "You are swarm child `%s` of driver `%s`. Your run handoff goes to that driver's inbox, not to the head butler."
+            name parent;
+          "";
+          Option.value ~default:"" swarm_brief;
+          "" ]
+  in
+  let commit_rule =
+    match swarm_child with
+    | Some _ ->
+        "Commit all your work on the current branch as small imperative commits and leave the tree clean. Do not run `monty swarm`. Do not push, open a pull request, submit a review, post comments, or perform any other remote write."
+    | None ->
+        "Do not stage, commit, push, open a pull request, submit a review, post comments, or perform any other remote write unless explicitly approved."
+  in
   let workspace_lines =
     job.Job.workspaces
     |> List.mapi (fun index (workspace : Job.workspace) ->
@@ -141,8 +167,12 @@ let write_instructions ?destination_dir ~worker_dir ~id ~job ~profile ~branch
         "- MONTY_TASK_KEY=" ^ Option.value ~default:"" job.Job.task_key;
         "- MONTY_JOB_FILE=" ^ job_file worker_dir;
         "- MONTY_JOB_WORKTREE, set dynamically after `wt b` runs";
-        "- MONTY_WORKTREE_MODE=" ^ worktree_mode;
-        "";
+        "- MONTY_WORKTREE_MODE=" ^ worktree_mode ]
+    @ (match swarm_child with
+      | None -> []
+      | Some (parent, name) ->
+          [ "- MONTY_SWARM_PARENT=" ^ parent; "- MONTY_SWARM_NAME=" ^ name ])
+    @ [ "";
         "## Task context";
         "";
         "Read the task context file passed after this instructions file.";
@@ -153,11 +183,12 @@ let write_instructions ?destination_dir ~worker_dir ~id ~job ~profile ~branch
         "Selected profile: `" ^ profile.Agent_profile.id ^ "`";
         "";
         profile.interactive;
-        "";
-        "### Safety envelope";
+        "" ]
+    @ swarm_section
+    @ [ "### Safety envelope";
         "";
         "Do not run `monty done`, create, switch, or remove worktrees, or modify `job.json` or Monty task, settings, or project state.";
-        "Do not stage, commit, push, open a pull request, submit a review, post comments, or perform any other remote write unless explicitly approved.";
+        commit_rule;
         "";
         "### Review safety envelope";
         "";

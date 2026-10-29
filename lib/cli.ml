@@ -481,11 +481,17 @@ let handoff_publish_term =
     $ accepted $ fixed $ rejected $ unresolved $ review_summary $ risks
     $ last_phase $ error $ artifacts $ format $ home_arg)
  in
-let handoff_pending format home =
+let handoff_pending inbox format home =
   let result =
     let ( let* ) = Result.bind in
     let* _repaired = Run_handoff.recover_orphaned_notices ~home in
-    Run_handoff.pending ~home
+    (* A swarm driver reads its own inbox by default; elsewhere --inbox names one. *)
+    let inbox =
+      match inbox with
+      | Some inbox -> inbox
+      | None -> Option.value ~default:Run_handoff.head_butler_inbox (Swarm.current_driver_id ~home)
+    in
+    Run_handoff.pending ~inbox ~home ()
   in
   match result with
   | Error message -> exit_code (Error message)
@@ -522,7 +528,11 @@ let handoff_format_term =
   Cmdliner.Arg.(value & opt handoff_format_conv Markdown & info [ "format" ] ~docv:"FORMAT" ~doc)
  in
 let handoff_pending_term =
-  Cmdliner.Term.(const handoff_pending $ handoff_format_term $ home_arg)
+  let inbox =
+    let doc = "Inbox to read: head-butler, or a swarm driver's worker id. Defaults to the current swarm driver's inbox inside a driver session, otherwise head-butler." in
+    Cmdliner.Arg.(value & opt (some string) None & info [ "inbox" ] ~docv:"INBOX" ~doc)
+  in
+  Cmdliner.Term.(const handoff_pending $ inbox $ handoff_format_term $ home_arg)
  in
 let handoff_acknowledge notice home =
   match Run_handoff.acknowledge ~home notice with
@@ -680,14 +690,18 @@ let project_filter_arg =
  in
 let list_selection = List_jobs.selection ~getenv
  in
-let list_jobs archived all run project group all_groups no_sync home =
+let list_jobs archived all run project group all_groups no_sync swarm home =
   let scope = if all then Job_store.All else if archived then Job_store.Archived else Job_store.Active in
   let result =
     let ( let* ) = Result.bind in
     let* group, banner = list_selection ?project group all_groups in
-    List_jobs.run ~home ~scope ?run ?project ?group ~banner ~sync:(not no_sync) ()
+    List_jobs.run ~home ~scope ?run ?project ?group ~banner ~sync:(not no_sync) ~swarm ()
   in
   exit_code result
+ in
+let swarm_rows_arg =
+  let doc = "Also show swarm children, indented under their driver's row without a row number." in
+  Cmdliner.Arg.(value & flag & info [ "swarm" ] ~doc)
  in
 let list_jobs_term =
   let archived =
@@ -707,7 +721,7 @@ let list_jobs_term =
     Cmdliner.Arg.(value & flag & info [ "no-sync" ] ~doc)
   in
   Cmdliner.Term.(const list_jobs $ archived $ all $ run $ project_filter_arg
-    $ group_arg $ all_groups_arg $ no_sync $ home_arg)
+    $ group_arg $ all_groups_arg $ no_sync $ swarm_rows_arg $ home_arg)
  in
 let ensure_worktree repo branch wt_command =
   let repo = Shell.normalize (Shell.abs_path repo) in
@@ -821,8 +835,8 @@ let projects_set_group_term =
  in
 let print_sync_warnings = List_jobs.print_warnings
  in
-let tasks_list project all group all_groups no_sync home =
-  list_jobs false all None project group all_groups no_sync home
+let tasks_list project all group all_groups no_sync swarm home =
+  list_jobs false all None project group all_groups no_sync swarm home
  in
 let tasks_list_term =
   let all =
@@ -833,7 +847,7 @@ let tasks_list_term =
     let doc = "Read inventory without reconciliation writes or external task fetches." in
     Cmdliner.Arg.(value & flag & info [ "no-sync" ] ~doc)
   in
-  Cmdliner.Term.(const tasks_list $ project_filter_arg $ all $ group_arg $ all_groups_arg $ no_sync $ home_arg)
+  Cmdliner.Term.(const tasks_list $ project_filter_arg $ all $ group_arg $ all_groups_arg $ no_sync $ swarm_rows_arg $ home_arg)
  in
 let tasks_sync home =
   match Project_overview.sync_jobs_to_local_tasks ~home with
@@ -1376,6 +1390,89 @@ let doctor_cmd =
   let doc = "Check Monty launch dependencies." in
   Cmdliner.Cmd.v (Cmdliner.Cmd.info "doctor" ~doc) doctor_term
  in
+let swarm_cmd =
+  let with_driver home run =
+    match Swarm.resolve_driver ~home with
+    | Error message -> exit_code (Error message)
+    | Ok driver -> exit_code (run driver)
+  in
+  let with_driver_options options run =
+    match options with
+    | Error message -> exit_code (Error message)
+    | Ok (options : Launcher.options) -> with_driver options.home (run options)
+  in
+  let name_arg =
+    let doc = "Child name: a safe path component, unique for this driver." in
+    Cmdliner.Arg.(required & pos 0 (some string) None & info [] ~docv:"NAME" ~doc)
+  in
+  let brief_arg =
+    let doc = "Markdown brief for the child; Monty copies it into the driver's durable memory." in
+    Cmdliner.Arg.(required & opt (some string) None & info [ "brief" ] ~docv:"FILE" ~doc)
+  in
+  let print_receipt = function
+    | Error message -> Error message
+    | Ok json -> Headless.print_json json; Ok ()
+  in
+  let init_cmd =
+    let check =
+      let doc = "Shell command every landing must pass, run in the child's worktree." in
+      Cmdliner.Arg.(required & opt (some string) None & info [ "check" ] ~docv:"CMD" ~doc)
+    in
+    Cmdliner.Cmd.v (Cmdliner.Cmd.info "init" ~doc:"Set the landing check and create the swarm ledger.")
+      Cmdliner.Term.(const (fun check home -> with_driver home (fun driver -> Swarm.init driver ~check)) $ check $ home_arg)
+  in
+  let spawn_cmd =
+    let profile =
+      let doc = "Agent profile the child runs; defaults to the ledger's worker profile." in
+      Cmdliner.Arg.(value & opt (some string) None & info [ "profile" ] ~docv:"ID" ~doc)
+    in
+    Cmdliner.Cmd.v
+      (Cmdliner.Cmd.info "spawn" ~doc:"Create a child worker on a branch forked from the driver's branch and start its headless chain.")
+      Cmdliner.Term.(const (fun name brief profile options ->
+          with_driver_options options (fun options driver ->
+              Swarm.spawn options driver ~name ~brief ~profile |> print_receipt))
+        $ name_arg $ brief_arg $ profile $ headless_options_term)
+  in
+  let status_cmd =
+    let json =
+      let doc = "Print the ledger and child states as JSON." in
+      Cmdliner.Arg.(value & flag & info [ "json" ] ~doc)
+    in
+    Cmdliner.Cmd.v (Cmdliner.Cmd.info "status" ~doc:"Show every child, its state, whether its head is landed, and its pending handoffs.")
+      Cmdliner.Term.(const (fun json home -> with_driver home (fun driver -> Swarm.status driver ~json)) $ json $ home_arg)
+  in
+  let land_cmd =
+    let message =
+      let doc = "Merge commit message. Defaults to 'Land swarm child NAME'." in
+      Cmdliner.Arg.(value & opt (some string) None & info [ "message"; "m" ] ~docv:"MESSAGE" ~doc)
+    in
+    Cmdliner.Cmd.v
+      (Cmdliner.Cmd.info "land" ~doc:"Merge the driver branch into a finished child, run the check there, and merge the child into the driver branch when it passes.")
+      Cmdliner.Term.(const (fun name message home -> with_driver home (fun driver -> Swarm.land_child driver ~name ~message)) $ name_arg $ message $ home_arg)
+  in
+  let resume_cmd =
+    Cmdliner.Cmd.v
+      (Cmdliner.Cmd.info "resume" ~doc:"Send a follow-up brief to an existing child and start a fresh chain in its worktree.")
+      Cmdliner.Term.(const (fun name brief options ->
+          with_driver_options options (fun options driver ->
+              Swarm.resume options driver ~name ~brief |> print_receipt))
+        $ name_arg $ brief_arg $ headless_options_term)
+  in
+  let retire_cmd =
+    let force =
+      let doc = "Retire even when the child's head is not in the driver branch, discarding its worktree changes." in
+      Cmdliner.Arg.(value & flag & info [ "force" ] ~doc)
+    in
+    Cmdliner.Cmd.v
+      (Cmdliner.Cmd.info "retire" ~doc:"Remove a landed child's worktree and branch through wt and archive its record.")
+      Cmdliner.Term.(const (fun name force home wt_command ->
+          with_driver home (fun driver -> Swarm.retire ~wt_command driver ~name ~force))
+        $ name_arg $ force $ home_arg $ wt_command_arg)
+  in
+  Cmdliner.Cmd.group
+    (Cmdliner.Cmd.info "swarm" ~doc:"Drive Monty-owned child workers from a swarm driver session.")
+    [ init_cmd; spawn_cmd; status_cmd; land_cmd; resume_cmd; retire_cmd ]
+ in
 let rex_status worker home =
   let ( let* ) = Result.bind in
   let result =
@@ -1457,6 +1554,7 @@ let main_cmd =
       task_cmd;
       headless_cmd;
       handoff_cmd;
+      swarm_cmd;
       ensure_worktree_cmd;
       doctor_cmd;
       rex_cmd;

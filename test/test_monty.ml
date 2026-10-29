@@ -41,7 +41,7 @@ let reviewed_profile =
             title = "Quality and tests review";
             instructions = "Review quality and tests." } ];
       fix = Some "Verify findings and fix valid issues.";
-      fix_role = Fixer }
+      fix_role = Fixer; swarm = None }
 
 let install_profile home (profile : Agent_profile.t) =
   let directory = Filename.concat (Filename.concat home "agent-profiles") profile.id in
@@ -1352,7 +1352,7 @@ let test_headless_json_contract () =
           "/monty/.monty/runs/run-1/workers/issue-123/MONTY.md";
         context = "/monty/.monty/runs/run-1/issue-123.md";
         home = "/monty";
-        profile = reviewed_profile }
+        profile = reviewed_profile; swarm_child = None }
   in
   let inputs = Headless.{instructions_contents = "Supplied instructions";
     context_contents = "Supplied task context"} in

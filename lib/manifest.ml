@@ -68,13 +68,14 @@ let parse_job index json =
         State_path.safe_component ~label:"manifest agent profile" value
         |> Result.map Option.some
   in
+  let* swarm = Job.swarm_config_of_json json in
   let* job =
     match workspaces with
     | None ->
         let* repo = string_field json "repo" in
         Ok
-          (Job.make ?id ?branch ?worker_dir ?prompt ?task_key ?agent_profile ~title ~repo
-             ~context ())
+          (Job.make ?id ?branch ?worker_dir ?prompt ?task_key ?agent_profile ?swarm
+             ~title ~repo ~context ())
     | Some workspaces ->
         let repo_present = Util.member "repo" json <> `Null in
         let branch_present = Util.member "branch" json <> `Null in
@@ -84,7 +85,7 @@ let parse_job index json =
         else
           Ok
             (Job.make_with_workspaces ?id ?worker_dir ?prompt ?task_key
-               ?agent_profile ~title
+               ?agent_profile ?swarm ~title
                ~workspaces ~context ())
   in
   Ok (index, job)

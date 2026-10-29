@@ -244,12 +244,82 @@ let complete_record ~home ~wt_command ~force initial =
   else Fmt.pr "Deleted workspaces: <skipped, worktree mode never>\n";
   Ok ()
 
+(* A swarm child is archived by `monty swarm retire` while its driver is
+   active; `monty done` on the child is only a repair once the driver is gone. *)
+let active_driver ~home (record : Job_store.record) =
+  match record.Job_store.job.Job.swarm_parent with
+  | None -> Ok None
+  | Some parent ->
+      let ( let* ) = Result.bind in
+      let* records = Job_store.load ~home ~scope:Job_store.Active in
+      Ok (List.find_opt (fun (driver : Job_store.record) -> String.equal driver.id parent) records)
+
+let retire_child_record ~home ~wt_command ~force ~driver_dir (record : Job_store.record)
+    (child : Swarm_ledger.child) =
+  let ( let* ) = Result.bind in
+  let* () =
+    if Job_store.is_archived record then Ok ()
+    else
+      Worker_lock.with_lock ~home ~record (fun () ->
+          let* current = Job_store.find ~home ~scope:Job_store.All record.id in
+          if Job_store.is_archived current then Ok ()
+          else complete_record ~home ~wt_command ~force current)
+  in
+  Swarm_ledger.update ~home ~worker_dir:driver_dir (function
+    | None -> Error (Printf.sprintf "swarm ledger disappeared while retiring %s" child.name)
+    | Some ledger ->
+        Ok (Swarm_ledger.replace_child ledger { child with state = Swarm_ledger.Retired }))
+  |> Result.map ignore
+
+(* A driver is archived only after every child is retired; --force retires
+   them forcibly first, discarding their local changes. *)
+let retire_children ~home ~wt_command ~force (record : Job_store.record) =
+  let ( let* ) = Result.bind in
+  let* ledger = Swarm_ledger.load_opt ~worker_dir:record.Job_store.worker_dir in
+  match ledger with
+  | None -> Ok ()
+  | Some ledger -> (
+      match Swarm_ledger.active ledger with
+      | [] -> Ok ()
+      | children when not force ->
+          Error
+            (String.concat "\n"
+               ((Printf.sprintf "swarm driver %s still has %d unretired child%s; retire each one first:"
+                   record.id (List.length children)
+                   (if List.length children = 1 then "" else "ren"))
+               :: List.map
+                    (fun (child : Swarm_ledger.child) ->
+                      Printf.sprintf "  monty swarm retire %s%s" (Shell.quote child.name)
+                        (if child.state = Swarm_ledger.Landed then "" else " --force"))
+                    children
+               @ [ "or rerun with --force to retire every child forcibly." ]))
+      | children ->
+          List.fold_left
+            (fun result (child : Swarm_ledger.child) ->
+              let* () = result in
+              let* child_record = Job_store.find ~home ~scope:Job_store.All child.id in
+              retire_child_record ~home ~wt_command ~force:true
+                ~driver_dir:record.worker_dir child_record child)
+            (Ok ()) children)
+
 let complete ?worker ~home ~wt_command ~force () =
   let home = Shell.normalize (Shell.abs_path home) in
   let ( let* ) = Result.bind in
   let* initial = resolve ~home worker in
+  let* driver = active_driver ~home initial in
+  let* () =
+    match driver with
+    | None -> Ok ()
+    | Some driver ->
+        Error
+          (Printf.sprintf
+             "worker %s is a swarm child of active driver %s; retire it from the driver session with monty swarm retire %s"
+             initial.id driver.id
+             (Shell.quote (Option.value ~default:initial.id initial.job.Job.swarm_name)))
+  in
   let operation () =
     let* current = resolve ~home worker in
+    let* () = retire_children ~home ~wt_command ~force current in
     complete_record ~home ~wt_command ~force current
   in
   Worker_lock.with_lock ~home ~record:initial operation

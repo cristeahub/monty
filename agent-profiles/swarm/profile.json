@@ -1,0 +1,12 @@
+{
+  "schema": "monty:agent-profile:v1",
+  "id": "swarm",
+  "description": "One interactive driver that spawns, lands and retires Monty-owned committing child workers",
+  "interactive": "interactive.md",
+  "swarm": {
+    "worker_brief": "worker.md",
+    "worker_profile": "solo",
+    "max_workers": 6,
+    "max_spawns": 40
+  }
+}

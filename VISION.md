@@ -47,6 +47,7 @@ The Monty server starts and supervises native harness processes in Monty-owned r
 It does not require a parent subagent tool or a Monty-specific Pi extension.
 Each task chain uses a pinned agent profile: a fresh implementer, zero or more mutually isolated fresh reviewers in parallel, and an optional fresh final writer (simplifier or fixer).
 The bundled `simplified` default runs an implementer then a separate editing simplifier. Explicit `reviewed` retains two reviewers plus a fixer, while `solo` provides a single self-validating implementation phase.
+The `swarm` profile is the exception to one chain per task: one interactive driver spawns Monty-owned child workers in their own `wt` worktrees and branches, each a headless chain that commits on its branch and reports to the driver; the driver lands checked heads by merge and retires children, and the task keeps one lifecycle.
 Separate task chains are independent and may run concurrently.
 Reviewers inspect without mutation-capable tools or integrations. Monty captures their responses into reports outside the worktree.
 The chain must not stage, commit, push, post remotely, manage worktrees, or complete the Monty task automatically.

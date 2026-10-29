@@ -264,11 +264,12 @@ Use the printed `monty resume <worker-id>` command when you intentionally want a
 
 ## Agent profiles
 
-Agent profiles keep interactive and headless role instructions together with a deliberately limited execution shape: one implementer, zero or more parallel reviewers, and an optional final writer (simplifier or fixer). Monty ships three profiles under `agent-profiles/`:
+Agent profiles keep interactive and headless role instructions together with a deliberately limited execution shape: one implementer, zero or more parallel reviewers, and an optional final writer (simplifier or fixer), or one interactive driver over Monty-owned child chains. Monty ships four profiles under `agent-profiles/`:
 
 - `simplified` is the default for new workers: one implementer followed by a separate editing simplifier in the same workspaces. The simplifier answers "can you radically simplify this?", applies useful simplifications, preserves required behavior and safeguards, reruns affected checks, and produces the final handoff. Interactive Pi/Codex/Claude instructions arrange the same separate editing agent.
 - `reviewed` preserves the existing implementer, correctness reviewer, quality reviewer, and fixer behavior.
 - `solo` runs one implementer with self-validation and no reviewer or fixer phases.
+- `swarm` runs one interactive driver that spawns, lands and retires Monty-owned committing child workers (`solo` chains by default, six at a time) through `monty swarm`; see `monty guide swarm`.
 
 Personal profiles live under `.monty/agent-profiles/`. Duplicate IDs across bundled and personal profiles are rejected.
 
@@ -329,6 +330,7 @@ Each phase runs in a fresh process with explicit task context, the authoritative
 - `simplified`: implementer, then a separate editing simplifier in the same workspaces.
 - `reviewed`: implementer, two isolated reviewers in parallel, then a fixer.
 - `solo`: one implementer with self-validation.
+- `swarm`: no headless chain of its own; `monty headless run`, `run-many` and `resume` refuse a swarm driver, whose children are spawned from its interactive session.
 
 Monty invokes Pi with `--print --mode json --no-session`. No subagent extension or parent Pi session is required. Writer phases use `read,bash,edit,write,grep,find,ls`; reviewers use `read,grep,find,ls` and cannot run shell-based validation. Writer phases retain normal Pi configuration and provider extensions. Reviewers disable extensions, skills and prompt templates as well as mutation-capable tools. Explicit tool allowlists exclude delegation tools. Independent processes and worktrees do not provide a filesystem sandbox. Pi's final event and assistant stop reason are checked as well as its process exit status: a zero exit code with an error or incomplete stream is a failed phase.
 
@@ -336,7 +338,7 @@ Headless profiles always start fresh phases; `--fork` is supported only for inte
 
 Codex uses `codex exec --ephemeral --json` and preserves command-local trust and configured permissions. With Codex YOLO disabled, writers use `workspace-write`, while reviewers use `read-only`. The existing `codex-yolo` setting continues to apply to Codex only.
 
-Claude uses fresh `--print --verbose --output-format stream-json --no-session-persistence` processes. A phase requires exactly one successful terminal result with a nonempty handoff and valid native UUID; permission denials and incomplete streams fail. Reviewers use restricted/safe modes, read/search tools, empty MCP configuration and disabled hooks. See [server-owned agents](docs/server-owned-agents.md) for native version requirements and remaining validation limits.
+Claude uses fresh `--print --verbose --output-format stream-json --no-session-persistence` processes. Print mode never prompts, so writer phases pre-allow `Bash,Edit,MultiEdit,Write,NotebookEdit,Read,Glob,Grep` with `--allowedTools`, the Claude counterpart of Pi's writer tool list and Codex's `workspace-write` sandbox; without it every edit is a permission denial. A phase requires exactly one successful terminal result with a nonempty handoff and valid native UUID; permission denials and incomplete streams fail. Reviewers use restricted/safe modes, read/search tools, empty MCP configuration and disabled hooks. See [server-owned agents](docs/server-owned-agents.md) for native version requirements and remaining validation limits.
 
 Prompts, JSONL events, phase logs, and final messages live in the worker's durable `artifacts/headless/<attempt-id>/` directory. Background supervisor diagnostics and its final result go to `logs/supervisor.log`. Monty captures phase handoffs into worker memory and publishes the canonical `monty:run-handoff:v1` record and pending notice. Failures include the last known phase and artifact paths. A successful run leaves the task open and all worktrees intact.
 
