@@ -98,9 +98,9 @@ let raw ~home meth path body =
       ([ ("authorization", "Bearer " ^ token) ] @ match body with Some _ -> [ ("content-type", "application/json") ] | None -> [])
   in
   let body = Cohttp_lwt.Body.of_string (match body with Some json -> Yojson.Safe.to_string json | None -> "") in
-  Lwt_unix.with_timeout 35. (fun () ->
-      Client_http.call ~headers ~body meth (Uri.of_string (base ^ path)) >>= fun (response, body) ->
-      Cohttp_lwt.Body.to_string body >|= fun text ->
+  let label = Printf.sprintf "%s %s at %s" (Cohttp.Code.string_of_method meth) path base in
+  Client_http.timed ~home ~label (fun () ->
+      Client_http.call ~label ~headers ~body meth (Uri.of_string (base ^ path)) >|= fun (response, text) ->
       (Cohttp.Code.code_of_status (Cohttp.Response.status response), Cohttp.Header.get (Cohttp.Response.headers response) "content-type", text))
 
 let settled status = not (List.mem status [ "accepted"; "running" ])

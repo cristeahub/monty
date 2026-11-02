@@ -546,6 +546,21 @@ monty service start  # Reuse the running service or start from saved configurati
 monty service stop   # Wait for shutdown; also safe if already stopped.
 ```
 
+The service is one event loop, so a blocking call inside it leaves every
+client waiting. Each client request gives up after 35 seconds
+(`MONTY_CLIENT_TIMEOUT` overrides the seconds) and fails as HTTP 504 with a
+plain `monty:` message, never as an internal error. An attached `monty
+terminal` does not exit on that: the service owns the native terminal, so the
+client keeps retrying while the service process holds its lock and resumes
+where it left off once the service answers; it exits with a plain message only
+when the service itself exits. Both sides write to `.monty/client-service.log`:
+the client notes each request that timed out and when the service answered
+again, and the service's watchdog logs every event-loop stall longer than two
+seconds together with the activity it was in (`request GET /v1/...`,
+`command <op> <id>`, `history sync <conversation>/<session>` or `inventory
+poll`) and every request that took more than five seconds to answer. Read that
+log first when a pane reports a timeout.
+
 Use the same `--home` when managing a nondefault Monty home. Stop before changing
 the saved configuration or port with `start --config FILE --port PORT`.
 `service serve --config FILE` remains available for foreground operation with

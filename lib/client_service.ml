@@ -2,6 +2,31 @@ open Lwt.Infix
 open Json_fields
 open Conversation_store
 
+(* The service is one Lwt event loop: a synchronous call that takes long, a
+   blocking lock or a slow subprocess wait stalls every request, and clients
+   see a service that is alive but silent. The watchdog below logs each stall
+   with the activity the loop was in when it stopped scheduling, so a stall
+   seen from a client can be traced to its cause. Set the marker before work
+   that runs synchronously; nothing else runs while that work blocks, so the
+   last marker set is the activity that stalled. *)
+let activity = ref "starting"
+let busy label = activity := label
+let log_time () =
+  let t = Unix.gmtime (Unix.gettimeofday ()) in
+  Printf.sprintf "%04d-%02d-%02dT%02d:%02d:%02dZ" (t.tm_year + 1900) (t.tm_mon + 1) t.tm_mday t.tm_hour t.tm_min t.tm_sec
+let log message = Printf.eprintf "%s monty service: %s\n%!" (log_time ()) message
+let stall_threshold = 2.
+let slow_request_threshold = 5.
+let watchdog () =
+  let rec tick last =
+    Lwt_unix.sleep 1. >>= fun () ->
+    let now = Unix.gettimeofday () in
+    let late = now -. last -. 1. in
+    if late > stall_threshold then
+      log (Printf.sprintf "event loop stalled for %.1fs (or the machine slept); last activity: %s" late !activity);
+    tick now in
+  tick (Unix.gettimeofday ())
+
 type worker_fence = {process:Lwt_process.process_full; mutable session_id:string}
 type t = {home:string; config:Yojson.Safe.t; clients:(string,Codex_rpc.t) Hashtbl.t;
   pi_clients:(string,Pi_rpc.t) Hashtbl.t;
@@ -312,6 +337,7 @@ let capture_snapshot t cid sess ~provenance =
     t.home cid sid ~snapshot:raw ~provenance;
   raw
 let sync t cid sid =
+  busy (Printf.sprintf "history sync %s/%s" cid sid);
   let conversation=load t.home cid in
   if field "purged" conversation=`Bool true then Lwt.return_unit else
   let sess=session conversation sid in
@@ -979,8 +1005,9 @@ let submit t id request =
   if fresh then Lwt.async (fun () ->
     (* A Pi prompt can wait for a dialog before acknowledging. Its response or
        interruption must not wait behind that prompt's command mutex. *)
-    let run f=if List.mem (s "op" request) ["respond";"interrupt";"cancel_execution"] then f () else Lwt_mutex.with_lock t.commands f in
+    let run f=if List.mem (s "op" request) ["respond";"interrupt";"cancel_execution";"terminal_input";"terminal_resize"] then f () else Lwt_mutex.with_lock t.commands f in
     run (fun () ->
+    busy (Printf.sprintf "command %s %s" (s "op" request) id);
     ignore (finish t.home id "running" `Null);
     Lwt.catch (fun () -> execute t ~id request >|= fun result ->
       if s "op" request="headless_start" then (
@@ -1044,6 +1071,13 @@ let stream t last =
     ["content-type","text/event-stream";"cache-control","no-store";"connection","close"])
     ~body ()
 let callback t ~token ~port ~shutdown conn req body =
+  (* Owned native processes must not inherit service sockets: a connection or
+     the listener kept open by a child after the service dies would leave
+     clients waiting on a dead service instead of being refused at once. *)
+  (match fst conn with Conduit_lwt_unix.TCP {Conduit_lwt_unix.fd;_} -> Lwt_unix.set_close_on_exec fd | _ -> ());
+  let started=Unix.gettimeofday () in
+  let label=Printf.sprintf "%s %s" (Cohttp.Code.string_of_method (Cohttp.Request.meth req)) (Uri.path (Cohttp.Request.uri req)) in
+  busy ("request " ^ label);
   Lwt.catch (fun () ->
     let headers=Cohttp.Request.headers req in
     let host=Printf.sprintf "127.0.0.1:%d" port in
@@ -1140,7 +1174,10 @@ let callback t ~token ~port ~shutdown conn req body =
     (function Failure(code,message)->error code message
       | Invalid_argument _ | Yojson.Safe.Util.Type_error _ ->error 400 "invalid request structure"
       | Lwt_unix.Timeout ->error 408 "request timed out"
-      | _ -> error 500 "operation failed; retained state is unchanged or recoverable")
+      | _ -> error 500 "operation failed; retained state is unchanged or recoverable") >|= fun result ->
+  let elapsed=Unix.gettimeofday ()-.started in
+  if elapsed>slow_request_threshold then log (Printf.sprintf "%s answered after %.1fs" label elapsed);
+  result
 let validate_config json =
   let profiles=array "profiles" json in
   if profiles=[] || List.length profiles>32 then fail 400 "configure one to 32 profiles";
@@ -1211,7 +1248,7 @@ let serve ~home ~config_path ~port =
     let t={home;config;clients=Hashtbl.create 8;connecting=Hashtbl.create 8;
       pi_clients=Hashtbl.create 8;claude_clients=Hashtbl.create 8;terminals=Hashtbl.create 8;executions=Hashtbl.create 8;supervisors=Hashtbl.create 8;active_workers=Hashtbl.create 8;codex_processes=Hashtbl.create 8;worker_fences=Hashtbl.create 8;commands=Lwt_mutex.create ();changed=Lwt_condition.create ();endpoints=Hashtbl.create 8;sequence=0;stopping=false;epoch=random_id ();events=[]} in
     let run () =
-      let socket=Lwt_unix.socket Unix.PF_INET Unix.SOCK_STREAM 0 in
+      let socket=Lwt_unix.socket ~cloexec:true Unix.PF_INET Unix.SOCK_STREAM 0 in
       Lwt_unix.setsockopt socket Unix.SO_REUSEADDR true;
       Lwt_unix.bind socket (Unix.ADDR_INET(Unix.inet_addr_loopback,port)) >>= fun () ->
       Lwt_unix.listen socket 32;
@@ -1235,10 +1272,12 @@ let serve ~home ~config_path ~port =
               subscribe t sess >|= fun () -> Hashtbl.replace observed k rpc) >>= fun () ->
             sync t (s "id" c) k)
             (fun _ -> source_error home (s "id" c) (s "id" sess) "subscription unavailable";Lwt.return_unit)) (xs "sessions" c)) (list home) >>= fun () ->
+        busy "inventory poll";
         (try let current=Yojson.Safe.to_string (inventory t (Uri.of_string "/v1/inventory?all_groups=true&scope=all")) in
           if current <> !previous_inventory then (previous_inventory:=current;event t (obj ["type",string "inventory_changed"])) with _ -> ());
         Lwt_unix.sleep 1. >>= poll in
       Lwt.async poll;
+      Lwt.async watchdog;
       let stop,wake=Lwt.wait () in
       let shutdown () = t.stopping<-true;if Lwt.is_sleeping stop then Lwt.wakeup_later wake () in
       let shutdown_connection=ref None in

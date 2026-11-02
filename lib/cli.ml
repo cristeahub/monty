@@ -1567,7 +1567,26 @@ main_cmd
 
 (* `monty __internal ...` runs the commands the installed hook files invoke. It
    is kept out of the help, as Rex keeps its own, because it is not for people. *)
+(* An exception that no command handled is still reported as a Monty error,
+   never as Cmdliner's "internal error" with a backtrace: the person at the
+   terminal needs the reason and the exit status, and a worker pane must not
+   look like a crash. MONTY_DEBUG=1 adds the backtrace for development. *)
 let eval ?(getenv = Sys.getenv_opt) argv =
   match Array.to_list argv with
   | _ :: "__internal" :: rest -> Session_start.internal ~getenv rest
-  | _ -> Cmdliner.Cmd.eval' ~argv (make_cmd ~getenv ())
+  | _ -> (
+      try Cmdliner.Cmd.eval' ~catch:false ~argv (make_cmd ~getenv ()) with
+      | Stack_overflow | Out_of_memory as error -> raise error
+      | error ->
+          let backtrace = Printexc.get_backtrace () in
+          let message =
+            match error with
+            | Conversation_store.Failure (_, message) | Stdlib.Failure message | Sys_error message | Invalid_argument message -> message
+            | Unix.Unix_error (code, call, argument) ->
+                Printf.sprintf "%s%s: %s" call (if argument = "" then "" else " " ^ argument) (Unix.error_message code)
+            | Lwt_unix.Timeout -> Printf.sprintf "Monty service did not answer within %.0fs" (Client_http.timeout ())
+            | error -> "unexpected error: " ^ Printexc.to_string error
+          in
+          Fmt.epr "monty: %s\n%!" message;
+          if getenv "MONTY_DEBUG" <> None && backtrace <> "" then Fmt.epr "%s%!" backtrace;
+          1)

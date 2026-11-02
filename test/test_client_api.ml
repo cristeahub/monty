@@ -33,7 +33,7 @@ let until_json ?seconds predicate fn=until ?seconds ~predicate fn
 let terminal_log home=home/"terminal.json"
 
 let read_byte ()=
-  check(Unix.select[Unix.stdin][][]5.<> ([],[],[]))"terminal input timed out";
+  check(Unix.select[Unix.stdin][][]10.<> ([],[],[]))"terminal input timed out";
   let bytes=Bytes.create 1 in check(Unix.read Unix.stdin bytes 0 1=1)"terminal input missing";Bytes.get bytes 0
 let actor_fixture ()=
   let config=json_file Sys.argv.(3)in
@@ -70,7 +70,7 @@ let autostart_suite home=
     let fd=Unix.openfile(home/".monty/client-service.lock")[Unix.O_RDWR]0 in
     Fun.protect ~finally:(fun()->Unix.close fd)(fun()->try Unix.lockf fd Unix.F_TLOCK 0;true with Unix.Unix_error((Unix.EACCES|Unix.EAGAIN),_,_)->false)in
   let lifecycle ?(target=home) ?(env=service.env) args=cli ~cwd:repo ~env ~timeout:25.(["service"]@args@["--home";target])in
-  let launch ()=cli ~cwd:repo ~env:(merge_env service.env["MONTY_CODEX_COMMAND",codex]) ~timeout:25.[]in
+  let launch ?(env=merge_env service.env["MONTY_CODEX_COMMAND",codex])()=cli ~cwd:repo ~env ~timeout:25.[]in
   let fresh=home/"fresh"in mkdir fresh;
   Fun.protect ~finally:(fun()->ignore(lifecycle ~target:fresh["stop"]);Service.close service;
     if Sys.file_exists metadata then wait ~seconds:25.(fun()->if unlocked()then true else(
@@ -139,6 +139,28 @@ let autostart_suite home=
       Lwt.bind(Lwt_unix.read connection(Bytes.create 4096)0 4096)(fun _->
         Lwt_unix.setsockopt_optint connection Unix.SO_LINGER(Some 0);Lwt_unix.close connection)));
     Fun.protect ~finally:(fun()->Lwt_main.run(Lwt_unix.close listener))(fun()->ok(launch()));
+    ok(lifecycle["stop"]);
+    (* A service whose event loop is blocked accepts the connection and never
+       answers. A request fails as HTTP 504 with a note in the service log, the
+       health probe reports no service, and a launch recovers by starting one. *)
+    let silent=Lwt_unix.socket Unix.PF_INET Unix.SOCK_STREAM 0 in
+    Lwt_main.run(Lwt_unix.bind silent(Unix.ADDR_INET(Unix.inet_addr_loopback,0)));Lwt_unix.listen silent 8;
+    let port=match Lwt_unix.getsockname silent with Unix.ADDR_INET(_,port)->port|_->assert false in
+    save metadata(puts["port",`Int 0;"url",string("http://127.0.0.1:"^string_of_int port)](json_file metadata));
+    let held=ref[]in
+    let rec accept ()=Lwt.catch(fun()->Lwt.bind(Lwt_unix.accept silent)(fun(connection,_)->held:=connection:: !held;accept()))(fun _->Lwt.return_unit)in
+    Lwt.async accept;
+    Unix.putenv"MONTY_CLIENT_TIMEOUT""1";
+    Fun.protect ~finally:(fun()->Unix.putenv"MONTY_CLIENT_TIMEOUT""";Lwt_main.run(Lwt.join(List.map(fun c->Lwt.catch(fun()->Lwt_unix.close c)(fun _->Lwt.return_unit))(silent:: !held))))(fun()->
+      let started=Unix.gettimeofday()in
+      (match Lwt_main.run(Monty.Client_http.request ~home`GET"/v1/health"`Null)with
+       | _->failwith"request to a silent service succeeded"
+       | exception Monty.Conversation_store.Failure(code,message)->
+           check(code=504&&contains message"did not answer GET /v1/health"&&contains message"within 1s")("silent service reported as: "^message));
+      check(Unix.gettimeofday()-.started<5.)"request outlived its timeout";
+      equal(Lwt_main.run(Monty.Client_terminal.health ~home))None ~label:"silent service passed the health probe";
+      check(contains(read log)"monty client"&&contains(read log)"did not answer GET /v1/health")"client timeout left no note in the service log";
+      ok(launch ~env:(merge_env launch_env["MONTY_CLIENT_TIMEOUT","1"])()));
     print_endline"client service autostart, startup reuse, concurrency, authentication and stale metadata recovery passed")
 
 let scope_suite home=
@@ -283,7 +305,7 @@ let sse_replay client cursor needle=
         | Some line->if String.starts_with ~prefix:"data:"line&&contains line needle then Lwt.return_unit else lines()in lines()))
       (fun()->Monty.Codex_rpc.close_channels ic oc))
 
-let tty_client home repo environment native initial=
+let tty_client ?stall ?kill home repo environment native initial=
   write(home/"fixture-vim-mode")initial;
   let master,slave=Test_pty.open_pair()in Test_pty.resize slave ~rows:40 ~cols:120;
   let child=match Unix.fork()with
@@ -294,17 +316,47 @@ let tty_client home repo environment native initial=
     | child->child in
   Unix.close slave;Unix.set_nonblock master;
   let status=Lwt_unix.waitpid[]child in let output=Buffer.create 4096 in
+  let drain ()=let bytes=Bytes.create 8192 in
+    (try let count=Unix.read master bytes 0 8192 in if count>0 then Buffer.add_subbytes output bytes 0 count
+     with Unix.Unix_error((Unix.EAGAIN|Unix.EWOULDBLOCK|Unix.EIO),_,_)->())in
   Fun.protect ~finally:(fun()->
     (match Lwt.state status with Lwt.Sleep->(try Unix.kill(-child)Sys.sigkill with Unix.Unix_error(Unix.ESRCH,_,_)->());ignore(Lwt_main.run status)|_->());Unix.close master)(fun()->
     let marker=if initial="exit"then"startup failed"else"ready "^initial in
-    wait ~seconds:10.(fun()->
-      let bytes=Bytes.create 8192 in
-      (try let count=Unix.read master bytes 0 8192 in if count>0 then Buffer.add_subbytes output bytes 0 count
-       with Unix.Unix_error((Unix.EAGAIN|Unix.EWOULDBLOCK|Unix.EIO),_,_)->());
-      contains(Buffer.contents output)marker);
-    if initial<>"exit"then(Test_pty.resize master ~rows:50 ~cols:132;Unix.kill child(Monty.Terminal_size.winch());ignore(Unix.write_substring master"i"0 1));
-    let _,status=Lwt_main.run(Lwt_unix.with_timeout 10.(fun()->Lwt.protected status))in
-    check(status=Unix.WEXITED 7)("native terminal exit propagation: "^Buffer.contents output))
+    wait ~seconds:10.(fun()->drain();contains(Buffer.contents output)marker);
+    (* A frozen service must not end the attachment: with a one-second request
+       timeout the client sees several timeouts and keeps retrying until the
+       service runs again, then input and exit flow as if nothing happened. *)
+    (* Output is read while waiting: the PTY discards what is still unread
+       when the client closes its side. *)
+    let exited seconds=let deadline=Unix.gettimeofday()+.seconds in
+      let rec loop ()=drain();match Lwt.state status with
+        | Lwt.Return(_,status)->drain();status
+        | Lwt.Fail error->raise error
+        | Lwt.Sleep->if Unix.gettimeofday()>deadline then failwith("terminal client did not exit: "^Buffer.contents output)else(pause 0.02;loop())in loop()in
+    Option.iter(fun pid->Unix.kill pid Sys.sigstop;
+      Fun.protect ~finally:(fun()->Unix.kill pid Sys.sigcont)(fun()->pause 3.5;drain();
+        check(Lwt.state status=Lwt.Sleep)("terminal client gave up during a service stall: "^Buffer.contents output)))stall;
+    match kill with
+    | Some pid->
+        (* A service that dies takes its owned terminal with it; the client says so plainly and exits. *)
+        Unix.kill pid Sys.sigkill;
+        let diagnose message=
+          let port=Option.get(Uri.port(Uri.of_string(s"url"(json_file(home/".monty/client-service.json")))))in
+          let command text=let ic=Unix.open_process_in text in let out=In_channel.input_all ic in ignore(Unix.close_process_in ic);out in
+          let lock=let fd=Unix.openfile(home/".monty/client-service.lock")[Unix.O_RDWR]0 in
+            Fun.protect ~finally:(fun()->Unix.close fd)(fun()->try Unix.lockf fd Unix.F_TLOCK 0;"free"with Unix.Unix_error _->"held")in
+          let note path=if Sys.file_exists path then read path else"(missing)"in
+          failwith(Printf.sprintf"%s\n-- lock: %s\n-- client log:\n%s\n-- port %d:\n%s\n-- processes:\n%s\n-- client process:\n%s"message lock(note(home/".monty/client-service.log"))port
+            (command(Printf.sprintf"lsof -nP -iTCP:%d 2>&1"port))(command(Printf.sprintf"ps -o pid,ppid,stat,command -p %d 2>&1; pgrep -fl 'fake-codex|owned_fake|owned_runtime|main.exe' 2>&1"pid))
+            (command(Printf.sprintf"sample %d 1 2>&1 | head -60"child)))in
+        let finished=try exited 15. with Failure message->diagnose message in
+        let text=Buffer.contents output in
+        check(finished=Unix.WEXITED 1&&contains text"Monty service exited while this terminal was attached"&&not(contains text"internal error"))
+          ("service loss was not reported plainly: "^text)
+    | None->
+        if initial<>"exit"then(Test_pty.resize master ~rows:50 ~cols:132;Unix.kill child(Monty.Terminal_size.winch());ignore(Unix.write_substring master"i"0 1));
+        let status=exited 10. in
+        check(status=Unix.WEXITED 7)("native terminal exit propagation: "^Buffer.contents output))
 
 let rec fake_suite home=
   let repo=setup_repo home in let native_home=home/"codex"in mkdir native_home;
@@ -509,6 +561,15 @@ and fake_terminal_checks home repo service server second client cid native codex
   List.iter(fun initial->tty_client home repo launch_env resumed initial;
     let recorded=list(req"conversations") |>List.concat_map(xs"sessions") |>List.find(fun sess->s"native_id"sess=resumed&&s"profile"sess="default")in
     check(field"terminal"recorded=`Bool false&&field"terminal_code"recorded=`Int 7)"terminal final state not persisted")["Insert";"Normal";"exit"];
+  let service_log ()=read(home/"service.log")and client_log ()=let path=home/".monty/client-service.log"in if Sys.file_exists path then read path else""in
+  let occurrences text needle=String.split_on_char '\n' text |>List.filter(fun line->contains line needle)|>List.length in
+  let stalls=occurrences(service_log())"event loop stalled"in
+  (* Each attachment replays the session's retained output, so a stall run
+     needs its own ready marker. *)
+  tty_client ~stall:(Service.pid service) home repo(merge_env launch_env["MONTY_CLIENT_TIMEOUT","1"])resumed"Normal-stall";
+  check(contains(client_log())"waiting for the Monty service after terminal output failed"&&contains(client_log())"answered terminal output again")("terminal stall was not retried: "^client_log());
+  wait(fun()->occurrences(service_log())"event loop stalled">stalls);
+  check(contains(service_log())"last activity: ")"watchdog did not name the stalled activity";
   ignore(cmd ~status:"rejected""invalid-yolo"(put"codex_yolo"(string"true")request));equal(Hashtbl.length server.threads)count;
   ok(cli ~env:service.env["settings";"set";"codex-yolo";"false";"--home";home]);
   Native.close second;
@@ -538,7 +599,8 @@ and fake_terminal_checks home repo service server second client cid native codex
   equal(read tasks_file)before;
   let root_chat=cmd"root-workspace"(obj["op",string"start";"profile",string"filesystem-root";"context",obj["workspaces",`List[string repo]]])in
   equal(xs"workspaces"(field"context"(session root_chat)))[string repo];
-  print_endline"client API receipts, events, history, blobs, approvals, transfers, worker ownership, PTY, purge and inventory passed"
+  tty_client ~kill:(Service.pid service) home repo launch_env resumed"Normal-loss";
+  print_endline"client API receipts, events, history, blobs, approvals, transfers, worker ownership, PTY, service stall, service loss, purge and inventory passed"
 
 let ()=
   if Array.length Sys.argv>2 && Sys.argv.(1)="--fixture"then actor_fixture()

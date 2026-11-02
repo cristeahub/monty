@@ -3,13 +3,14 @@ open Json_fields
 open Conversation_store
 let request=Client_http.request
 (* Is a service answering? Only an HTTP answer proves one is there: a missing
-   metadata file (503), a refused, reset or timed-out connection, a connection
-   closed mid-response (cohttp wraps that read error in its own exception) and
-   a cancelled probe all mean no usable service. *)
+   metadata file (503), a request that timed out (504), a refused, reset or
+   timed-out connection, a connection closed mid-response (cohttp wraps that
+   read error in its own exception) and a cancelled probe all mean no usable
+   service. *)
 let health ~home = Lwt.catch (fun () ->
     Lwt_unix.with_timeout 1. (fun () -> request ~home `GET "/v1/health" `Null) >|= Option.some)
     (function
-      | Failure(503,_) -> Lwt.return_none
+      | Failure((503|504),_) -> Lwt.return_none
       | Failure _ as error -> Lwt.fail error
       | _ -> Lwt.return_none)
 let ensure_service ?config_path ?port ~home () =
@@ -62,9 +63,11 @@ let stop_service ~home =
   | Some state ->
       Lwt.catch (fun () -> Lwt_unix.with_timeout 1. (fun () ->
         request ~home `POST "/v1/shutdown" (obj ["epoch",field "epoch" state])) >|= fun _ -> ())
+        (* A refused, reset or silent shutdown request (503 or 504) is settled
+           by the health probe: a service that no longer answers is stopping. *)
         (fun error -> if stopped () then Lwt.return_unit else
           match error with
-          | Failure _ -> Lwt.fail error
+          | Failure(code,_) when code<>503 && code<>504 -> Lwt.fail error
           | _ -> health ~home >>= function None -> Lwt.return_unit | Some _ -> Lwt.fail error) >>= wait
 let command ~home id json =
   request ~home `POST ("/v1/commands/" ^ component id) json >>= fun _ ->
@@ -212,7 +215,35 @@ let launch ~home ~profile ~harness ~command_override ~fork ~mode ~session_id ~pr
     let offset=ref 0 and resized=ref true in
     let prior=Sys.signal (Terminal_size.winch ()) (Sys.Signal_handle(fun _->resized:=true)) in
     Fun.protect ~finally:(fun () -> ignore(Sys.signal (Terminal_size.winch ()) prior)) (fun () ->
-      let route op extra=command ~home (random_id()) (obj(["op",string op;"conversation",string cid;"selected_session",string sid] @ extra)) >|= ignore in
+      (* The service owns the native terminal, so the attachment outlives a
+         silent or restarting service. A request that timed out (504) or found
+         no service to answer it (503, which every transport failure becomes)
+         is retried with backoff while the service process still holds its
+         lock; a retried command keeps its ID, which the service's receipts
+         make idempotent. Any other answer, or the service's exit, ends the
+         attachment, and a cancelled request stays cancelled. Nothing is written
+         to the terminal itself: the native program owns its display. *)
+      let outage=ref None in
+      let recovered label=match !outage with
+        | Some started -> outage:=None;
+            Client_http.note ~home (Printf.sprintf "terminal %s: Monty service answered %s again after %.1fs" sid label (Unix.gettimeofday()-.started))
+        | None -> () in
+      let rec attached ?(attempt=0) label f =
+        Lwt.catch (fun () -> f () >|= fun result -> recovered label;result) (fun error ->
+          let reason=match error with Failure(_,message)->message|error->Printexc.to_string error in
+          match error with
+          | Failure((503|504),_) when not(service_running ~home) ->
+              Client_http.note ~home (Printf.sprintf "terminal %s: Monty service exited during %s (%s)" sid label reason);
+              Lwt.fail (Failure(503,"Monty service exited while this terminal was attached (" ^ reason ^ "); its native terminal ended with it; inspect retained output and relaunch"))
+          | Failure((503|504),_) ->
+              if !outage=None then (outage:=Some(Unix.gettimeofday());
+                Client_http.note ~home (Printf.sprintf "terminal %s: waiting for the Monty service after %s failed: %s" sid label reason));
+              Lwt_unix.sleep (Float.min 2. (0.25 *. (2. ** float_of_int attempt))) >>= fun () ->
+              attached ~attempt:(attempt+1) label f
+          | _ -> Lwt.fail error) in
+      let route op extra=
+        let id=random_id() and body=obj(["op",string op;"conversation",string cid;"selected_session",string sid] @ extra) in
+        attached ("command " ^ op) (fun () -> command ~home id body) >|= ignore in
       (* Lifecycle records go out only for workers inside Rex; see lifecycle_status. *)
       let reporting=worker && Rex.inside_rex rex in
       let emit text=if reporting then Lwt_io.write Lwt_io.stdout text >>= fun () -> Lwt_io.flush Lwt_io.stdout else Lwt.return_unit in
@@ -223,7 +254,7 @@ let launch ~home ~profile ~harness ~command_override ~fork ~mode ~session_id ~pr
         if not reporting || !polls mod 50<>1 then Lwt.return_unit else
         let current=handoff_outcome ~home in
         if current = !handoff then Lwt.return_unit else (handoff:=current;report ()) in
-      let rec output () = request ~home `GET ("/v1/terminals/" ^ sid ^ "?offset=" ^ string_of_int !offset) `Null >>= fun value ->
+      let rec output () = attached "terminal output" (fun () -> request ~home `GET ("/v1/terminals/" ^ sid ^ "?offset=" ^ string_of_int !offset) `Null) >>= fun value ->
         let bytes=Base64.decode_exn(s "data" value) in
         Lwt_io.write Lwt_io.stdout bytes >>= fun () -> Lwt_io.flush Lwt_io.stdout >>= fun () ->
         offset:=i "offset" value;

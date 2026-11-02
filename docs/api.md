@@ -161,7 +161,12 @@ Error: a canonical local task key is required (status=400)
 
 A `400` means the arguments were wrong, `404` that the operation or record does
 not exist, `409` that the revision, session or receipt changed and you should
-refresh before retrying, and `503` that the service is not running.
+refresh before retrying, `503` that the service is not running, and `504` that
+the service accepted the connection but did not answer within the client's
+request timeout (35 seconds, or `MONTY_CLIENT_TIMEOUT` seconds): its process
+is alive but its event loop is not serving. The client appends that
+observation to `.monty/client-service.log`, next to the service's own
+watchdog line naming the activity that stalled.
 
 ## Machine-readable documentation
 
