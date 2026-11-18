@@ -108,7 +108,7 @@ let write_instructions ?destination_dir ?swarm_brief ~worker_dir ~id ~job ~profi
     | Some _ ->
         "Commit all your work on the current branch as small imperative commits and leave the tree clean. Do not run `monty swarm`. Do not push, open a pull request, submit a review, post comments, or perform any other remote write."
     | None ->
-        "Do not stage, commit, push, open a pull request, submit a review, post comments, or perform any other remote write unless explicitly approved."
+        "Do not stage, commit, push, open a pull request, submit a review, post comments, or perform any other remote write unless explicitly approved. When the user names a stage (`monty stage list`), that is such approval for exactly what `monty stage show ID` describes."
   in
   let workspace_lines =
     job.Job.workspaces

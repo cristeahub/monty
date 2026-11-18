@@ -150,6 +150,27 @@ let suite () = with_temp_dir ~prefix:"monty-skills-" (fun root ->
   require (hook home "claude").stdout "No worker handoffs are pending";
   let worker = hook ~environment:(merge_env environment [ "MONTY_JOB_ID", "w-1"; "MONTY_TASK_KEY", "local:9"; "MONTY_JOB_FILE", root / "job.json" ]) root "codex" in
   List.iter (require worker.stdout) [ "Monty worker w-1"; "MONTY_TASK_KEY=local:9"; "monty handoff publish"; "($monty)" ];
+  (* Stages: shipped ones, a private override, and their place in session context. *)
+  require (cli [ "stage"; "list" ]).stdout "No stages";
+  check (not (contains worker.stdout "monty stage show")) "hook advertises stages that do not exist";
+  Monty.Shell.ensure_dir (home / "stages"); Monty.Shell.ensure_dir (home / ".monty/stages");
+  write (home / "stages/ship.md") "# Shipped ship\n\nOpen a draft pull request.\n";
+  write (home / "stages/README.txt") "not a stage";
+  write (home / ".monty/stages/qa.md") "QA pass\n";
+  let stages = (cli [ "stage"; "list" ]).stdout in
+  List.iter (require stages) [ "Shipped ship"; "QA pass" ];
+  check (not (contains stages "README")) "a file that is not Markdown became a stage";
+  write (home / ".monty/stages/ship.md") "# My ship\n\nSuccinct.\n";
+  let shown = (cli [ "stage"; "show"; "ship" ]).stdout in
+  List.iter (require shown) [ "My ship"; "Succinct."; "only because the user asked for it" ];
+  check (not (contains shown "Shipped ship")) "a private stage did not replace the shipped one";
+  require (cli ~ok:false [ "stage"; "show"; "nope" ]).stderr "available stages: qa, ship";
+  let worker_environment = merge_env environment [ "MONTY_JOB_ID", "w-1" ] in
+  List.iter (require (hook ~environment:worker_environment root "codex").stdout)
+    [ "`qa` (QA pass), `ship` (My ship)"; "monty stage show ID"; "never start a stage on your own" ];
+  let child = hook ~environment:(merge_env worker_environment [ "MONTY_SWARM_PARENT", "w"; "MONTY_SWARM_NAME", "a" ]) root "codex" in
+  check (not (contains child.stdout "monty stage show")) "a swarm child was offered stages";
+  List.iter (require (hook home "claude").stdout) [ "`ship` (My ship)"; "monty resume <worker-id>" ];
   equal 0 (cli ~ok:true ~input:"" [ "__internal"; "session-start"; "--harness"; "nope" ]).code;
   check ((cli ~ok:false [ "__internal"; "bogus" ]).code = 2) "unknown internal command";
   let defaults = List.filter (fun (key, _) -> not (List.mem key [ "CODEX_HOME"; "PI_CODING_AGENT_DIR"; "CLAUDE_CONFIG_DIR" ])) environment in

@@ -53,6 +53,24 @@ let swarm_child ~getenv =
           name parent ]
   | _ -> []
 
+(* Stages exist for sessions with a user in them. A session whose stages cannot
+   be read still starts; `monty stage list` reports the reason. *)
+let stages ~getenv =
+  match getenv "MONTY_HOME" with
+  | Some home when String.trim home <> "" -> Result.value ~default:[] (Stage.discover ~home)
+  | _ -> []
+
+let worker_stages ~getenv =
+  match (swarm_child ~getenv, stages ~getenv) with
+  | [], (first :: _ as stages) ->
+      [ Printf.sprintf
+          "Stages the user can name in this session: %s. When the user asks for one (for example \"%s\", \
+           or \"continue\" when only one stage fits what is finished), run `monty stage show ID` and \
+           carry it out yourself. That request is their explicit authorization for exactly what the \
+           stage describes; never start a stage on your own."
+          (Stage.names stages) first.Stage.id ]
+  | _ -> []
+
 let worker ~getenv ~harness id =
   let title = match getenv "MONTY_JOB_TITLE" with Some title when String.trim title <> "" -> ": " ^ title | _ -> "" in
   String.concat "\n\n"
@@ -68,8 +86,9 @@ let worker ~getenv ~harness id =
        butler is told:";
       "```sh\nmonty handoff publish \"$MONTY_JOB_ID\" --summary 'What this run did.' --check 'dune runtest: passed'\n```";
       "Publishing leaves the task open. Do not commit, push, open pull requests, post reviews, send \
-       remote messages, manage worktrees or run `monty done` unless the user explicitly authorizes it.";
-      Printf.sprintf
+       remote messages, manage worktrees or run `monty done` unless the user explicitly authorizes it." ]
+    @ worker_stages ~getenv
+    @ [ Printf.sprintf
         "The monty skill (%s) explains the worker workflow; `monty guide workers` and `monty guide \
          handoffs` print the same guidance, and `monty COMMAND --help=plain` gives exact syntax."
         (skill_reference harness) ])
@@ -96,14 +115,24 @@ let head_butler ~getenv ~harness home =
     | None -> ""
   in
   String.concat "\n\n"
-    [ "You're running in the Monty control room.";
+    ([ "You're running in the Monty control room.";
       block [ "MONTY_HOME=" ^ home ];
       Printf.sprintf
         "This is Monty's head-butler session: plan work, choose actionable tasks and launch workers \
          through the `monty` CLI, following AGENTS.md in this directory and the user's instructions. \
          The harness is %s.%s"
         (Harness.to_string harness) profile;
-      pending_handoffs ~home;
+      pending_handoffs ~home ]
+    @ (match Result.value ~default:[] (Stage.discover ~home) with
+      | [] -> []
+      | stages ->
+          [ Printf.sprintf
+              "Stages a worker carries out when the user names one in its session: %s. A stage runs in \
+               the task's own worker session, never here: when the user asks for one on a task, focus \
+               that worker with `monty resume <worker-id>` and tell them to name the stage there (see \
+               `monty guide stages`)."
+              (Stage.names stages) ])
+    @ [
       "When the user says \"swarm\", wants many agents on one goal, or brings a large goal that \
        splits into independent areas with disjoint files or repositories, propose the `swarm` agent profile (see \
        `monty guide swarm`) with the areas and the landing check before launching; small or \
@@ -112,7 +141,7 @@ let head_butler ~getenv ~harness home =
         "The monty skill (%s) explains the workflows. `monty guide` lists the topics, `monty guide \
          TOPIC` prints one, and `monty COMMAND --help=plain` gives exact syntax. Help does not \
          authorize actions."
-        (skill_reference harness) ]
+        (skill_reference harness) ])
 
 let canonical path = match State_path.canonicalize path with Ok path -> path | Error _ -> path
 

@@ -16,6 +16,9 @@ When the user says "swarm" or wants many agents on one goal, that is the
 `monty swarm` commands, never ad-hoc worktrees or subagents. A goal spanning
 several repositories is one swarm whose children each own the repositories
 they need, not one task per repository.
+When the user names a stage in a worker session ("ship", "continue"), run
+`monty stage show ID` and carry it out yourself; their request authorizes
+exactly what that stage describes, and nothing starts a stage but the user.
 The guide comes from the installed `monty`, so it describes the commands that
 version has. `monty skill show` prints the whole guide at once.
 

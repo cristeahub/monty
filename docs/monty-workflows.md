@@ -483,6 +483,48 @@ inbox notices addressed to the driver. `monty doctor` warns about children
 whose driver is missing or archived and about ledger entries recorded running
 without a supervisor holding the child's worker lock.
 
+## Stages
+
+A stage is what the user asks a worker to do once its implementation is
+finished, written down once instead of retyped every time: commit in the user's
+tone, push, open a draft pull request with before and after images. Agent
+profiles decide how the work is built; stages decide what happens to it next.
+
+A stage is one Markdown file named `<id>.md`. Stages shipped with the control
+room live in `stages/`; the user's own live in `.monty/stages/`, and one there
+replaces a shipped stage with the same id. The first line is its title.
+
+```sh
+monty stage list        # ids and titles
+monty stage show ship   # the instructions to carry out
+```
+
+The user starts a stage by naming it in the worker's session ("ship", "run the
+ship stage", or "continue" when only one stage fits what is finished). The
+worker then runs `monty stage show ID` and carries the stage out itself: it
+runs the commands, uploads the images and reports the result. Monty stores and
+prints stages and nothing more; it never runs one and records nothing about
+them.
+
+- The user's request is the explicit authorization that commits, pushes and
+  pull requests otherwise need. It covers exactly what the stage describes,
+  for that task, that one time. Anything beyond it still needs asking.
+- Never start a stage unprompted, and never treat a finished implementation, a
+  published handoff or a stage's existence as a request for one.
+- Stages are for sessions with a user in them. Headless children and swarm
+  children never run one; a swarm driver may, after its children are landed.
+- A stage runs in the task's own worker session. When the user asks the head
+  butler for a stage on a task, resolve the task's worker, focus it with
+  `monty resume <worker-id>` and tell the user to name the stage there. Do not
+  carry the stage out from the control room and do not type into the worker's
+  terminal.
+- Finishing a stage leaves the task open; only `monty done` completes it.
+
+Write a stage as direct instructions to the agent: the steps in order, what
+good output looks like, and a closing line that states what the stage approves
+and what it does not. Keep personal examples and tone notes in
+`.monty/stages/`, which is not checked in.
+
 ## Agents
 
 Monty installs its agent skill and session hook into the account it launches

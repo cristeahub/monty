@@ -1195,6 +1195,34 @@ let agent_profiles_show_term =
   in
   Cmdliner.Term.(const agent_profiles_show $ name $ home_arg)
  in
+let stage_cmd =
+  let list home =
+    match Stage.discover ~home with
+    | Error message -> exit_code (Error message)
+    | Ok [] ->
+        Fmt.pr "No stages. Add one as %s/<id>.md.\n" (List.nth (Stage.roots ~home) 1);
+        0
+    | Ok stages ->
+        List.iter (fun (stage : Stage.t) -> Fmt.pr "%-12s  %s\n" stage.id stage.title) stages;
+        0
+  in
+  let show id home =
+    match Stage.find ~home id with
+    | Error message -> exit_code (Error message)
+    | Ok stage -> Fmt.pr "%s" (Stage.render stage); 0
+  in
+  let id =
+    let doc = "Stage id: the file name without .md." in
+    Cmdliner.Arg.(required & pos 0 (some string) None & info [] ~docv:"ID" ~doc)
+  in
+  Cmdliner.Cmd.group
+    (Cmdliner.Cmd.info "stage" ~doc:"List and read stages: named instructions a worker carries out when the user asks, such as shipping a draft pull request.")
+    [ Cmdliner.Cmd.v (Cmdliner.Cmd.info "list" ~doc:"List the available stages.")
+        Cmdliner.Term.(const list $ home_arg);
+      Cmdliner.Cmd.v
+        (Cmdliner.Cmd.info "show" ~doc:"Print a stage's instructions for the agent to carry out. Reading a stage authorizes nothing; the user's request for it does.")
+        Cmdliner.Term.(const show $ id $ home_arg) ]
+ in
 let agent_profiles_cmd =
   let list_cmd =
     Cmdliner.Cmd.v
@@ -1558,6 +1586,7 @@ let main_cmd =
       projects_cmd;
       settings_cmd;
       agent_profiles_cmd;
+      stage_cmd;
       tasks_cmd;
       task_cmd;
       headless_cmd;

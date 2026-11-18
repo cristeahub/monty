@@ -93,6 +93,13 @@ without explicit authorization. Headless children additionally may not manage
 worktrees or task lifecycle. Reviewer agents stay read-only. Follow the pinned
 profile's implementation and separate review/simplification requirements.
 
+A stage (`monty stage list`) is a named instruction the user gives a worker
+once its work is finished, such as `ship` for a draft pull request. The worker
+carries it out in its own session, and the user naming it there is the explicit
+authorization for exactly what `monty stage show ID` describes. When asked for
+a stage on a task, focus that worker with `monty resume`; never run a stage
+from the control room, start one unprompted, or type into a worker's terminal.
+
 Archive only when the user asks to complete the work. Force-discard requires
 explicit acceptance of losing local changes. A linked worker's completion also
 closes its task; do not complete it separately. Preserve durable identities and
