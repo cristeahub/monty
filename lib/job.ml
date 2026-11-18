@@ -7,6 +7,9 @@ type workspace = {
    of a driver. It is configuration, not runtime state. *)
 type swarm_config = {
   check : string option;
+  (* Landing checks for single workspaces, keyed by repository path or
+     directory name; `check` covers every workspace without an entry. *)
+  checks : (string * string) list;
   max_workers : int option;
   worker_profile : string option;
 }
@@ -29,6 +32,27 @@ type t = {
 
 let workspace ?branch repo = { repo; branch }
 
+(* The optional `checks` object of a `swarm` block or a swarm ledger. *)
+let swarm_checks_of_json json =
+  match Yojson.Safe.Util.member "checks" json with
+  | `Null -> Ok []
+  | `Assoc entries ->
+      List.fold_right
+        (fun (workspace, command) result ->
+          match (result, command) with
+          | (Error _ as error), _ -> error
+          | Ok checks, `String command
+            when String.trim workspace <> "" && String.trim command <> "" ->
+              Ok ((workspace, command) :: checks)
+          | Ok _, _ ->
+              Error
+                (Printf.sprintf "swarm checks entry %S must be a non-empty command string" workspace))
+        entries (Ok [])
+  | _ -> Error "swarm field \"checks\" must be an object of workspace to command when present"
+
+let swarm_checks_json checks =
+  `Assoc (List.map (fun (workspace, command) -> (workspace, `String command)) checks)
+
 (* The manifest and job.json share one `swarm` object shape. *)
 let swarm_config_of_json json =
   let ( let* ) = Result.bind in
@@ -43,6 +67,7 @@ let swarm_config_of_json json =
         | _ -> Error (Printf.sprintf "swarm field %S must be a non-empty string when present" name)
       in
       let* check = text "check" in
+      let* checks = swarm_checks_of_json swarm in
       let* worker_profile = text "worker_profile" in
       let* worker_profile =
         match worker_profile with
@@ -57,12 +82,13 @@ let swarm_config_of_json json =
         | `Int value when value > 0 -> Ok (Some value)
         | _ -> Error "swarm field \"max_workers\" must be a positive integer when present"
       in
-      Ok (Some { check; max_workers; worker_profile })
+      Ok (Some { check; checks; max_workers; worker_profile })
   | _ -> Error "field \"swarm\" must be an object when present"
 
 let swarm_config_json config =
   `Assoc
     ((match config.check with Some value -> [ ("check", `String value) ] | None -> [])
+    @ (if config.checks = [] then [] else [ ("checks", swarm_checks_json config.checks) ])
     @ (match config.max_workers with Some value -> [ ("max_workers", `Int value) ] | None -> [])
     @ match config.worker_profile with
       | Some value -> [ ("worker_profile", `String value) ]

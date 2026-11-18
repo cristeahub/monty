@@ -273,6 +273,10 @@ Agent profiles keep interactive and headless role instructions together with a d
 
 Personal profiles live under `.monty/agent-profiles/`. Duplicate IDs across bundled and personal profiles are rejected.
 
+A swarm can span repositories: the driver holds each one as a workspace and `monty swarm spawn NAME --workspace REPO` gives a child the ones its area needs.
+
+Stages are what a worker does once the work is finished, written once as `stages/<id>.md` (shipped) or `.monty/stages/<id>.md` (personal, replaces a shipped stage with the same id). Tell the worker "ship" and it reads `monty stage show ship` and carries it out itself: commit, push, draft pull request. See `monty guide stages`.
+
 ```sh
 monty agent-profiles list
 monty agent-profiles show simplified

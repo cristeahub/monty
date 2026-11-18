@@ -169,7 +169,7 @@ let mutation_prohibitions ?(writable = true) (dispatch : dispatch) =
   let commit_rule =
     match dispatch.swarm_child with
     | Some _ when writable ->
-        [ "Commit all your work on the current branch as small imperative commits; leave the tree clean (git status prints nothing) when you finish.";
+        [ "Commit all your work on the current branch of every workspace you change as small imperative commits; leave every tree clean (git status prints nothing) when you finish.";
           "Do not run monty swarm." ]
     | _ -> [ "Do not stage or commit changes." ]
   in

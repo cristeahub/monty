@@ -11,10 +11,22 @@ let schema = "monty:swarm-ledger:v1"
 
 type state = Running | Finished | Landed | Retired | Failed
 
+(* One repository a child works in: its branch there, forked from the driver's
+   branch in the same repository, and the child head that was landed. *)
+type workspace = {
+  repo : string;
+  branch : string;
+  landed_commit : string option;
+}
+
+(* `branch` and `landed_commit` describe the child's first workspace. Ledgers
+   written before children could span repositories have no `workspaces`; an
+   empty list means that one workspace in the driver's first repository. *)
 type child = {
   name : string;
   id : string;
   branch : string;
+  workspaces : workspace list;
   brief : string;
   spawned_at : string;
   resumed_at : string option;
@@ -27,6 +39,8 @@ type child = {
 type t = {
   driver : string;
   check : string option;
+  (* Landing checks for single repositories; `check` covers every other one. *)
+  checks : (string * string) list;
   max_workers : int;
   max_spawns : int;
   worker_profile : string;
@@ -58,10 +72,16 @@ let check_artifacts_dir worker_dir name =
 
 let child_json child =
   let optional name = function None -> [] | Some value -> [ (name, `String value) ] in
+  let workspace_json (workspace : workspace) =
+    `Assoc
+      ([ ("repo", `String workspace.repo); ("branch", `String workspace.branch) ]
+      @ optional "landed_commit" workspace.landed_commit)
+  in
   `Assoc
     ([ ("name", `String child.name);
        ("id", `String child.id);
        ("branch", `String child.branch);
+       ("workspaces", `List (List.map workspace_json child.workspaces));
        ("brief", `String child.brief);
        ("spawned_at", `String child.spawned_at);
        ("state", `String (state_to_string child.state)) ]
@@ -75,6 +95,7 @@ let to_json ledger =
     [ ("schema", `String schema);
       ("driver", `String ledger.driver);
       ("check", Option.fold ~none:`Null ~some:(fun value -> `String value) ledger.check);
+      ("checks", Job.swarm_checks_json ledger.checks);
       ("max_workers", `Int ledger.max_workers);
       ("max_spawns", `Int ledger.max_spawns);
       ("worker_profile", `String ledger.worker_profile);
@@ -97,12 +118,27 @@ let positive json name =
   | `Int value when value > 0 -> Ok value
   | _ -> Error (Printf.sprintf "swarm ledger field %S must be a positive integer" name)
 
+let workspace_of_json json =
+  let* repo = required json "repo" in
+  let* branch = required json "branch" in
+  let* landed_commit = optional json "landed_commit" in
+  Ok { repo; branch; landed_commit }
+
 let child_of_json json =
   let* name = required json "name" in
   let* name = State_path.safe_component ~label:"swarm child name" name in
   let* id = required json "id" in
   let* id = State_path.safe_component ~label:"swarm child id" id in
   let* branch = required json "branch" in
+  let* workspaces =
+    match Util.member "workspaces" json with
+    | `Null -> Ok []
+    | `List values ->
+        Json_fields.fold_results values ~init:[] ~f:(fun acc value ->
+            workspace_of_json value |> Result.map (fun workspace -> workspace :: acc))
+        |> Result.map List.rev
+    | _ -> Error "swarm ledger field \"workspaces\" must be an array when present"
+  in
   let* brief = required json "brief" in
   let* spawned_at = required json "spawned_at" in
   let* resumed_at = optional json "resumed_at" in
@@ -111,7 +147,7 @@ let child_of_json json =
   let* landed_commit = optional json "landed_commit" in
   let* last_check = optional json "last_check" in
   let* error = optional json "error" in
-  Ok { name; id; branch; brief; spawned_at; resumed_at; state; landed_commit; last_check; error }
+  Ok { name; id; branch; workspaces; brief; spawned_at; resumed_at; state; landed_commit; last_check; error }
 
 (* When the current run started: the resume if there was one, else the spawn. *)
 let run_started_at child = Option.value ~default:child.spawned_at child.resumed_at
@@ -123,6 +159,7 @@ let of_json json =
   else
     let* driver = required json "driver" in
     let* check = optional json "check" in
+    let* checks = Job.swarm_checks_of_json json in
     let* max_workers = positive json "max_workers" in
     let* max_spawns = positive json "max_spawns" in
     let* worker_profile = required json "worker_profile" in
@@ -134,7 +171,7 @@ let of_json json =
           |> Result.map List.rev
       | _ -> Error "swarm ledger field \"children\" must be an array"
     in
-    Ok { driver; check; max_workers; max_spawns; worker_profile; children }
+    Ok { driver; check; checks; max_workers; max_spawns; worker_profile; children }
 
 (* Reads the ledger without the lock; callers that mutate reload under it. *)
 let load_opt ~worker_dir =

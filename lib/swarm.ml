@@ -3,7 +3,11 @@
    environment, and refuses other sessions. Children are ordinary worker
    records in the driver's run, spawned as headless chains of the worker
    profile on a branch forked from the driver's branch; the driver lands
-   checked child heads into its branch by merge and retires landed children. *)
+   checked child heads into its branch by merge and retires landed children.
+
+   A driver may span repositories. Each child owns an ordered subset of the
+   driver's workspaces and has one branch per repository, forked from the
+   driver's branch there; landing checks and merges every one of them. *)
 
 let ( let* ) = Result.bind
 
@@ -61,24 +65,84 @@ let current_driver_id ~home =
   match resolve_driver ~home with Ok driver -> Some driver.record.id | Error _ -> None
 
 let worker_dir driver = driver.record.worker_dir
-let repo driver = driver.record.job.Job.repo
 
-let driver_branch driver =
-  match driver.record.job.Job.branch with
-  | Some branch when String.trim branch <> "" -> Ok branch
-  | _ -> Error (Printf.sprintf "swarm driver %s has no branch" driver.record.id)
+(* One of the driver's repositories with the driver's branch in it. *)
+type workspace = {
+  repo : string;
+  branch : string;
+  worktree : string option;
+}
 
-let driver_worktree driver =
-  match driver.record.workspaces with
-  | { Job_store.worktree = Some path; _ } :: _ when Sys.file_exists path && Sys.is_directory path ->
-      Ok path
+let driver_workspaces driver =
+  Json_fields.fold_results driver.record.workspaces ~init:[]
+    ~f:(fun acc (workspace : Job_store.workspace_state) ->
+      match workspace.branch with
+      | Some branch when String.trim branch <> "" ->
+          Ok ({ repo = workspace.repo; branch; worktree = workspace.worktree } :: acc)
+      | _ ->
+          Error
+            (Printf.sprintf "swarm driver %s has no branch in %s" driver.record.id workspace.repo))
+  |> Result.map List.rev
+
+(* A workspace is named by its repository path or, when that is unique among
+   the driver's workspaces, by the repository's directory name. *)
+let resolve_workspace workspaces key =
+  let matches =
+    if Filename.is_relative key then
+      List.filter (fun workspace -> String.equal (Filename.basename workspace.repo) key) workspaces
+    else
+      let path = Shell.normalize key in
+      List.filter (fun workspace -> String.equal workspace.repo path) workspaces
+  in
+  match matches with
+  | [ workspace ] -> Ok workspace
+  | found ->
+      Error
+        (Printf.sprintf "%s driver workspace matches %s; the driver's workspaces are: %s"
+           (if found = [] then "no" else "more than one")
+           key
+           (String.concat ", " (List.map (fun workspace -> workspace.repo) workspaces)))
+
+let driver_workspace workspaces repo =
+  match List.find_opt (fun workspace -> String.equal workspace.repo repo) workspaces with
+  | Some workspace -> Ok workspace
+  | None -> Error (Printf.sprintf "%s is not a workspace of the swarm driver" repo)
+
+let materialized_worktree ~owner workspace =
+  match workspace.worktree with
+  | Some path when Sys.file_exists path && Sys.is_directory path -> Ok path
   | _ ->
       Error
-        (Printf.sprintf "swarm driver %s has no materialized worktree; resume the driver first"
-           driver.record.id)
+        (Printf.sprintf "%s has no materialized worktree for %s; resume it first" owner workspace.repo)
 
 let child_id driver name = driver.record.id ^ "--" ^ name
 let child_branch branch name = branch ^ "--" ^ name
+
+(* The repositories and branches of a child. Ledger entries written before
+   children could span repositories own the driver's first workspace. *)
+let child_workspaces workspaces (child : Swarm_ledger.child) =
+  match (child.workspaces, workspaces) with
+  | [], first :: _ ->
+      [ { Swarm_ledger.repo = first.repo; branch = child.branch; landed_commit = child.landed_commit } ]
+  | recorded, _ -> recorded
+
+(* The landing check for one repository: its own entry, else the shared one. *)
+let check_for workspaces (ledger : Swarm_ledger.t) repo =
+  let* specific =
+    Json_fields.fold_results ledger.checks ~init:None ~f:(fun found (key, command) ->
+        let* workspace =
+          resolve_workspace workspaces key
+          |> Result.map_error (fun message -> "swarm checks: " ^ message)
+        in
+        Ok (if String.equal workspace.repo repo then Some command else found))
+  in
+  match (specific, ledger.check) with
+  | Some check, _ | None, Some check -> Ok check
+  | None, None ->
+      Error
+        (Printf.sprintf
+           "no landing check is set for %s; run monty swarm init --check CMD (add --workspace REPO for a check of that repository only)"
+           repo)
 
 let default_ledger driver : Swarm_ledger.t =
   let config = driver.record.job.Job.swarm in
@@ -87,6 +151,7 @@ let default_ledger driver : Swarm_ledger.t =
   in
   { driver = driver.record.id;
     check = Option.bind config (fun (config : Job.swarm_config) -> config.check);
+    checks = Option.fold ~none:[] ~some:(fun (config : Job.swarm_config) -> config.checks) config;
     max_workers = setting (fun config -> config.max_workers) driver.swarm.max_workers;
     max_spawns = driver.swarm.max_spawns;
     worker_profile = setting (fun config -> config.worker_profile) driver.swarm.worker_profile;
@@ -96,11 +161,19 @@ let git ~cwd arguments =
   Process.run_success ~cwd ("git " ^ String.concat " " (List.map Shell.quote arguments))
   |> Result.map String.trim
 
+(* Whether the child's head is in the driver's branch in every repository. *)
 let head_in_driver driver (child : Swarm_ledger.child) =
-  match driver_branch driver with
-  | Ok branch ->
-      Result.is_ok (git ~cwd:(repo driver) [ "merge-base"; "--is-ancestor"; child.branch; branch ])
+  match driver_workspaces driver with
   | Error _ -> false
+  | Ok workspaces ->
+      List.for_all
+        (fun (owned : Swarm_ledger.workspace) ->
+          match driver_workspace workspaces owned.repo with
+          | Error _ -> false
+          | Ok workspace ->
+              Result.is_ok
+                (git ~cwd:owned.repo [ "merge-base"; "--is-ancestor"; owned.branch; workspace.branch ]))
+        (child_workspaces workspaces child)
 
 (* Child records are found by exact id, never by Job_store.find's slug matching. *)
 let find_record records (child : Swarm_ledger.child) =
@@ -191,16 +264,34 @@ let require_child driver name =
                    String.concat ", "
                      (List.map (fun (child : Swarm_ledger.child) -> child.name) children))))
 
-let init driver ~check =
+let init driver ~check ~workspace =
   let check = String.trim check in
   if check = "" then Error "the landing check command must not be empty"
   else
-    let* ledger =
-      Swarm_ledger.update ~home:driver.home ~worker_dir:(worker_dir driver) (function
-        | None -> Ok { (default_ledger driver) with check = Some check }
-        | Some ledger -> Ok { ledger with check = Some check })
+    let* workspaces = driver_workspaces driver in
+    let* target =
+      match workspace with
+      | None -> Ok None
+      | Some key -> resolve_workspace workspaces key |> Result.map Option.some
     in
-    Fmt.pr "Swarm check: %s\nLedger: %s\nLimits: %d running, %d total, worker profile %s\n"
+    let set (ledger : Swarm_ledger.t) =
+      match target with
+      | None -> Ok { ledger with check = Some check }
+      | Some target ->
+          (* Replace whatever entry already named this repository. *)
+          let* others =
+            Json_fields.fold_results ledger.checks ~init:[] ~f:(fun acc (key, command) ->
+                let* existing = resolve_workspace workspaces key in
+                Ok (if String.equal existing.repo target.repo then acc else (key, command) :: acc))
+          in
+          Ok { ledger with checks = List.rev others @ [ (target.repo, check) ] }
+    in
+    let* ledger =
+      Swarm_ledger.update ~home:driver.home ~worker_dir:(worker_dir driver) (fun ledger ->
+          set (Option.value ~default:(default_ledger driver) ledger))
+    in
+    Fmt.pr "Swarm check%s: %s\nLedger: %s\nLimits: %d running, %d total, worker profile %s\n"
+      (Option.fold ~none:"" ~some:(fun target -> " for " ^ target.repo) target)
       check (Swarm_ledger.path (worker_dir driver)) ledger.max_workers ledger.max_spawns
       ledger.worker_profile;
     Ok ()
@@ -242,12 +333,44 @@ let start_chain (options : Launcher.options) driver ~name ~explicit_resume id =
            "%s\nswarm child %s is recorded as failed; retry with monty swarm resume %s --brief FILE or remove it with monty swarm retire %s --force"
            message name (Shell.quote name) (Shell.quote name))
 
-let spawn (options : Launcher.options) driver ~name ~brief ~profile =
+let workspaces_json (workspaces : Swarm_ledger.workspace list) =
+  `List
+    (List.map
+       (fun (workspace : Swarm_ledger.workspace) ->
+         `Assoc
+           [ ("repo", `String workspace.repo);
+             ("branch", `String workspace.branch);
+             ( "landed_commit",
+               Option.fold ~none:`Null ~some:(fun commit -> `String commit) workspace.landed_commit ) ])
+       workspaces)
+
+let spawn (options : Launcher.options) driver ~name ~brief ~profile ~workspaces:selected =
   let* name = State_path.safe_component ~label:"swarm child name" name in
   let* contents = read_brief brief in
   let options = { options with Launcher.worktree_mode = Launcher.Always } in
   let* () = Launcher.check_dependencies options in
-  let* branch = driver_branch driver in
+  let* workspaces = driver_workspaces driver in
+  (* A child owns the workspaces it names, else the driver's first one. *)
+  let* sources =
+    match (selected, workspaces) with
+    | [], first :: _ -> Ok [ first ]
+    | [], [] -> Error (Printf.sprintf "swarm driver %s has no workspace" driver.record.id)
+    | keys, _ ->
+        Json_fields.fold_results keys ~init:[] ~f:(fun acc key ->
+            let* workspace = resolve_workspace workspaces key in
+            if List.exists (fun chosen -> String.equal chosen.repo workspace.repo) acc then
+              Error (Printf.sprintf "workspace %s is named more than once" workspace.repo)
+            else Ok (workspace :: acc))
+        |> Result.map List.rev
+  in
+  let owned =
+    List.map
+      (fun source ->
+        { Swarm_ledger.repo = source.repo; branch = child_branch source.branch name;
+          landed_commit = None })
+      sources
+  in
+  let first = List.hd owned in
   (* Reconcile first so finished children no longer count against max_workers. *)
   let* _ = reconcile driver in
   let* worker_profile =
@@ -259,7 +382,6 @@ let spawn (options : Launcher.options) driver ~name ~brief ~profile =
     else Error (Printf.sprintf "swarm children cannot run the %s profile" worker_profile.id)
   in
   let id = child_id driver name in
-  let child_branch = child_branch branch name in
   let brief_path = Swarm_ledger.brief_path (worker_dir driver) name in
   let* state =
     match driver.record.state_path with
@@ -268,7 +390,8 @@ let spawn (options : Launcher.options) driver ~name ~brief ~profile =
   in
   let now = Worker_memory.now_utc () in
   let child : Swarm_ledger.child =
-    { name; id; branch = child_branch; brief = brief_path; spawned_at = now; resumed_at = None;
+    { name; id; branch = first.branch; workspaces = owned; brief = brief_path; spawned_at = now;
+      resumed_at = None;
       state = Swarm_ledger.Running; landed_commit = None; last_check = None; error = None }
   in
   (* Limits, the brief and the child record are committed together under the
@@ -278,11 +401,8 @@ let spawn (options : Launcher.options) driver ~name ~brief ~profile =
         let* ledger = Swarm_ledger.load_opt ~worker_dir:(worker_dir driver) in
         let ledger = Option.value ~default:(default_ledger driver) ledger in
         let* () =
-          match ledger.check with
-          | Some _ -> Ok ()
-          | None ->
-              Error
-                "the landing check command is not set; run monty swarm init --check CMD before the first spawn"
+          Json_fields.fold_results owned ~init:() ~f:(fun () (workspace : Swarm_ledger.workspace) ->
+              check_for workspaces ledger workspace.repo |> Result.map ignore)
         in
         let* () =
           if Swarm_ledger.find_child ledger name <> None then
@@ -316,8 +436,13 @@ let spawn (options : Launcher.options) driver ~name ~brief ~profile =
         in
         let* () = State_store.write_file_atomic ~path:brief_path ~perm:0o600 contents in
         let job =
-          Job.make ~id ~branch:child_branch ~worker_dir:state.worker_dir
-            ~title:(driver.record.job.Job.title ^ ": " ^ name) ~repo:(repo driver)
+          Job.make ~id ~branch:first.branch ~worker_dir:state.worker_dir
+            ~workspaces:
+              (List.map
+                 (fun (workspace : Swarm_ledger.workspace) ->
+                   Job.workspace ~branch:workspace.branch workspace.repo)
+                 owned)
+            ~title:(driver.record.job.Job.title ^ ": " ^ name) ~repo:first.repo
             ~context:brief_path ~agent_profile:worker_profile.id ~swarm_parent:driver.record.id
             ~swarm_name:name ()
         in
@@ -330,13 +455,16 @@ let spawn (options : Launcher.options) driver ~name ~brief ~profile =
         Ok prepared)
   in
   let* () =
-    match git ~cwd:(repo driver) [ "branch"; child_branch; branch ] with
-    | Ok _ -> Ok ()
-    | Error message ->
-        let* () = mark_failed driver name message in
-        Error
-          (Printf.sprintf "%s\nswarm child %s is recorded as failed; remove it with monty swarm retire %s --force"
-             message name (Shell.quote name))
+    Json_fields.fold_results (List.combine sources owned) ~init:()
+      ~f:(fun () (source, (workspace : Swarm_ledger.workspace)) ->
+        match git ~cwd:source.repo [ "branch"; workspace.branch; source.branch ] with
+        | Ok _ -> Ok ()
+        | Error message ->
+            let* () = mark_failed driver name message in
+            Error
+              (Printf.sprintf
+                 "%s\nswarm child %s is recorded as failed; remove it with monty swarm retire %s --force"
+                 message name (Shell.quote name)))
   in
   let* receipt = start_chain options driver ~name ~explicit_resume:false prepared.id in
   Ok
@@ -344,7 +472,8 @@ let spawn (options : Launcher.options) driver ~name ~brief ~profile =
       [ ("schema", `String spawn_schema);
         ("name", `String name);
         ("worker_id", `String prepared.id);
-        ("branch", `String child_branch);
+        ("branch", `String first.branch);
+        ("workspaces", workspaces_json owned);
         ("brief", `String brief_path);
         ("worker_dir", `String prepared.worker_dir);
         ("agent_profile", `String worker_profile.id);
@@ -391,6 +520,7 @@ let status driver ~json =
   let ledger = Option.value ~default:(default_ledger driver) ledger in
   let* records = Job_store.load_all ~home:driver.home in
   let* pending = Run_handoff.pending ~inbox:driver.record.id ~home:driver.home () in
+  let* workspaces = driver_workspaces driver in
   let* rows =
     Json_fields.fold_results ledger.children ~init:[] ~f:(fun acc child ->
         let* record = find_record records child in
@@ -412,6 +542,7 @@ let status driver ~json =
         [ ("schema", `String status_schema);
           ("driver", `String driver.record.id);
           ("check", optional ledger.check);
+          ("checks", Job.swarm_checks_json ledger.checks);
           ("max_workers", `Int ledger.max_workers);
           ("max_spawns", `Int ledger.max_spawns);
           ("worker_profile", `String ledger.worker_profile);
@@ -427,6 +558,7 @@ let status driver ~json =
                        ("state", `String (Swarm_ledger.state_to_string child.state));
                        ("job_status", `String job_status);
                        ("branch", `String child.branch);
+                       ("workspaces", workspaces_json (child_workspaces workspaces child));
                        ("head_in_driver", `Bool in_driver);
                        ("pending_handoffs", `Int pending);
                        ("landed_commit", optional child.landed_commit);
@@ -437,12 +569,21 @@ let status driver ~json =
     Fmt.pr "Driver: %s\nCheck: %s\nRunning: %d of %d (spawned %d of %d, worker profile %s)\n"
       driver.record.id (Option.value ~default:"<not set: run monty swarm init --check CMD>" ledger.check)
       running ledger.max_workers (List.length ledger.children) ledger.max_spawns ledger.worker_profile;
+    List.iter (fun (workspace, check) -> Fmt.pr "Check for %s: %s\n" workspace check) ledger.checks;
     Fmt.pr "%-16s %-9s %-17s %-7s %-8s %s\n" "NAME" "STATE" "JOB" "LANDED" "PENDING" "BRANCH";
     List.iter
       (fun ((child : Swarm_ledger.child), job_status, in_driver, pending) ->
         Fmt.pr "%-16s %-9s %-17s %-7s %-8d %s\n" child.name
           (Swarm_ledger.state_to_string child.state) job_status
           (if in_driver then "yes" else "no") pending child.branch;
+        (* The row shows the first workspace; a child spanning repositories lists them all. *)
+        (match child_workspaces workspaces child with
+        | [] | [ _ ] -> ()
+        | owned ->
+            List.iter
+              (fun (workspace : Swarm_ledger.workspace) ->
+                Fmt.pr "  workspace: %s | %s\n" workspace.repo workspace.branch)
+              owned);
         Option.iter (fun error -> Fmt.pr "  error: %s\n" (Run_handoff.compact_summary error)) child.error;
         Option.iter (fun path -> Fmt.pr "  last check: %s\n" path) child.last_check)
       rows);
@@ -453,13 +594,22 @@ let clean_worktree ~label path =
   |> Result.map_error (fun message ->
          Printf.sprintf "%s worktree must be clean before landing: %s" label message)
 
+(* One repository of a landing: the driver's side, the child's side and the
+   check that gates the merge. *)
+type landing = {
+  owned : Swarm_ledger.workspace;
+  driver_branch : string;
+  driver_worktree : string;
+  child_worktree : string;
+  check : string;
+}
+
+(* Landing is all or nothing across the child's repositories: the driver's
+   branch is merged into the child everywhere, then every check runs, and only
+   when all pass is the child merged into the driver. Those final merges cannot
+   conflict because each child already contains its driver branch. *)
 let land_child driver ~name ~message =
   let* ledger, child = require_child driver name in
-  let* check =
-    match ledger.check with
-    | Some check -> Ok check
-    | None -> Error "the landing check command is not set; run monty swarm init --check CMD"
-  in
   let* () =
     match child.state with
     | Swarm_ledger.Finished -> Ok ()
@@ -468,61 +618,128 @@ let land_child driver ~name ~message =
           (Printf.sprintf "swarm child %s is %s, not finished; only a finished child can be landed"
              name (Swarm_ledger.state_to_string state))
   in
-  let* branch = driver_branch driver in
-  let* driver_worktree = driver_worktree driver in
-  let* _ = Wt.validate_worktree ~repo:(repo driver) ~branch driver_worktree in
-  let* () = clean_worktree ~label:"driver" driver_worktree in
+  let* workspaces = driver_workspaces driver in
   let* record = active_record ~home:driver.home child in
-  let* child_worktree =
-    match record.workspaces with
-    | { Job_store.worktree = Some path; _ } :: _ when Sys.file_exists path -> Ok path
-    | _ -> Error (Printf.sprintf "swarm child %s has no materialized worktree" name)
+  let* landings =
+    Json_fields.fold_results (child_workspaces workspaces child) ~init:[]
+      ~f:(fun acc (owned : Swarm_ledger.workspace) ->
+        let* source = driver_workspace workspaces owned.repo in
+        let* check = check_for workspaces ledger owned.repo in
+        let* driver_worktree =
+          materialized_worktree ~owner:("swarm driver " ^ driver.record.id) source
+        in
+        let* _ = Wt.validate_worktree ~repo:owned.repo ~branch:source.branch driver_worktree in
+        let* () = clean_worktree ~label:"driver" driver_worktree in
+        let* child_worktree =
+          match
+            List.find_opt
+              (fun (workspace : Job_store.workspace_state) -> String.equal workspace.repo owned.repo)
+              record.workspaces
+          with
+          | Some { worktree = Some path; _ } when Sys.file_exists path -> Ok path
+          | _ ->
+              Error
+                (Printf.sprintf "swarm child %s has no materialized worktree for %s" name owned.repo)
+        in
+        Ok ({ owned; driver_branch = source.branch; driver_worktree; child_worktree; check } :: acc))
+    |> Result.map List.rev
   in
+  let each step = Json_fields.fold_results landings ~init:() ~f:(fun () landing -> step landing) in
   let message = Option.value ~default:(Printf.sprintf "Land swarm child %s" name) message in
   let artifacts = Swarm_ledger.check_artifacts_dir (worker_dir driver) name in
-  let log = Filename.concat artifacts ("check-" ^ Worker_memory.now_utc () ^ ".log") in
+  (* Timestamps have one-second resolution, so a landing retried within the
+     same second gets a numbered name instead of replacing the earlier log. *)
+  let log =
+    let stamp = "check-" ^ Worker_memory.now_utc () in
+    let rec unused attempt =
+      let name = if attempt = 1 then stamp else Printf.sprintf "%s-%d" stamp attempt in
+      let path = Filename.concat artifacts (name ^ ".log") in
+      if Sys.file_exists path then unused (attempt + 1) else path
+    in
+    unused 1
+  in
   Worker_lock.with_lock ~home:driver.home ~record (fun () ->
-      let* _ = Wt.validate_worktree ~repo:(repo driver) ~branch:child.branch child_worktree in
-      let* () = clean_worktree ~label:"child" child_worktree in
       let* () =
-        match git ~cwd:child_worktree [ "merge"; "--no-edit"; branch ] with
-        | Ok _ -> Ok ()
-        | Error merge_error ->
-            ignore (git ~cwd:child_worktree [ "merge"; "--abort" ]);
-            let* () = mark_failed driver name ("merging the driver branch conflicted: " ^ merge_error) in
-            Error
-              (Printf.sprintf
-                 "merging driver branch %s into child %s conflicted; resume the child with a brief to resolve it:\n%s"
-                 branch name merge_error)
+        each (fun landing ->
+            let* _ =
+              Wt.validate_worktree ~repo:landing.owned.repo ~branch:landing.owned.branch
+                landing.child_worktree
+            in
+            clean_worktree ~label:"child" landing.child_worktree)
       in
-      let* () = State_store.ensure_real_directory ~label:"swarm check artifacts" ~mode:0o700 artifacts in
-      let* result = Process.run_capture ~cwd:child_worktree check in
       let* () =
-        State_store.write_file_atomic ~path:log ~perm:0o600
-          (Printf.sprintf "$ %s\n%s\n[%s]\n" check result.stdout (Process.status_to_string result.status))
-      in
-      let* () = update_child driver name (fun child -> { child with last_check = Some log }) in
-      match result.status with
-      | `Exited 0 ->
-          let* () =
-            match git ~cwd:driver_worktree [ "merge"; "--no-ff"; "-m"; message; child.branch ] with
+        each (fun landing ->
+            match git ~cwd:landing.child_worktree [ "merge"; "--no-edit"; landing.driver_branch ] with
             | Ok _ -> Ok ()
             | Error merge_error ->
-                ignore (git ~cwd:driver_worktree [ "merge"; "--abort" ]);
+                ignore (git ~cwd:landing.child_worktree [ "merge"; "--abort" ]);
+                let* () =
+                  mark_failed driver name
+                    (Printf.sprintf "merging the driver branch conflicted in %s: %s" landing.owned.repo
+                       merge_error)
+                in
                 Error
-                  (Printf.sprintf "merging child %s into the driver branch failed:\n%s" name merge_error)
+                  (Printf.sprintf
+                     "merging driver branch %s into child %s conflicted in %s; resume the child with a brief to resolve it:\n%s"
+                     landing.driver_branch name landing.owned.repo merge_error))
+      in
+      let* () = State_store.ensure_real_directory ~label:"swarm check artifacts" ~mode:0o700 artifacts in
+      (* Every check runs even after one fails, so one resume can fix them all. *)
+      let* results =
+        Json_fields.fold_results landings ~init:[] ~f:(fun acc landing ->
+            let* result = Process.run_capture ~cwd:landing.child_worktree landing.check in
+            Ok ((landing, result) :: acc))
+        |> Result.map List.rev
+      in
+      let* () =
+        State_store.write_file_atomic ~path:log ~perm:0o600
+          (String.concat "\n"
+             (List.map
+                (fun (landing, (result : Process.captured)) ->
+                  Printf.sprintf "# %s\n$ %s\n%s\n[%s]\n" landing.owned.repo landing.check
+                    result.stdout (Process.status_to_string result.status))
+                results))
+      in
+      let* () = update_child driver name (fun child -> { child with last_check = Some log }) in
+      match List.filter (fun (_, (result : Process.captured)) -> result.status <> `Exited 0) results with
+      | (failed, result) :: _ ->
+          Error
+            (Printf.sprintf "landing check %s for swarm child %s in %s; output: %s"
+               (Process.status_to_string result.status) name failed.owned.repo log)
+      | [] ->
+          let* landed =
+            Json_fields.fold_results landings ~init:[] ~f:(fun acc landing ->
+                match
+                  git ~cwd:landing.driver_worktree
+                    [ "merge"; "--no-ff"; "-m"; message; landing.owned.branch ]
+                with
+                | Ok _ ->
+                    let* commit = git ~cwd:landing.owned.repo [ "rev-parse"; landing.owned.branch ] in
+                    Ok ({ landing.owned with landed_commit = Some commit } :: acc)
+                | Error merge_error ->
+                    ignore (git ~cwd:landing.driver_worktree [ "merge"; "--abort" ]);
+                    Error
+                      (Printf.sprintf
+                         "merging child %s into driver branch %s failed in %s; fix the cause and land again, which skips repositories that are already merged:\n%s"
+                         name landing.driver_branch landing.owned.repo merge_error))
+            |> Result.map List.rev
           in
-          let* commit = git ~cwd:(repo driver) [ "rev-parse"; child.branch ] in
           let* () =
             update_child driver name (fun child ->
-                { child with state = Swarm_ledger.Landed; landed_commit = Some commit; error = None })
+                { child with
+                  state = Swarm_ledger.Landed;
+                  workspaces = landed;
+                  landed_commit = Option.bind (List.nth_opt landed 0) (fun first -> first.landed_commit);
+                  error = None })
           in
-          Fmt.pr "Landed swarm child %s (%s) into %s\nCheck output: %s\n" name commit branch log;
-          Ok ()
-      | status ->
-          Error
-            (Printf.sprintf "landing check %s for swarm child %s; output: %s"
-               (Process.status_to_string status) name log))
+          Fmt.pr "Landed swarm child %s\n" name;
+          List.iter2
+            (fun landing (workspace : Swarm_ledger.workspace) ->
+              Fmt.pr "  %s: %s into %s\n" workspace.repo
+                (Option.value ~default:"" workspace.landed_commit) landing.driver_branch)
+            landings landed;
+          Fmt.pr "Check output: %s\n" log;
+          Ok ())
 
 let retire ~wt_command driver ~name ~force =
   let* _, child = require_child driver name in

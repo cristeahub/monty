@@ -92,9 +92,9 @@ let install_wt ~root =
          "  b)";
          "    branch=$2";
          "    safe=$(printf '%s' \"$branch\" | tr '/ ' '__')";
-         "    worktree=" ^ Shell.quote worktrees ^ "/$safe";
+         "    worktree=" ^ Shell.quote worktrees ^ "/$(basename \"$repo\")/$safe";
          "    if [ ! -d \"$worktree\" ]; then";
-         "      mkdir -p " ^ Shell.quote worktrees;
+         "      mkdir -p \"$(dirname \"$worktree\")\"";
          "      if git show-ref --verify --quiet \"refs/heads/$branch\"; then";
          "        git worktree add -q \"$worktree\" \"$branch\"";
          "      else";
@@ -114,8 +114,9 @@ let install_wt ~root =
          "esac"; "" ]);
   Shell.chmod_executable wt
 
-(* A pi that behaves like a swarm child: it commits in its worktree, blocks
-   when asked, breaks the check for one name, and fails for another. *)
+(* A pi that behaves like a swarm child: it commits in every workspace it was
+   given, blocks when asked, breaks the check for one name (and in the second
+   workspace only for another), and fails for a third. *)
 let install_pi ~root =
   let pi = root / "fake-bin/pi" in
   Shell.write_file pi
@@ -136,19 +137,25 @@ case "$MONTY_SWARM_NAME" in
     printf '%s\n' '{"type":"agent_end"}'
     exit 0 ;;
 esac
-if [ -f BROKEN ]; then
-  git rm -q BROKEN
-  git commit -qm "Fix the check"
-else
-  printf 'work by %s\n' "$MONTY_SWARM_NAME" > "$MONTY_SWARM_NAME.txt"
-  git add -A
-  git commit -qm "Add $MONTY_SWARM_NAME"
-  if [ "$MONTY_SWARM_NAME" = broken ]; then
-    printf 'broken\n' > BROKEN
+index=0
+for tree in "$MONTY_WORKSPACE_1" "${MONTY_WORKSPACE_2:-}"; do
+  index=$((index + 1))
+  [ -n "$tree" ] || continue
+  cd "$tree"
+  if [ -f BROKEN ]; then
+    git rm -q BROKEN
+    git commit -qm "Fix the check"
+  elif [ ! -f "$MONTY_SWARM_NAME.txt" ]; then
+    printf 'work by %s\n' "$MONTY_SWARM_NAME" > "$MONTY_SWARM_NAME.txt"
     git add -A
-    git commit -qm "Break the check"
+    git commit -qm "Add $MONTY_SWARM_NAME"
+    if [ "$MONTY_SWARM_NAME" = broken ] || [ "$MONTY_SWARM_NAME.$index" = halfbroken.2 ]; then
+      printf 'broken\n' > BROKEN
+      git add -A
+      git commit -qm "Break the check"
+    fi
   fi
-fi
+done
 printf '{"type":"message_end","message":{"role":"assistant","stopReason":"stop","content":[{"type":"text","text":"CHILD HANDOFF %s"}]}}\n' "$MONTY_SWARM_NAME"
 printf '%s\n' '{"type":"agent_end"}'
 |});
@@ -218,7 +225,7 @@ let driver_branch = "cto/driver"
 
 (* The driver is reserved and materialized like any worker; its interactive
    session is simulated by exporting the worker environment. *)
-let create_driver ?(swarm = []) fixture =
+let create_driver ?(swarm = []) ?(repos = []) fixture =
   let context = fixture.root / "goal.md" in
   Shell.write_file context "# Goal\n\nShip the swarm feature.\n";
   let manifest = fixture.run_dir / "jobs.json" in
@@ -229,8 +236,16 @@ let create_driver ?(swarm = []) fixture =
           `List
             [ `Assoc
                 ([ ("id", `String driver_id); ("title", `String "Swarm driver");
-                   ("repo", `String fixture.repo); ("branch", `String driver_branch);
                    ("context", `String context); ("agent_profile", `String "swarm") ]
+                @ (match repos with
+                  | [] -> [ ("repo", `String fixture.repo); ("branch", `String driver_branch) ]
+                  | repos ->
+                      [ ( "workspaces",
+                          `List
+                            (List.map
+                               (fun repo ->
+                                 `Assoc [ ("repo", `String repo); ("branch", `String driver_branch) ])
+                               repos) ) ])
                 @ if swarm = [] then [] else [ ("swarm", `Assoc swarm) ]) ] ) ]);
   let dry =
     run ~root:fixture.root ~env:fixture.env
@@ -518,6 +533,111 @@ let test_failed_chain_concurrency_and_doctor () =
       let repaired = run ~root ~env:fixture.env [ "done"; driver_id ^ "--crash"; "--force"; "--home"; fixture.home ] in
       require_code "orphan repair" 0 repaired)
 
+(* One driver over two repositories: a child owns the workspaces it names,
+   each repository has its own check, and a child spanning both lands in both
+   or in neither. *)
+let test_swarm_across_repositories () =
+  with_root "repositories" (fun root ->
+      let fixture = setup root in
+      let web = root / "web" in
+      init_repo web;
+      require_code "projects add web" 0
+        (run ~root ~env:fixture.env [ "projects"; "add"; "--home"; fixture.home; "--repo"; web ]);
+      let web_check = "test ! -f BROKEN && test -f tracked.txt" in
+      let worker_dir, driver_worktree =
+        create_driver ~repos:[ fixture.repo; web ]
+          ~swarm:
+            [ ("check", `String "test ! -f BROKEN"); ("checks", `Assoc [ ("web", `String "false") ]) ]
+          fixture
+      in
+      let web_worktree =
+        Yojson.Safe.Util.(
+          Yojson.Safe.from_file (worker_dir / "job.json") |> member "workspaces" |> to_list)
+        |> List.find (fun workspace -> json_string "repo" workspace = web)
+        |> json_string "worktree"
+      in
+      if not (Sys.file_exists web_worktree) then failwith "driver worktree for web is missing";
+      let env = driver_env fixture worker_dir in
+      let swarm args = run ~root ~env ([ "swarm" ] @ args) in
+      let brief = root / "brief.md" in
+      Shell.write_file brief "# Area\n\nImplement your area and commit.\n";
+      (* A check set for one workspace replaces the manifest entry naming it. *)
+      require_code "init for web" 0 (swarm [ "init"; "--check"; web_check; "--workspace"; "web" ]);
+      (match Yojson.Safe.Util.member "checks" (ledger fixture) with
+      | `Assoc [ (key, `String check) ] when key = web && check = web_check -> ()
+      | _ -> failwith "the web check did not replace the manifest entry");
+      let unknown = swarm [ "spawn"; "lost"; "--brief"; brief; "--workspace"; "nope" ] in
+      require_code "unknown workspace" 1 unknown;
+      require_contains "unknown workspace message" unknown.stderr "no driver workspace matches nope";
+      let twice = swarm [ "spawn"; "lost"; "--brief"; brief; "--workspace"; "web"; "--workspace"; web ] in
+      require_code "workspace named twice" 1 twice;
+      let spawn name workspaces =
+        let result =
+          swarm
+            ([ "spawn"; name; "--brief"; brief ]
+            @ List.concat_map (fun workspace -> [ "--workspace"; workspace ]) workspaces)
+        in
+        require_code ("spawn " ^ name) 0 result;
+        Yojson.Safe.Util.(Yojson.Safe.from_string result.stdout |> member "workspaces" |> to_list)
+        |> List.map (json_string "repo")
+      in
+      if spawn "webonly" [ "web" ] <> [ web ] then failwith "webonly does not own exactly web";
+      if spawn "halfbroken" [ fixture.repo; "web" ] <> [ fixture.repo; web ] then
+        failwith "halfbroken does not own both repositories in order";
+      wait_until "children finished" (fun () ->
+          List.for_all (fun name -> state_of ~root ~env name = "finished") [ "webonly"; "halfbroken" ]);
+      (* A task spanning repositories has a project-suffixed driver branch in
+         each, and a child forks from the one in its own repository. *)
+      let branch_in repo name =
+        let branch = driver_branch ^ "-" ^ Filename.basename repo ^ "--" ^ name in
+        git ~cwd:repo [ "branch"; "--list"; branch ] <> ""
+      in
+      if branch_in fixture.repo "webonly" || not (branch_in web "webonly") then
+        failwith "webonly was not forked in web alone";
+      if not (branch_in fixture.repo "halfbroken" && branch_in web "halfbroken") then
+        failwith "halfbroken was not forked in both repositories";
+      (* A single-repository child lands where it lives, under that repository's check. *)
+      require_code "land webonly" 0 (swarm [ "land"; "webonly" ]);
+      if not (Sys.file_exists (web_worktree / "webonly.txt")) then failwith "webonly did not land in web";
+      if Sys.file_exists (driver_worktree / "webonly.txt") then failwith "webonly leaked into the first repository";
+      let child name =
+        Yojson.Safe.Util.(status_json ~root ~env |> member "children" |> to_list)
+        |> List.find (fun child -> json_string "name" child = name)
+      in
+      require_contains "web check ran" (Shell.read_file (json_string "last_check" (child "webonly"))) web_check;
+      (* A failing check in one repository lands the child in neither. *)
+      let failed = swarm [ "land"; "halfbroken" ] in
+      require_code "land with one failing repository" 1 failed;
+      require_contains "failure names the repository" failed.stderr web;
+      let log = Shell.read_file (json_string "last_check" (child "halfbroken")) in
+      require_contains "first check logged" log ("# " ^ fixture.repo);
+      require_contains "second check logged" log ("# " ^ web);
+      if Sys.file_exists (driver_worktree / "halfbroken.txt") || Sys.file_exists (web_worktree / "halfbroken.txt")
+      then failwith "a partly failing child was merged into a driver branch";
+      let early = swarm [ "retire"; "halfbroken" ] in
+      require_code "retire before landing" 1 early;
+      let fix = root / "fix.md" in
+      Shell.write_file fix "Remove BROKEN and commit.\n";
+      require_code "resume" 0 (swarm [ "resume"; "halfbroken"; "--brief"; fix ]);
+      wait_until "halfbroken resumed and finished" (fun () ->
+          json_string "state" (child "halfbroken") = "finished"
+          && not (Sys.file_exists (root / "worktrees/web" / "cto_driver-web--halfbroken" / "BROKEN")));
+      require_code "land across repositories" 0 (swarm [ "land"; "halfbroken" ]);
+      if not (Sys.file_exists (driver_worktree / "halfbroken.txt") && Sys.file_exists (web_worktree / "halfbroken.txt"))
+      then failwith "halfbroken did not land in both repositories";
+      let landed = child "halfbroken" in
+      if json_string "state" landed <> "landed" then failwith "ledger did not record the landing";
+      Yojson.Safe.Util.(landed |> member "workspaces" |> to_list)
+      |> List.iter (fun workspace ->
+             if json_string "landed_commit" workspace = "" then
+               failf "no landed commit recorded for %s" (json_string "repo" workspace));
+      (* Retiring removes the child's branch in every repository it owned. *)
+      require_code "retire webonly" 0 (swarm [ "retire"; "webonly" ]);
+      require_code "retire halfbroken" 0 (swarm [ "retire"; "halfbroken" ]);
+      if branch_in web "webonly" || branch_in fixture.repo "halfbroken" || branch_in web "halfbroken" then
+        failwith "a retired child branch survived";
+      require_code "done" 0 (run ~root ~env:fixture.env [ "done"; driver_id; "--force"; "--home"; fixture.home ]))
+
 let () =
   Unix.putenv "GIT_CONFIG_NOSYSTEM" "1";
   Unix.putenv "GIT_CONFIG_GLOBAL" "/dev/null";
@@ -526,4 +646,5 @@ let () =
       test ();
       Printf.printf "PASS %s\n%!" name)
     [ ("swarm_lifecycle", test_swarm_lifecycle);
-      ("swarm_failed_chain_concurrency_and_doctor", test_failed_chain_concurrency_and_doctor) ]
+      ("swarm_failed_chain_concurrency_and_doctor", test_failed_chain_concurrency_and_doctor);
+      ("swarm_across_repositories", test_swarm_across_repositories) ]

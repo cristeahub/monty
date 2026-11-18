@@ -105,7 +105,7 @@ let head_butler ~getenv ~harness home =
         (Harness.to_string harness) profile;
       pending_handoffs ~home;
       "When the user says \"swarm\", wants many agents on one goal, or brings a large goal that \
-       splits into independent areas with disjoint files, propose the `swarm` agent profile (see \
+       splits into independent areas with disjoint files or repositories, propose the `swarm` agent profile (see \
        `monty guide swarm`) with the areas and the landing check before launching; small or \
        sequential tasks stay on the default profile.";
       Printf.sprintf

@@ -1418,20 +1418,28 @@ let swarm_cmd =
       let doc = "Shell command every landing must pass, run in the child's worktree." in
       Cmdliner.Arg.(required & opt (some string) None & info [ "check" ] ~docv:"CMD" ~doc)
     in
+    let workspace =
+      let doc = "Set the check for this driver workspace only, named by repository path or directory name. Without it the check covers every workspace that has no check of its own." in
+      Cmdliner.Arg.(value & opt (some string) None & info [ "workspace" ] ~docv:"REPO" ~doc)
+    in
     Cmdliner.Cmd.v (Cmdliner.Cmd.info "init" ~doc:"Set the landing check and create the swarm ledger.")
-      Cmdliner.Term.(const (fun check home -> with_driver home (fun driver -> Swarm.init driver ~check)) $ check $ home_arg)
+      Cmdliner.Term.(const (fun check workspace home -> with_driver home (fun driver -> Swarm.init driver ~check ~workspace)) $ check $ workspace $ home_arg)
   in
   let spawn_cmd =
     let profile =
       let doc = "Agent profile the child runs; defaults to the ledger's worker profile." in
       Cmdliner.Arg.(value & opt (some string) None & info [ "profile" ] ~docv:"ID" ~doc)
     in
+    let workspaces =
+      let doc = "Driver workspace the child owns, named by repository path or directory name; repeat it for a child that spans repositories. Defaults to the driver's first workspace." in
+      Cmdliner.Arg.(value & opt_all string [] & info [ "workspace" ] ~docv:"REPO" ~doc)
+    in
     Cmdliner.Cmd.v
-      (Cmdliner.Cmd.info "spawn" ~doc:"Create a child worker on a branch forked from the driver's branch and start its headless chain.")
-      Cmdliner.Term.(const (fun name brief profile options ->
+      (Cmdliner.Cmd.info "spawn" ~doc:"Create a child worker on a branch forked from the driver's branch in each of its workspaces and start its headless chain.")
+      Cmdliner.Term.(const (fun name brief profile workspaces options ->
           with_driver_options options (fun options driver ->
-              Swarm.spawn options driver ~name ~brief ~profile |> print_receipt))
-        $ name_arg $ brief_arg $ profile $ headless_options_term)
+              Swarm.spawn options driver ~name ~brief ~profile ~workspaces |> print_receipt))
+        $ name_arg $ brief_arg $ profile $ workspaces $ headless_options_term)
   in
   let status_cmd =
     let json =
@@ -1447,7 +1455,7 @@ let swarm_cmd =
       Cmdliner.Arg.(value & opt (some string) None & info [ "message"; "m" ] ~docv:"MESSAGE" ~doc)
     in
     Cmdliner.Cmd.v
-      (Cmdliner.Cmd.info "land" ~doc:"Merge the driver branch into a finished child, run the check there, and merge the child into the driver branch when it passes.")
+      (Cmdliner.Cmd.info "land" ~doc:"Merge the driver branch into a finished child, run the check there, and merge the child into the driver branch when it passes; a child spanning repositories lands in all of them or none.")
       Cmdliner.Term.(const (fun name message home -> with_driver home (fun driver -> Swarm.land_child driver ~name ~message)) $ name_arg $ message $ home_arg)
   in
   let resume_cmd =

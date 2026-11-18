@@ -54,7 +54,7 @@ Each context file should be specific enough that a fresh worker agent can start 
 Include the task summary, repo path, issue or PR links, relevant constraints, acceptance criteria, and any important planning notes.
 Do not duplicate interactive review wording or hard-code a headless phase count in task context; the selected agent profile supplies those role instructions.
 Use the default `simplified` profile unless the user selects another profile for the invocation or manifest job.
-When the user says "swarm", asks for many agents on one goal, or the task is a large goal that splits into independent areas with disjoint files, propose the `swarm` profile (see the Swarm topic): name the areas and the landing check, then launch with `"agent_profile": "swarm"` and a `swarm` block in the manifest job. Keep small or strictly sequential tasks on the default profile.
+When the user says "swarm", asks for many agents on one goal, or the task is a large goal that splits into independent areas with disjoint files or repositories, propose the `swarm` profile (see the Swarm topic): name the areas and the landing check, then launch with `"agent_profile": "swarm"` and a `swarm` block in the manifest job. Keep small or strictly sequential tasks on the default profile.
 Workers must not post review comments, push, or open PRs unless explicitly approved.
 
 Create `.monty/runs/<run-id>/jobs.json` with this shape:
@@ -346,10 +346,13 @@ return their handoff to the supervisor instead; the supervisor publishes.
 ## Swarm
 
 Choose this profile when the user says "swarm" or wants many agents on one
-goal, or when a goal splits into independent areas with disjoint files that
-would each be a worker-sized task of its own; suggest it in those cases even if
-the user did not ask, and stay on the default profile for small or strictly
-sequential work.
+goal, or when a goal splits into independent areas with disjoint files or
+repositories that would each be a worker-sized task of its own; suggest it in
+those cases even if the user did not ask, and stay on the default profile for
+small or strictly sequential work. A goal that spans repositories is still one
+swarm, not one task per repository: the driver holds every repository as a
+workspace and each child owns the ones its area needs (see Swarms across
+repositories below).
 
 The `swarm` agent profile runs one hard, overarching goal as one task: an
 interactive driver (the coordinating butler, launched like any other
@@ -404,12 +407,74 @@ on one problem: after two failed resumes, split the area.
 finished child. It merges the driver branch into the child, runs the check
 with its output captured under the driver's `artifacts/swarm/NAME/`, and only
 then merges the child into the driver worktree with `--no-ff`. A failed check
-leaves both branches as they are, records the output path in the ledger and
-exits nonzero. `retire` refuses a child whose head is not in the driver branch
-unless `--force` discards it. `monty done <driver>` refuses while any child is
+merges nothing into the driver branch (the child keeps the driver branch it
+just merged), records the output path in the ledger and exits nonzero. `retire`
+refuses a child whose head is not in the driver branch unless `--force`
+discards it. `monty done <driver>` refuses while any child is
 unretired and lists the retire commands; `--force` retires every child first.
 `monty list --swarm` shows children indented under their driver; by default
 they are hidden, and reconciliation never turns a child into a task.
+
+### Swarms across repositories
+
+Give the driver an ordered `workspaces` array, exactly like any task that
+spans repositories, and set the landing check per repository where one command
+does not fit them all:
+
+```json
+{
+  "id": "goal",
+  "title": "Ship the goal",
+  "workspaces": [
+    { "repo": "/absolute/path/to/api", "branch": "monty/goal" },
+    { "repo": "/absolute/path/to/web", "branch": "monty/goal" }
+  ],
+  "context": ".monty/runs/<run-id>/goal.md",
+  "agent_profile": "swarm",
+  "swarm": { "check": "make test", "checks": { "web": "npm test" } }
+}
+```
+
+`checks` maps a workspace to its own landing check; `check` covers every
+workspace without an entry, and every repository a child owns needs one of the
+two before that child can be spawned. Wherever a workspace is named (a `checks`
+key or `--workspace`), use the repository's absolute path, or its directory
+name when no other driver workspace shares it. Each check runs in the child's
+worktree of that repository.
+
+```sh
+monty swarm init --check 'npm test' --workspace web                    # set or replace one repository's check
+monty swarm spawn NAME --brief FILE --workspace web                    # the child owns only web
+monty swarm spawn NAME --brief FILE --workspace api --workspace web    # one child across two repositories
+```
+
+- A child owns the workspaces named at spawn, in that order, and only the
+  driver's first workspace when none is named. It cannot gain or lose one
+  later; retire it and spawn a successor instead.
+- In every repository it owns, the child's branch is that repository's driver
+  branch followed by `--<name>`. Driver branches can differ per repository
+  (Monty appends the project name for new multi-repository tasks), so read the
+  exact branches from `monty swarm status` rather than deriving them.
+- The child sees its worktrees as `MONTY_WORKSPACE_1..N` in the order given and
+  starts in the first. Name the repositories and what belongs in each in its
+  brief, and tell it to commit and leave a clean tree in every one.
+- `land` is all or nothing across the child's repositories: the driver branch
+  is merged into the child everywhere, every check runs even after one fails,
+  all output goes to one log, and only when every check passes is the child
+  merged into the driver in each repository. A rare failure in those final
+  merges is fixed and landed again; repositories already merged are skipped.
+- `retire` needs the child's head in the driver branch in every repository it
+  owns, and removes its worktree and branch in each.
+- `monty swarm status --json` lists `workspaces` per child with `repo`,
+  `branch` and `landed_commit`; the top-level `branch` and `landed_commit` of
+  a child describe its first workspace.
+
+Decompose by repository first: one child per repository is the natural split
+when the areas are independent. Give a change that must stay consistent across
+repositories (a contract and its consumer) to one child that owns both, so it
+lands together or not at all; when the pieces are large, land the provider
+first and spawn the consumer afterwards so it forks from a driver branch that
+already contains it.
 
 Durable state: the ledger `swarm/ledger.json` and the briefs under
 `swarm/briefs/` in the driver's worker directory; each child's own worker

@@ -13,7 +13,9 @@ Run `monty guide` and follow the topic it names for your task, then
 When the user says "swarm" or wants many agents on one goal, that is the
 `swarm` agent profile: read `monty guide swarm` and launch the task with
 `"agent_profile": "swarm"`; inside a swarm driver session use the
-`monty swarm` commands, never ad-hoc worktrees or subagents.
+`monty swarm` commands, never ad-hoc worktrees or subagents. A goal spanning
+several repositories is one swarm whose children each own the repositories
+they need, not one task per repository.
 The guide comes from the installed `monty`, so it describes the commands that
 version has. `monty skill show` prints the whole guide at once.
 
