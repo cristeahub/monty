@@ -962,6 +962,8 @@ override. This also makes Vim the default for later Codex sessions in that accou
 Managed Codex terminals enter Vim Normal mode automatically. Codex 0.160.0
 forces Insert mode during startup despite that setting, so the Python PTY guard
 sends Escape once the native Vim footer appears. It preserves later user mode changes, terminal resizing and native exit codes.
+The guard writes to the service only as fast as the service reads, and past a 4 MiB backlog it stops reading the native program, which then waits as it would on a slow terminal.
+A stalled service therefore never holds the guard: SIGTERM, SIGHUP or the service's EOF stop it, it keeps reading the program while the program exits, and after a 3 second grace it kills the program's process group, closes the terminal and releases the worker lock.
 Generated worker commands pass `--worker` to preserve their task link,
 workspace environment and `codex-session-id` sidecar. Task-free/head-butler
 terminals ignore ambient worker identity even when started from a worker shell.

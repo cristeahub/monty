@@ -14,8 +14,9 @@ let drain channel =
   Lwt.catch loop (fun _ -> Lwt.return_unit)
 
 let close (process:Lwt_process.process_full) =
-  Lwt.catch (fun () -> Lwt_io.close process#stdin) (fun _ -> Lwt.return_unit) >>= fun () ->
-  (* Keep a noisy child from blocking the guard before it can observe owner EOF. *)
-  Lwt.join [drain process#stdout;drain process#stderr;
+  (* Drain while closing stdin: closing flushes pending input, which a guard can only
+     read while its own output keeps moving. *)
+  Lwt.join [Lwt.catch (fun () -> Lwt_io.close process#stdin) (fun _ -> Lwt.return_unit);
+    drain process#stdout;drain process#stderr;
     Lwt.catch (fun () -> Lwt_unix.with_timeout 20. (fun () -> process#status) >|= ignore)
       (fun _ -> process#terminate;process#status >|= ignore)] >>= fun () -> process#close >|= ignore

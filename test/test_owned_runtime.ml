@@ -35,6 +35,11 @@ let fixture mode root = match mode with
             let n = Unix.read Unix.stdin chunk 0 4096 in Buffer.add_subbytes got chunk 0 n
       done;
       out (Printf.sprintf "replies=%d" (replies ()))
+  | "flood" | "flood-exit" ->
+      (* Output faster than any owner reads it; "flood" also ignores SIGTERM. *)
+      if mode="flood" then Sys.set_signal Sys.sigterm Sys.Signal_ignore;
+      let chunk=String.make 4096 'x' in
+      while true do ignore (Unix.write_substring Unix.stdout chunk 0 4096) done
   | "duplex" ->
       let size = 256 * 1024 in
       output_string stdout (String.make size 'o'); flush stdout;
@@ -93,7 +98,10 @@ let run helper = with_temp_dir ~prefix:"monty-owned-" (fun root ->
     let terminal=spawn "pty" lock "terminal" in
     Lwt.finalize (fun () ->
       ready terminal >>= fun ready_text ->
-      check (Yojson.Safe.from_string ready_text=obj["type",string "ready"]) "PTY ownership was not ready";
+      let frame=Yojson.Safe.from_string ready_text in
+      check (field "type" frame=string "ready") "PTY ownership was not ready";
+      (match field "pid" frame with `Int pid -> check (pid<>terminal#pid && alive pid) "ready did not name the native process"
+       | _ -> failwith "ready did not name the native process");
       let output=Buffer.create 256 and code=ref `Null in
       let rec drain () = Lwt_io.read_line_opt terminal#stdout >>= function
         | None -> Lwt.return_unit
@@ -119,7 +127,7 @@ let run helper = with_temp_dir ~prefix:"monty-owned-" (fun root ->
     let probing=spawn status_mode "" "probe" in
     Lwt.finalize (fun () ->
       ready probing >>= fun ready_text ->
-      check (Yojson.Safe.from_string ready_text=obj["type",string "ready"]) "probe terminal was not ready";
+      check (field "type" (Yojson.Safe.from_string ready_text)=string "ready") "probe terminal was not ready";
       let output=Buffer.create 256 and code=ref `Null in
       let rec drain () = Lwt_io.read_line_opt probing#stdout >>= function
         | None -> Lwt.return_unit
@@ -142,8 +150,36 @@ let run helper = with_temp_dir ~prefix:"monty-owned-" (fun root ->
       Lwt_unix.with_timeout 8. (fun () -> Lwt.both sending (Lwt_io.read duplex#stdout)) >>= fun (_,output) ->
       wait_exit duplex >|= fun status ->
       check (status=Unix.WEXITED 0 && output=String.make (256*1024) 'o' ^ "complete\n") "full duplex pipe backpressure lost input or output")
-      (fun () -> close duplex));
-  print_endline "Owned runtimes: lock fences, descendants, EOF, PTY input/resize, program status probe and full duplex passed")
+      (fun () -> close duplex) >>= fun () ->
+    (* An owner that stops reading the guard's output must not hold the guard: a
+       terminated program or SIGTERM to the guard still releases the worker lock
+       within the guard's 3 s grace, and no program outlives it. *)
+    let stalled_owner actor terminate =
+      let lock=root/("stalled-" ^ actor ^ ".lock") in
+      let guard=spawn "pty:24:80" lock actor in
+      Lwt.finalize (fun () ->
+        ready guard >>= fun ready_text ->
+        let native=i "pid" (Yojson.Safe.from_string ready_text) in
+        (* Long enough for the guard's own output buffer and the pipe to fill. *)
+        Lwt_unix.sleep 1.5 >>= fun () ->
+        check (alive native) ("flooding program ended early: " ^ actor);
+        let started=Unix.gettimeofday () in
+        Unix.kill (terminate ~guard:guard#pid ~native) Sys.sigterm;
+        let locked () =
+          let fd=Unix.openfile lock [Unix.O_RDWR] 0 in
+          Fun.protect ~finally:(fun () -> Unix.close fd) (fun () ->
+            match Monty.Worker_lock.try_lock fd with
+            | () -> false
+            | exception Unix.Unix_error((Unix.EAGAIN|Unix.EACCES),_,_) -> true) in
+        wait_condition 250 (fun () -> not (locked ())) >>= fun () ->
+        let elapsed=Unix.gettimeofday () -. started in
+        check (elapsed<4.) (Printf.sprintf "%s: stalled guard released its lock after %.1fs" actor elapsed);
+        wait_condition 250 (fun () -> not (alive native)) >>= fun () ->
+        wait_exit guard >|= ignore)
+        (fun () -> close guard) in
+    stalled_owner "flood" (fun ~guard ~native:_ -> guard) >>= fun () ->
+    stalled_owner "flood-exit" (fun ~guard:_ ~native -> native));
+  print_endline "Owned runtimes: lock fences, descendants, EOF, PTY input/resize, program status probe, full duplex and stalled owners passed")
 
 let () = match Array.to_list Sys.argv with
   | _::"--fixture"::mode::root::[] -> fixture mode root

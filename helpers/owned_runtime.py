@@ -82,37 +82,78 @@ def main():
         child_in, child_out = process.stdin.fileno(), process.stdout.fileno()
     stopped = False
 
+    def signal_group(sig):
+        # macOS answers EPERM, not ESRCH, when only zombies remain in the group.
+        try:
+            os.killpg(pid, sig)
+        except (ProcessLookupError, PermissionError):
+            pass
+
     def stop(*_):
         nonlocal stopped
         if stopped:
             return
         stopped = True
         # Descendants share the process group; leave it fenced until cleanup finishes.
-        try:
-            os.killpg(pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
+        signal_group(signal.SIGTERM)
 
     for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
         signal.signal(sig, stop)
     if mode == 'pty':
-        print(json.dumps({'type': 'ready'}), flush=True)
+        # The owner records the native PID so lock errors can name the process.
+        print(json.dumps({'type': 'ready', 'pid': pid}), flush=True)
     selector = selectors.DefaultSelector()
     selector.register(0, selectors.EVENT_READ, 'owner')
-    selector.register(child_out, selectors.EVENT_READ, 'child')
     os.set_blocking(child_in, False)
     queued = bytearray()
+
+    def watch(fd, events, data):
+        """Register fd for exactly these selector events; no events removes it."""
+        key = selector.get_map().get(fd)
+        if key is None:
+            if events:
+                selector.register(fd, events, data)
+        elif not events:
+            selector.unregister(fd)
+        elif key.events != events:
+            selector.modify(fd, events, data)
 
     def enqueue(data):
         queued.extend(data)
         if len(queued) > 4 * 1024 * 1024:
             raise ValueError('native input backlog exceeds 4 MiB')
-        if child_in == child_out:
-            selector.modify(child_in, selectors.EVENT_READ | selectors.EVENT_WRITE, 'child')
-        elif not selector.get_map().get(child_in):
-            selector.register(child_in, selectors.EVENT_WRITE, 'input')
+
+    # Output for the owner is written only as fast as the owner reads it. A blocking
+    # write would hold the guard inside the write while the owner stalls: SIGTERM, owner
+    # EOF and the cleanup deadline would all wait on the owner. Above the limit the guard
+    # stops reading the program, which then waits as it would on a slow terminal.
+    output_limit = 4 * 1024 * 1024
+    output = bytearray()
+    os.set_blocking(1, False)
+
+    def send(data):
+        output.extend(data)
+        try:
+            while output:
+                del output[:os.write(1, output)]
+        except BlockingIOError:
+            pass
+        except BrokenPipeError:
+            # The owner is gone; its EOF on stdin ends the runtime.
+            output.clear()
+
     def emit_output(data):
-        print(json.dumps({'type': 'output', 'data': base64.b64encode(data).decode()}), flush=True)
+        send(json.dumps({'type': 'output', 'data': base64.b64encode(data).decode()}).encode() + b'\n')
+
+    def relay(data):
+        """Forward program output. Past the limit only a program that has ended or is
+        being stopped is still read, and its remaining bytes are dropped."""
+        if len(output) >= output_limit:
+            return
+        if mode == 'pty':
+            emit_output(data)
+        else:
+            send(data)
 
     # Program Status Protocol support probe. A program sends it once at startup and
     # treats the protocol as unsupported when the reply is late, so when the display is
@@ -155,63 +196,85 @@ def main():
         out += data
         return bytes(out)
 
+    def poll():
+        if process is not None:
+            return process.poll()
+        finished, status = os.waitpid(pid, os.WNOHANG)
+        return os.waitstatus_to_exitcode(status) if finished else None
+
+    def read(fd):
+        """Read what fd has; a PTY whose program side has closed reads as EOF."""
+        try:
+            return os.read(fd, 16384)
+        except OSError as error:
+            if error.errno == errno.EIO and fd == child_out:
+                return b''
+            raise
+
     buffer = b''
     code = None
     owner_deadline = None
     child_open = True
+
+    def wait_exit(seconds):
+        """Wait up to seconds for the program to end, still reading its output: a program
+        blocked writing to a terminal nobody reads cannot finish exiting."""
+        nonlocal code, child_open
+        deadline = time.monotonic() + seconds
+        while code is None and time.monotonic() < deadline:
+            if select.select([child_out] if child_open else [], [], [], 0.02)[0]:
+                data = read(child_out)
+                child_open = bool(data)
+                if data:
+                    relay(data)
+            code = poll()
+
     try:
         while not stopped and (code is None or child_open):
             if code is None:
-                if process is not None:
-                    code = process.poll()
-                else:
-                    finished, status = os.waitpid(pid, os.WNOHANG)
-                    if finished:
-                        code = os.waitstatus_to_exitcode(status)
+                code = poll()
             if code is not None:
-                try:
-                    os.killpg(pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
+                signal_group(signal.SIGKILL)
             if owner_deadline is not None and time.monotonic() >= owner_deadline:
                 stop()
                 break
+            # An ended program is read to its end, so its terminal closes and locks release.
+            reading = child_open and (code is not None or len(output) < output_limit)
+            if child_in == child_out:
+                watch(child_in, (selectors.EVENT_READ if reading else 0)
+                      | (selectors.EVENT_WRITE if queued and child_open else 0), 'child')
+            else:
+                watch(child_out, selectors.EVENT_READ if reading else 0, 'child')
+                watch(child_in, selectors.EVENT_WRITE if queued else 0, 'input')
+            watch(1, selectors.EVENT_WRITE if output else 0, 'output')
             ready = selector.select(0.1)
             # A lone trailing ESC is held only until the next read; nothing more follows a stalled program.
             if not ready and held == b'\x1b':
                 emit_output(held)
                 held = b''
             for key, events in ready:
+                if key.data == 'output':
+                    send(b'')
+                    continue
                 if events & selectors.EVENT_WRITE:
                     try:
                         del queued[:os.write(child_in, queued)]
                     except BlockingIOError:
                         pass
-                    if not queued:
-                        if child_in == child_out:
-                            selector.modify(child_in, selectors.EVENT_READ, 'child')
-                        else:
-                            selector.unregister(child_in)
                     if not events & selectors.EVENT_READ:
                         continue
-                try:
-                    data = os.read(key.fd, 16384)
-                except OSError as error:
-                    if error.errno == errno.EIO and key.data == 'child':
-                        selector.unregister(key.fd)
-                        child_open = False
-                        continue
-                    raise
+                data = read(key.fd)
                 if not data:
                     if key.data == 'owner':
                         selector.unregister(key.fd)
                         if mode == 'pipe':
+                            queued.clear()
+                            watch(child_in, 0, 'input')
                             process.stdin.close()
                             owner_deadline = time.monotonic() + 3
                         elif code is None:
                             stop()
                     else:
-                        selector.unregister(key.fd)
                         child_open = False
                     continue
                 if key.data == 'child':
@@ -226,10 +289,9 @@ def main():
                         if status_display:
                             data = answer_probes(data)
                         if data:
-                            emit_output(data)
+                            relay(data)
                     else:
-                        sys.stdout.buffer.write(data)
-                        sys.stdout.buffer.flush()
+                        relay(data)
                 elif mode == 'pipe':
                     enqueue(data)
                 else:
@@ -253,34 +315,26 @@ def main():
         if held:
             emit_output(held)
         stop()
-        deadline = time.monotonic() + 3
-        while code is None and time.monotonic() < deadline:
-            if process is not None:
-                code = process.poll()
-            else:
-                done, status = os.waitpid(pid, os.WNOHANG)
-                if done:
-                    code = os.waitstatus_to_exitcode(status)
-            if code is None:
-                time.sleep(0.02)
+        wait_exit(3)
         # Also kill descendants after the leader exits; they must not outlive ownership.
-        try:
-            os.killpg(pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        if code is None:
-            if process is not None:
-                code = process.wait()
-            else:
-                _, status = os.waitpid(pid, 0)
-                code = os.waitstatus_to_exitcode(status)
+        signal_group(signal.SIGKILL)
+        # Closing the terminal releases a program the kernel holds in exit until its
+        # output drains, so the wait below ends; the bound covers anything else.
         if master is not None:
             os.close(master)
+            child_open = False
+        wait_exit(2)
         for lock in locks:
             os.close(lock)
-    if mode == 'pty':
-        print(json.dumps({'type': 'exit', 'code': code if code >= 0 else 128 - code}), flush=True)
-    return max(0, code) if code >= 0 else 128 - code
+    status = 1 if code is None else code if code >= 0 else 128 - code
+    if mode == 'pty' and code is not None:
+        send(json.dumps({'type': 'exit', 'code': status}).encode() + b'\n')
+    # Hand the owner what it will still read, without waiting on an owner that stalls.
+    deadline = time.monotonic() + 3
+    while output and time.monotonic() < deadline:
+        select.select([], [1], [], 0.1)
+        send(b'')
+    return status
 
 
 if __name__ == '__main__':
