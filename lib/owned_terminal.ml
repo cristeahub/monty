@@ -2,7 +2,8 @@ open Lwt.Infix
 open Json_fields
 open Conversation_store
 
-type t = {process:Lwt_process.process_full; path:string; mutable code:Yojson.Safe.t; mutable alive:bool}
+(* pid is the native program's own process, which the guard reports when ready. *)
+type t = {process:Lwt_process.process_full; path:string; pid:int; mutable code:Yojson.Safe.t; mutable alive:bool}
 let start ~rows ~cols ~vim ~program_status ~env ~cwd ~lock ~locks ~path ~notify args =
   let fd=get(State_store.open_verified_lock path [Unix.O_WRONLY;Unix.O_CREAT;Unix.O_APPEND]) in
   let process=try
@@ -12,11 +13,12 @@ let start ~rows ~cols ~vim ~program_status ~env ~cwd ~lock ~locks ~path ~notify 
     Owned_process.start ~mode ~lock ~locks ~env ~cwd args
     with error->Unix.close fd;raise error in
   Lwt.async (fun () -> Owned_process.drain process#stderr);
-  Lwt.catch (fun () -> Lwt_unix.with_timeout 10. (fun () -> Lwt_io.read_line_opt process#stdout) >>= function
-  | Some line when field "type" (Yojson.Safe.from_string line)=string "ready" -> Lwt.return_unit
-  | _->fail 503 "native terminal could not claim its ownership locks; inspect existing execution before retrying")
-    (fun error->Unix.close fd;Owned_process.close process >>= fun ()->Lwt.fail error) >>= fun () ->
-  let t={process;path;code=`Null;alive=true} in
+  Lwt.catch (fun () -> Lwt_unix.with_timeout 10. (fun () -> Lwt_io.read_line_opt process#stdout) >>= fun line ->
+    match Option.map Yojson.Safe.from_string line with
+    | Some ready when field "type" ready=string "ready" -> Lwt.return (i "pid" ready)
+    | _->fail 503 "native terminal could not claim its ownership locks; inspect existing execution before retrying")
+    (fun error->Unix.close fd;Owned_process.close process >>= fun ()->Lwt.fail error) >>= fun pid ->
+  let t={process;path;pid;code=`Null;alive=true} in
   let rec read () = Lwt_io.read_line_opt process#stdout >>= function
     | None ->
         if t.code=`Null then t.code<-string "outcome_unknown";

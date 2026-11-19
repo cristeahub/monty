@@ -641,7 +641,26 @@ let resume archived fresh worker options =
       | Terminal.Dry_run -> execute ()
       | Terminal.Ghostty | Terminal.Rex ->
           let* record = find_record () in
-          Worker_lock.with_lock ~home:options.home ~record execute
+          (* The worker's own live terminal holds its lock for the whole session.
+             Showing it again needs no lock: that terminal already keeps headless
+             runs and lifecycle commands out, and the resumed tab attaches to it. *)
+          let show_running () =
+            let home = options.home in
+            match Worker_lock.terminal ~home record with
+            | Some terminal when (not archived) && not fresh ->
+                let running = Worker_lock.describe_terminal terminal in
+                if Client_terminal.service_running ~home then (
+                  Fmt.pr "%s is still running in the Monty service (%s); showing it instead of starting another\n"
+                    record.id running;
+                  execute ())
+                else
+                  Error
+                    (Printf.sprintf
+                       "worker %s is busy: its interactive terminal (%s) outlived the Monty service, so no terminal can attach to it; stop it with kill %d, then rerun monty resume %s --home %s"
+                       record.id running terminal.pid (Shell.quote record.id) (Shell.quote home))
+            | terminal -> Error (Worker_lock.busy_message ~home record terminal)
+          in
+          Worker_lock.with_lock ~home:options.home ~record ~on_busy:show_running execute
     in
     dispatch ()
   in
@@ -1526,6 +1545,14 @@ let rex_status worker home =
           | Rex.Exited (Some code) -> Printf.sprintf "exited (%d); output retained in Rex" code
           | Rex.Exited None -> "exited; output retained in Rex"
           | Rex.Gone -> "gone (block no longer exists)");
+        (* A closed tab does not stop the worker; say so where the user looks first. *)
+        (match liveness, Worker_lock.is_busy ~home ~record with
+        | (Rex.Exited _ | Rex.Gone), Ok true ->
+            Worker_lock.terminal ~home record
+            |> Option.iter (fun terminal ->
+                   Fmt.pr "worker: still running in the Monty service (%s); monty resume %s shows it in a new tab\n"
+                     (Worker_lock.describe_terminal terminal) (Shell.quote record.Job_store.id))
+        | _ -> ());
         (match liveness with
         | Rex.Gone -> Ok ()
         | _ ->

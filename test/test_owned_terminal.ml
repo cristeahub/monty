@@ -74,7 +74,7 @@ let test_throwing_notifications () = with_directory (fun directory ->
 let test_eof_without_exit () = with_directory (fun directory ->
   (* This fake ownership guard ends after ready, omitting its exit receipt. *)
   let guard=Filename.concat directory "python3" in
-  Shell.write_file guard "#!/bin/sh\nprintf '%s\\n' '{\"type\":\"ready\"}'\n";
+  Shell.write_file guard "#!/bin/sh\nprintf '{\"type\":\"ready\",\"pid\":%d}\\n' \"$$\"\n";
   Unix.chmod guard 0o700;
   let previous_path=Sys.getenv "PATH" in
   Lwt.finalize (fun () ->

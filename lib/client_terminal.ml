@@ -261,7 +261,10 @@ let launch ~home ~profile ~harness ~command_override ~fork ~mode ~session_id ~pr
         (if !resized && field "running" value=`Bool true then (resized:=false;let rows,cols=Terminal_size.get Unix.stdin in
           route "terminal_resize" ["rows",`Int rows;"cols",`Int cols]) else Lwt.return_unit) >>= fun () ->
         poll_handoff () >>= fun () ->
-        if field "running" value=`Bool false && bytes="" then (match field "code" value with `Int code->Lwt.return (`Exited code)|_->fail 503 "native terminal outcome is unknown; inspect retained output") else Lwt_unix.sleep 0.04 >>= output in
+        if field "running" value=`Bool false && bytes="" then (match field "code" value with `Int code->Lwt.return (`Exited code)|_->fail 503 "native terminal outcome is unknown; inspect retained output")
+        (* Retained output, such as the history a reattached terminal replays, is read
+           back to back; only an idle terminal is polled at a pace. *)
+        else if bytes<>"" then output () else Lwt_unix.sleep 0.04 >>= output in
       let rec input () = Lwt_io.read ~count:4096 Lwt_io.stdin >>= fun bytes ->
         if bytes="" then Lwt.return `Detached else route "terminal_input" ["data",string(Base64.encode_exn bytes)] >>= input in
       Lwt_main.run(Lwt.pick [input();output()] >>= function

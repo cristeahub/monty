@@ -52,7 +52,10 @@ let transition_check ~home ~wt_command ~backend (record : Job_store.record) =
         }
   | Some _ | None -> None
 
-let launch_state_check ~home (record : Job_store.record) =
+(* A launch-requested worker is either waiting for a terminal or running in one.
+   One whose own terminal is live in the Monty service needs no recovery, unless
+   (with rex_terminals) its recorded Rex tab is gone, which monty resume reattaches. *)
+let launch_state_check ~home ~rex_terminals (record : Job_store.record) =
   match record.transition with
   | Some _ -> None
   | None ->
@@ -62,13 +65,32 @@ let launch_state_check ~home (record : Job_store.record) =
           Printf.sprintf "monty resume %s --home %s" (Shell.quote record.id)
             (Shell.quote home)
         in
-        Some
-          {
-            name = "worker " ^ record.id;
-            level = Warn;
-            message = state ^ " at " ^ record.path;
-            recovery = [ recovery ];
-          }
+        let warn message =
+          Some { name = "worker " ^ record.id; level = Warn; message; recovery = [ recovery ] }
+        in
+        let running =
+          match Worker_lock.is_busy ~home ~record with
+          | Ok true -> Worker_lock.terminal ~home record
+          | Ok false | Error _ -> None
+        in
+        match running with
+        | None -> warn (state ^ " at " ^ record.path)
+        | Some _ when not rex_terminals -> None
+        | Some terminal -> (
+            let shown block state =
+              warn
+                (Printf.sprintf "running in the Monty service (%s), but its Rex terminal %s %s"
+                   (Worker_lock.describe_terminal terminal) block state)
+            in
+            match Rex.read_reference record.worker_dir with
+            | Error message -> warn message
+            | Ok None -> None
+            | Ok (Some reference) -> (
+                match Rex.liveness reference with
+                | Ok (Rex.Live _) -> None
+                | Ok (Rex.Exited _) -> shown reference.Rex.block_id "has exited"
+                | Ok Rex.Gone -> shown reference.Rex.block_id "no longer exists"
+                | Error message -> warn message))
       else None
 
 let duplicate_identity_checks records =
@@ -187,7 +209,7 @@ let swarm_checks ~home records =
   in
   orphans @ stale
 
-let state_checks ?(backend = Terminal.Rex) ~home ~wt_command () =
+let state_checks ?(backend = Terminal.Rex) ?(rex_terminals = false) ~home ~wt_command () =
   match Job_store.scan ~home with
   | Error message ->
       [
@@ -215,7 +237,7 @@ let state_checks ?(backend = Terminal.Rex) ~home ~wt_command () =
         |> List.filter_map (fun record ->
                match transition_check ~home ~wt_command ~backend record with
                | Some _ as check -> check
-               | None -> launch_state_check ~home record)
+               | None -> launch_state_check ~home ~rex_terminals record)
       in
       let identity_checks = duplicate_identity_checks scan.records in
       let swarm_checks = swarm_checks ~home scan.records in
@@ -304,7 +326,7 @@ let checks ?(find_command = Process.command_exists_with_arguments)
       check_command find_command ~required:false ~name:"sdef" ~command:"sdef"
         ~recovery:[ "Install sdef to inspect the Ghostty AppleScript dictionary." ];
     ]
-  @ state_checks ~backend ~home ~wt_command ()
+  @ state_checks ~backend ~rex_terminals:(backend = Terminal.Rex) ~home ~wt_command ()
 
 let width minimum values =
   List.fold_left (fun width value -> max width (String.length value)) minimum values

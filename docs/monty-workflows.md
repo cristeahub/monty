@@ -166,13 +166,22 @@ Terminology: a Rex session groups work and survives while no app views it; a Rex
 monty launch-many --terminal rex --manifest .monty/runs/<run-id>/jobs.json          # tabs in your session
 monty launch-many --terminal rex --target split --manifest .monty/runs/<run-id>/jobs.json
 monty launch-many --terminal rex --target window --manifest .monty/runs/<run-id>/jobs.json
-monty resume --terminal rex <worker-id>      # focuses a still-live Rex terminal, else opens a new tab
+monty resume --terminal rex <worker-id>      # focuses a still-live Rex terminal, else opens a new tab (attached to the worker if it still runs)
 monty rex status <worker-id>                 # recorded IDs, liveness and program status; read-only
 ```
 
 From outside Rex (a plain shell or a service-owned chat) `tab` follows the active Mantle profile. It lands in the session named by `monty settings set rex-session <session-id-or-label>` for that profile when one is set (resolved through `rex session inspect` on every launch, recorded by full ID, and refused in preflight when it is not live). Otherwise it lands in a session labelled after the profile, for example `work`: a live session the user already labelled that way, else one Monty creates and records under `.monty/rex-session.<profile>.json`, verified live before reuse. Without a Mantle profile the same applies with the label `monty` and `.monty/rex-session.json`. `rex-session` addresses the active profile and `rex-session.<profile>` any profile; an empty value clears it, and `monty doctor --terminal rex` reports whether the active profile's session resolves. `split` is refused in preflight, and `window` creates a session. Showing a session needs exactly one connected Rex app (or `REX_CLIENT`) with Remote Control enabled; otherwise preflight fails before any worker is reserved and names the fix.
 
-Each worker records `rex-terminal.json` (server, session, window, block, client, target, attempt) beside `job.json`; `job.json` never carries Rex IDs. A `rex` failure or garbled response after `launch-requested` keeps that state with the error; use the printed `monty resume` command only when another terminal request is intended, because the tab may already exist. Resume checks the recorded block: live means focus, exited or gone means a new tab for the same conversation, unreachable server means stop. Workers running inside Rex receive their own `REX_*` context through the service and may use the Rex agent guide (`rex skill show`) for their own tabs; label and ID conventions there do not identify Monty workers. Program status (OSC 7501) from a worker's terminal client mirrors only handoff outcome and exit; the harness's own root record says whether it is working (the owned terminal answers the harness's support probe when the display is Rex), and none of it completes a task.
+Each worker records `rex-terminal.json` (server, session, window, block, client, target, attempt) beside `job.json`; `job.json` never carries Rex IDs.
+A `rex` failure or garbled response after `launch-requested` keeps that state with the error; use the printed `monty resume` command only when another terminal request is intended, because the tab may already exist.
+Resume checks the recorded block: live means focus, exited or gone means a new tab for the same conversation, unreachable server means stop.
+Closing a worker's tab does not stop the worker: the Monty service owns its native program, keeps recording its output, and the program keeps the worker lock.
+Resume recognizes that holder as the worker's own terminal and needs no lock to show it again: a live block is focused, and an exited or gone one gets a new tab attached to the same running program and conversation, which first replays the retained output.
+`monty resume --fresh` is refused until that program exits.
+Any command that finds the worker lock held names the holder: the worker's interactive terminal with its harness, session and native PID (show it with `monty resume`, or exit it at its prompt), or otherwise a headless run or lifecycle operation.
+`monty doctor --terminal rex` warns when a running worker's recorded block has exited or is gone, with `monty resume` as the fix; a running worker in a live block needs no recovery and gets no warning.
+Workers running inside Rex receive their own `REX_*` context through the service and may use the Rex agent guide (`rex skill show`) for their own tabs; label and ID conventions there do not identify Monty workers.
+Program status (OSC 7501) from a worker's terminal client mirrors only handoff outcome and exit; the harness's own root record says whether it is working (the owned terminal answers the harness's support probe when the display is Rex), and none of it completes a task.
 
 ## Headless
 

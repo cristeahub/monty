@@ -30,6 +30,13 @@
  (action (run %{test} %{dep:../bin/main.exe} %{dep:../install.sh} %{dep:../.monty/version})))
 
 (test
+ (name test_worker_reattach)
+ (modules test_worker_reattach)
+ (libraries monty_test_support monty unix yojson base64 lwt.unix)
+ (deps ../bin/main.exe (source_tree ../agent-profiles) fake_claude_cli.exe (source_tree fake_claude_sdk))
+ (action (run %{test} %{dep:../bin/main.exe} %{dep:fake_claude_cli.exe})))
+
+(test
  (name test_rex)
  (modules test_rex)
  (libraries monty_test_support monty unix yojson)

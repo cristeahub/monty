@@ -185,7 +185,7 @@ let worker_locks t sess =
   match field "MONTY_JOB_ID" (field "environment" (field "context" sess)) with
   | `String id when id<>""->
       let record=get(Job_store.find ~home:t.home ~scope:Job_store.Active id) in
-      (match Worker_lock.with_lock ~home:t.home ~record(fun ()->Ok(Filename.concat (Filename.concat record.run_dir ".worker-locks") (record.id ^ ".lock"))) with
+      (match Worker_lock.with_lock ~home:t.home ~record(fun ()->Ok(Worker_lock.path record)) with
       | Ok path->[path]|Error message->fail 409 message)
   | _->[]
 let release_worker_fence t sid =
@@ -198,7 +198,7 @@ let codex_worker_fence t sess =
   | `Null->Lwt.return_unit
   | id ->
       let record=get(Job_store.find ~home:t.home ~scope:Job_store.Active (str id)) in
-      let key=Filename.concat (Filename.concat record.run_dir ".worker-locks") (record.id ^ ".lock") in
+      let key=Worker_lock.path record in
       (match Hashtbl.find_opt t.worker_fences key with
       | Some fence when fence.process#state=Lwt_process.Running ->
           if fence.session_id<>s "id" sess then fail 409 "worker is already owned by another native session; release its idle runtime first";
@@ -732,7 +732,7 @@ let terminal_start t cid sess request =
   let notify json =
     if s "type" json="terminal_closed" then locked t.home (fun () ->
       let c=load t.home cid in save t.home(update_session c
-        (puts ["terminal",`Bool false;"observed",`Bool false;"runtime",string "detached";
+        (puts ["terminal",`Bool false;"terminal_pid",`Null;"observed",`Bool false;"runtime",string "detached";
           "terminal_code",field "code" json] (session c sid))));
     event t (obj["conversation",string cid;"session",string sid;"type",string "terminal_changed"]) in
   let rows=if field "rows" request=`Null then 24 else i "rows" request and cols=if field "cols" request=`Null then 80 else i "cols" request in
@@ -745,6 +745,8 @@ let terminal_start t cid sess request =
   Lwt.catch (fun () ->
   locked t.home (fun () -> let c=load t.home cid in save t.home(update_session c
     (puts ["terminal",`Bool terminal.alive;"observed",`Bool terminal.alive;
+      (* Lock errors name this process; see Worker_lock.terminal. *)
+      "terminal_pid",(if terminal.alive then `Int terminal.pid else `Null);
       "runtime",string(if terminal.alive then "terminal" else "detached");"terminal_code",terminal.code] (session c sid))));
   let sess=session(load t.home cid) sid in
   capture_worker_session ~capture:true t sess;
@@ -802,8 +804,7 @@ let headless_start t id request =
     let path=Unix.realpath workspace.repo in
     if not(List.exists(fun root -> within(str root) path)(xs "roots" p)) then fail 403 "headless workspace is outside configured roots") record.job.workspaces;
   if Hashtbl.mem t.active_workers record.path then fail 409 "worker is busy with server-owned execution";
-  let worker_lock=get(Worker_lock.with_lock ~home:t.home ~record (fun ()->
-    Ok(Filename.concat (Filename.concat record.run_dir ".worker-locks") (record.id ^ ".lock")))) in
+  let worker_lock=get(Worker_lock.with_lock ~home:t.home ~record (fun ()->Ok(Worker_lock.path record))) in
   let resume=field "resume" request=`Bool true in
   let settings=get(Settings.load ~home:t.home) in
   let options=Launcher.{backend=Terminal.Dry_run;target=Terminal.Tab;harness;harness_command=command;
@@ -1243,7 +1244,7 @@ let serve ~home ~config_path ~port =
     locked home (fun () -> list home |> List.iter (fun c ->
       let changed=List.exists (fun sess -> field "observed" sess=`Bool true || field "terminal" sess=`Bool true || array "pending" sess<>[]) (xs "sessions" c) in
       if changed then save home (puts ["revision",`Int(i "revision" c+1);"sessions",`List (xs "sessions" c |> List.map (fun sess ->
-        puts ["observed",`Bool false;"pending",`List [];"runtime",string "disconnected";"terminal",`Bool false;
+        puts ["observed",`Bool false;"pending",`List [];"runtime",string "disconnected";"terminal",`Bool false;"terminal_pid",`Null;
           "terminal_code",(if field "terminal" sess=`Bool true then string "outcome_unknown" else field "terminal_code" sess)] sess))] c)));
     let t={home;config;clients=Hashtbl.create 8;connecting=Hashtbl.create 8;
       pi_clients=Hashtbl.create 8;claude_clients=Hashtbl.create 8;terminals=Hashtbl.create 8;executions=Hashtbl.create 8;supervisors=Hashtbl.create 8;active_workers=Hashtbl.create 8;codex_processes=Hashtbl.create 8;worker_fences=Hashtbl.create 8;commands=Lwt_mutex.create ();changed=Lwt_condition.create ();endpoints=Hashtbl.create 8;sequence=0;stopping=false;epoch=random_id ();events=[]} in
