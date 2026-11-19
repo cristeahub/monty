@@ -170,8 +170,7 @@ let session_live ?server session =
   | Error (Not_found _) -> Ok false
   | Error (Failed message) -> Error message
 
-(* A persisted `rex-session` setting names a session by ID or label; rex
-   resolves it, and Monty records only the full ID it reports. *)
+(* What the user typed for `rex-session`: a session ID, ID suffix or label. *)
 let validate_session_setting value =
   if value = "" then Ok ()
   else if String.length value > 1024
@@ -179,18 +178,42 @@ let validate_session_setting value =
   then Error "rex-session must be a Rex session ID or label without spaces"
   else Ok ()
 
-let resolve_session ?server ~endpoint setting =
-  match invoke_json ?server [ "session"; "inspect"; setting; "--json" ] with
+(* rex resolves a session ID, ID suffix or label to the session's full ID and its
+   current label; None means no live session matches. *)
+let inspect_session ?server target =
+  match invoke_json ?server [ "session"; "inspect"; target; "--json" ] with
   | Ok json -> (
       match string_member "session_id" json with
-      | Some session -> Ok session
-      | None -> Error (Printf.sprintf "rex session inspect %s reported no session ID" setting))
-  | Error (Not_found _) ->
-      Error
-        (Printf.sprintf
-           "the rex-session setting %s is not a live session on %s; point it at a session from `rex ls` with `monty settings set rex-session <session>` (for the active Mantle profile), or clear it with `monty settings set rex-session ''`"
-           setting endpoint)
+      | Some session -> Ok (Some (session, string_member "label" json))
+      | None -> Error (Printf.sprintf "rex session inspect %s reported no session ID" target))
+  | Error (Not_found _) -> Ok None
   | Error (Failed message) -> Error message
+
+(* Rex sessions are renamed freely (agents name their session after their task, as
+   `rex skill show` suggests), so the setting records the full ID that the user's
+   choice names now, and the label only to explain a later rename. *)
+let pin_session value =
+  let server = (context_of_env ()).server in
+  let* endpoint = endpoint ?server () in
+  let* found = inspect_session ?server value in
+  match found with
+  | Some (id, label) -> Ok { Settings.id; label }
+  | None ->
+      Error
+        (Printf.sprintf "no live Rex session matches %s on %s; pick one from `rex ls`" value endpoint)
+
+let missing_setting ~endpoint (setting : Settings.rex_session) =
+  Printf.sprintf
+    "the rex-session setting %s is not a live session on %s%s; point it at a session from `rex ls` with `monty settings set rex-session <session>` (for the active Mantle profile), or clear it with `monty settings set rex-session ''`"
+    (Settings.describe_rex_session setting) endpoint
+    (if Settings.rex_session_pinned setting then ""
+     else " (it names the session by label, which stops matching once the session is renamed)")
+
+let resolve_session ?server ~endpoint (setting : Settings.rex_session) =
+  let* found = inspect_session ?server setting.id in
+  match found with
+  | Some (session, _) -> Ok session
+  | None -> Error (missing_setting ~endpoint setting)
 
 (* A usable split anchor is a placed block; its window is recorded with the worker. *)
 let block_window ?server ~session block =

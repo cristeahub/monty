@@ -170,7 +170,17 @@ monty resume --terminal rex <worker-id>      # focuses a still-live Rex terminal
 monty rex status <worker-id>                 # recorded IDs, liveness and program status; read-only
 ```
 
-From outside Rex (a plain shell or a service-owned chat) `tab` follows the active Mantle profile. It lands in the session named by `monty settings set rex-session <session-id-or-label>` for that profile when one is set (resolved through `rex session inspect` on every launch, recorded by full ID, and refused in preflight when it is not live). Otherwise it lands in a session labelled after the profile, for example `work`: a live session the user already labelled that way, else one Monty creates and records under `.monty/rex-session.<profile>.json`, verified live before reuse. Without a Mantle profile the same applies with the label `monty` and `.monty/rex-session.json`. `rex-session` addresses the active profile and `rex-session.<profile>` any profile; an empty value clears it, and `monty doctor --terminal rex` reports whether the active profile's session resolves. `split` is refused in preflight, and `window` creates a session. Showing a session needs exactly one connected Rex app (or `REX_CLIENT`) with Remote Control enabled; otherwise preflight fails before any worker is reserved and names the fix.
+From outside Rex (a plain shell or a service-owned chat) `tab` follows the active Mantle profile.
+It lands in the session named by `monty settings set rex-session <session-id-or-label>` for that profile when one is set.
+Setting it asks Rex which live session the value names and pins that session's full ID, so a later rename does not move or break it; Rex sessions are renamed freely, for example by agents that name their session after their task as `rex skill show` suggests.
+Each launch checks the pinned session through `rex session inspect` and refuses in preflight once it is gone.
+A value saved before pinning still resolves by ID or label on every launch until it is set again.
+Otherwise it lands in a session labelled after the profile, for example `work`: a live session the user already labelled that way, else one Monty creates and records under `.monty/rex-session.<profile>.json`, verified live before reuse.
+Without a Mantle profile the same applies with the label `monty` and `.monty/rex-session.json`.
+`rex-session` addresses the active profile and `rex-session.<profile>` any profile; `monty settings get` prints the pinned ID, and an empty value clears it.
+`monty doctor --terminal rex` reports whether the active profile's session is live, says when Rex has renamed it since it was set, and asks to pin a value saved before pinning.
+`split` is refused in preflight, and `window` creates a session.
+Showing a session needs exactly one connected Rex app (or `REX_CLIENT`) with Remote Control enabled; otherwise preflight fails before any worker is reserved and names the fix.
 
 Each worker records `rex-terminal.json` (server, session, window, block, client, target, attempt) beside `job.json`; `job.json` never carries Rex IDs.
 A `rex` failure or garbled response after `launch-requested` keeps that state with the error; use the printed `monty resume` command only when another terminal request is intended, because the tab may already exist.

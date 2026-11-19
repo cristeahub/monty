@@ -288,18 +288,32 @@ let checks ?(find_command = Process.command_exists_with_arguments)
                   let profile = Mantle.profile Sys.getenv_opt in
                   let scope = match profile with Some p -> " for profile " ^ p | None -> "" in
                   let session =
+                    let check level message recovery = [ { name = "rex-session"; level; message; recovery } ] in
                     match Settings.load ~home with
                     | Ok settings -> (
                         match Settings.rex_session_for settings profile with
                         | Some setting -> (
-                            match Rex.resolve_session ?server ~endpoint setting with
-                            | Ok session ->
-                                [ { name = "rex-session"; level = Pass;
-                                    message = Printf.sprintf "%s (%s)%s" setting session scope; recovery = [] } ]
-                            | Error message ->
-                                [ { name = "rex-session"; level = Fail; message;
-                                    recovery =
-                                      [ "Run `rex ls`, then `monty settings set rex-session <session>` or clear it with `monty settings set rex-session ''`." ] } ])
+                            match Rex.inspect_session ?server setting.Settings.id with
+                            | Ok (Some (_, label)) when Settings.rex_session_pinned setting ->
+                                (* Pinned by ID, so a rename in Rex changes nothing but the name shown. *)
+                                let renamed =
+                                  match (setting.label, label) with
+                                  | Some chosen, Some current when chosen <> current ->
+                                      Printf.sprintf "; Rex has since renamed it %s" current
+                                  | _ -> ""
+                                in
+                                check Pass (Printf.sprintf "%s%s%s" (Settings.describe_rex_session setting) scope renamed) []
+                            | Ok (Some (session, _)) ->
+                                check Warn
+                                  (Printf.sprintf
+                                     "the rex-session setting %s%s finds %s by label or ID suffix, so renaming that session in Rex breaks it"
+                                     setting.id scope session)
+                                  [ Printf.sprintf "Pin it to that session's ID: monty settings set rex-session %s"
+                                      (Shell.quote setting.id) ]
+                            | Ok None ->
+                                check Fail (Rex.missing_setting ~endpoint setting)
+                                  [ "Run `rex ls`, then `monty settings set rex-session <session>` or clear it with `monty settings set rex-session ''`." ]
+                            | Error message -> check Fail message [])
                         | None -> [])
                     | Error _ -> []
                   in

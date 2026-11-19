@@ -174,8 +174,13 @@ let suite () = with_temp_dir ~prefix:"monty-rex-" (fun home ->
   check (replaced <> home_id && s "session_id" (reference worker) = replaced) "vanished home session was not replaced";
   equal "" (String.trim (cli [ "settings"; "get"; "rex-session" ])); require (cli [ "settings" ]) "rex-session   (monty-owned session)";
   require (cli ~code:1 [ "settings"; "set"; "rex-session"; "two words" ]) "without spaces";
-  equal "rex-session = caller outside any Mantle profile" (String.trim (cli [ "settings"; "set"; "rex-session"; "caller" ]));
-  equal "caller" (String.trim (cli [ "settings"; "get"; "rex-session" ])); require (cli [ "settings" ]) "rex-session   caller";
+  (* A label is pinned to the session it names now. *)
+  let pinned = "caller (" ^ caller_session ^ ")" in
+  equal ("rex-session = " ^ pinned ^ " outside any Mantle profile") (String.trim (cli [ "settings"; "set"; "rex-session"; "caller" ]));
+  (* The ID stays the plain string older versions read; the label sits beside it. *)
+  let persisted = json (home / ".monty/settings.json") in
+  equal (string caller_session) (field "rex_session" persisted); equal (string "caller") (field "rex_session_label" persisted);
+  equal caller_session (String.trim (cli [ "settings"; "get"; "rex-session" ])); require (cli [ "settings" ]) ("rex-session   " ^ pinned);
   let doctor = cli doctor_args in check (doctor_line "PASS" "rex-session" doctor) doctor; require doctor ("caller (" ^ caller_session ^ ")");
   let news = List.length (named "new") in
   let path, worker = manifest "setting-session" in ignore (launch path);
@@ -185,9 +190,40 @@ let suite () = with_temp_dir ~prefix:"monty-rex-" (fun home ->
   equal caller_session (s "session" (List.assoc (s "block_id" ref_) (Fake_rex.entries "blocks" (state ()))));
   ignore (cli [ "settings"; "set"; "rex-session"; caller_session ]);
   let path, worker = manifest "setting-session-id" in ignore (launch path); equal caller_session (s "session_id" (reference worker));
-  ignore (cli [ "settings"; "set"; "rex-session"; "no-such-session" ]);
+  let settings_before = read (home / ".monty/settings.json") in
+  require (cli ~code:1 [ "settings"; "set"; "rex-session"; "no-such-session" ]) "no live Rex session matches no-such-session";
+  require (cli ~code:1 ~extra:[ "REX_FAKE_DOWN", "1" ] [ "settings"; "set"; "rex-session"; "caller" ]) "Open the Rex app";
+  equal settings_before (read (home / ".monty/settings.json"));
+  let rename session label =
+    let state_ = state () in
+    let entry = Fake_rex.put "label" (string label) (List.assoc session (Fake_rex.entries "sessions" state_)) in
+    save (Fake_rex.put "sessions" (Fake_rex.put session entry (field "sessions" state_)) state_) in
+  (* Rex renames sessions freely; the pinned ID keeps working and doctor explains the drift. *)
+  let drifting = s "session_id" (seed "hyre") in
+  require (cli [ "settings"; "set"; "rex-session"; "hyre" ]) ("rex-session = hyre (" ^ drifting ^ ")");
+  rename drifting "update-wow-addons";
+  let path, worker = manifest "setting-renamed" in ignore (launch path); equal drifting (s "session_id" (reference worker));
+  let doctor = cli doctor_args in check (doctor_line "PASS" "rex-session" doctor) doctor;
+  require doctor ("hyre (" ^ drifting ^ "); Rex has since renamed it update-wow-addons");
+  (* A setting saved before pinning still resolves by label, and doctor asks to pin it. *)
+  let legacy value =
+    let settings = json (home / ".monty/settings.json") in
+    let settings = Fake_rex.put "rex_session" (string value) settings |> Fake_rex.put "rex_session_label" `Null in
+    write (home / ".monty/settings.json") (Yojson.Safe.to_string settings) in
+  legacy "update-wow-addons";
+  let doctor = cli doctor_args in check (doctor_line "WARN" "rex-session" doctor) doctor;
+  require doctor "monty settings set rex-session 'update-wow-addons'";
+  let path, worker = manifest "setting-legacy" in ignore (launch path); equal drifting (s "session_id" (reference worker));
+  rename drifting "audit-claude-processes";
+  check (doctor_line "FAIL" "rex-session" (cli ~code:1 doctor_args)) "renamed legacy session doctor";
+  reject_launch ~target:"tab" ~needles:[ "stops matching once the session is renamed"; "set rex-session ''" ]
+    "setting-legacy-renamed" noisy "rex-session setting update-wow-addons is not a live session";
+  let doomed = s "session_id" (seed "doomed") in
+  ignore (cli [ "settings"; "set"; "rex-session"; "doomed" ]);
+  save (Fake_rex.put "sessions" (obj (List.remove_assoc doomed (Fake_rex.entries "sessions" (state ())))) (state ()));
   check (doctor_line "FAIL" "rex-session" (cli ~code:1 doctor_args)) "dead configured session doctor";
-  reject_launch ~target:"tab" ~needles:[ "set rex-session ''" ] "setting-missing" noisy "rex-session setting no-such-session is not a live session";
+  reject_launch ~target:"tab" ~needles:[ "set rex-session ''" ] "setting-missing" noisy
+    ("rex-session setting doomed (" ^ doomed ^ ") is not a live session");
   let before = mutations () in
   let path, worker = manifest "setting-inside" in ignore (launch ~extra:inside path);
   equal caller_session (s "session_id" (reference worker)); equal (before + 1) (mutations ());
@@ -214,12 +250,15 @@ let suite () = with_temp_dir ~prefix:"monty-rex-" (fun home ->
   equal news (List.length (named "new")); equal users_work (s "session_id" (reference worker));
   let path, worker = manifest "profile-off" in ignore (launch path);
   equal (s "session_id" (json (home / ".monty/rex-session.json"))) (s "session_id" (reference worker));
-  require (cli ~extra:work [ "settings"; "set"; "rex-session"; "caller" ]) "rex-session = caller for Mantle profile work";
+  require (cli ~extra:work [ "settings"; "set"; "rex-session"; "caller" ]) ("rex-session = " ^ pinned ^ " for Mantle profile work");
   let persisted = json (home / ".monty/settings.json") in
-  equal (obj [ "work", string "caller" ]) (field "rex_sessions" persisted); equal `Null (required "rex_session" persisted);
-  equal "caller" (String.trim (cli ~extra:work [ "settings"; "get"; "rex-session" ]));
-  equal "" (String.trim (cli [ "settings"; "get"; "rex-session" ])); equal "caller" (String.trim (cli [ "settings"; "get"; "rex-session.work" ]));
-  let shown = cli ~extra:work [ "settings" ] in List.iter (require shown) [ "rex-session   caller (profile work)"; "rex-session.work caller" ];
+  equal (obj [ "work", string caller_session ]) (field "rex_sessions" persisted);
+  equal (obj [ "work", string "caller" ]) (field "rex_session_labels" persisted);
+  equal `Null (required "rex_session" persisted);
+  equal caller_session (String.trim (cli ~extra:work [ "settings"; "get"; "rex-session" ]));
+  equal "" (String.trim (cli [ "settings"; "get"; "rex-session" ])); equal caller_session (String.trim (cli [ "settings"; "get"; "rex-session.work" ]));
+  let shown = cli ~extra:work [ "settings" ] in
+  List.iter (require shown) [ "rex-session   " ^ pinned ^ ", profile work"; "rex-session.work " ^ pinned ];
   require (cli ~code:1 [ "settings"; "get"; "rex-session.bad.name" ]) "not a Mantle profile name";
   let path, worker = manifest "profile-mapped" in ignore (launch ~extra:work path); equal caller_session (s "session_id" (reference worker));
   let doctor = cli ~extra:work doctor_args in check (doctor_line "PASS" "rex-session" doctor) doctor;

@@ -1076,7 +1076,9 @@ let settings_get key home =
           match rex_session_profile key with
           | Error message -> exit_code (Error message)
           | Ok profile ->
-              Fmt.pr "%s\n" (Option.value ~default:"" (Settings.rex_session_for settings profile));
+              Fmt.pr "%s\n"
+                (Option.fold ~none:"" ~some:(fun session -> session.Settings.id)
+                   (Settings.rex_session_for settings profile));
               0)
       | _ -> exit_code (Error (Printf.sprintf "unknown setting %S" key)))
  in
@@ -1129,21 +1131,26 @@ let settings_set key value home =
       match rex_session_profile key with
       | Error message -> exit_code (Error message)
       | Ok profile -> (
-          match Rex.validate_session_setting value with
-          | Error message -> exit_code (Error message)
-          | Ok () ->
-              let scope =
-                match profile with
-                | Some profile -> " for Mantle profile " ^ profile
-                | None -> " outside any Mantle profile"
-              in
-              Settings.set_rex_session ~home ~profile value
-              |> Result.map (fun () ->
-                     if value = "" then
-                       Fmt.pr "rex-session cleared%s; tabs from outside Rex use the session Monty owns%s\n" scope
-                         (match profile with Some p -> " (labelled " ^ p ^ ")" | None -> " (labelled monty)")
-                     else Fmt.pr "rex-session = %s%s\n" value scope)
-              |> exit_code))
+          let scope =
+            match profile with
+            | Some profile -> " for Mantle profile " ^ profile
+            | None -> " outside any Mantle profile"
+          in
+          let result =
+            let ( let* ) = Result.bind in
+            let* () = Rex.validate_session_setting value in
+            if value = "" then
+              let* () = Settings.set_rex_session ~home ~profile None in
+              Ok
+                (Fmt.pr "rex-session cleared%s; tabs from outside Rex use the session Monty owns%s\n" scope
+                   (match profile with Some p -> " (labelled " ^ p ^ ")" | None -> " (labelled monty)"))
+            else
+              (* Asks Rex outside the one-home lock, then records the session it named. *)
+              let* session = Rex.pin_session value in
+              let* () = Settings.set_rex_session ~home ~profile (Some session) in
+              Ok (Fmt.pr "rex-session = %s%s\n" (Settings.describe_rex_session session) scope)
+          in
+          exit_code result))
   | _ -> exit_code (Error (Printf.sprintf "unknown setting %S" key))
  in
 let settings_set_term =

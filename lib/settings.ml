@@ -1,11 +1,27 @@
+(* The Rex session that tabs requested outside Rex land in. id is the full session
+   ID that the user's choice named when it was set, so a later rename in Rex does
+   not move or break it; label is what Rex called the session then. A setting
+   saved before sessions were pinned keeps the user's raw value as id, which Rex
+   resolves by ID, ID suffix or label on every launch; only a full ID is pinned.
+   On disk the id stays the plain string older Monty versions read, and the label
+   sits beside it in a field they ignore. *)
+type rex_session = { id : string; label : string option }
+
+let rex_session_pinned session = String.starts_with ~prefix:"session:" session.id
+
+let describe_rex_session session =
+  match session.label with
+  | Some label when label <> "" && label <> session.id -> Printf.sprintf "%s (%s)" label session.id
+  | _ -> session.id
+
 type t = {
   harness : Harness.t option;
   codex_yolo : bool;
   branch_prefix : string option;
   agent_profile : string option;
   terminal : Terminal.backend option;
-  rex_session : string option;  (* Rex session for tabs requested outside Rex, no Mantle profile *)
-  rex_sessions : (string * string) list;  (* the same per Mantle profile *)
+  rex_session : rex_session option;  (* Rex session for tabs requested outside Rex, no Mantle profile *)
+  rex_sessions : (string * rex_session) list;  (* the same per Mantle profile *)
 }
 
 let empty =
@@ -56,12 +72,19 @@ let parse json =
           |> Result.map Option.some
       | _ -> Error "settings field \"terminal\" must be a string"
     in
+    let rex_session_of name value label =
+      match (value, label) with
+      | `Null, _ -> Ok None
+      | `String value, _ when String.trim value = "" -> Ok None
+      | `String id, ((`String _ | `Null) as label) ->
+          (* A label explains only a pinned ID; beside a legacy value it is stale. *)
+          let label = if String.starts_with ~prefix:"session:" id then to_string_option label else None in
+          Ok (Some { id; label })
+      | `String _, _ -> Error (Printf.sprintf "the label of settings field %S must be a string" name)
+      | _ -> Error (Printf.sprintf "settings field %S must be a string" name)
+    in
     let* rex_session =
-      match member "rex_session" json with
-      | `Null -> Ok None
-      | `String value when String.trim value = "" -> Ok None
-      | `String value -> Ok (Some value)
-      | _ -> Error "settings field \"rex_session\" must be a string"
+      rex_session_of "rex_session" (member "rex_session" json) (member "rex_session_label" json)
     in
     let* rex_sessions =
       match member "rex_sessions" json with
@@ -71,10 +94,9 @@ let parse json =
             (fun acc (profile, value) ->
               let* acc = acc in
               let* profile = Mantle.valid_name profile in
-              match value with
-              | `String value when String.trim value <> "" -> Ok (acc @ [ (profile, value) ])
-              | `String _ | `Null -> Ok acc
-              | _ -> Error (Printf.sprintf "settings field \"rex_sessions.%s\" must be a string" profile))
+              let label = match member "rex_session_labels" json with `Assoc _ as labels -> member profile labels | _ -> `Null in
+              let* session = rex_session_of ("rex_sessions." ^ profile) value label in
+              Ok (match session with Some session -> acc @ [ (profile, session) ] | None -> acc))
             (Ok []) entries
       | _ -> Error "settings field \"rex_sessions\" must be an object"
     in
@@ -128,9 +150,18 @@ let to_json settings =
       ( "rex_session",
         match settings.rex_session with
         | None -> `Null
-        | Some rex_session -> `String rex_session );
+        | Some rex_session -> `String rex_session.id );
+      ( "rex_session_label",
+        match Option.bind settings.rex_session (fun session -> session.label) with
+        | None -> `Null
+        | Some label -> `String label );
       ( "rex_sessions",
-        `Assoc (List.map (fun (profile, session) -> (profile, `String session)) settings.rex_sessions) ) ]
+        `Assoc (List.map (fun (profile, session) -> (profile, `String session.id)) settings.rex_sessions) );
+      ( "rex_session_labels",
+        `Assoc
+          (List.filter_map
+             (fun (profile, session) -> Option.map (fun label -> (profile, `String label)) session.label)
+             settings.rex_sessions) ) ]
 
 let update ~home transform =
   State_store.with_lock ~home (fun () ->
@@ -213,10 +244,9 @@ let rex_session_for settings profile =
   | Some profile -> List.assoc_opt profile settings.rex_sessions
   | None -> settings.rex_session
 
-(* An empty value clears the entry, which returns that profile's tabs to the
-   session Monty owns for it. *)
+(* None clears the entry, which returns that profile's tabs to the session Monty
+   owns for it. *)
 let set_rex_session ~home ~profile value =
-  let value = match String.trim value with "" -> None | value -> Some value in
   update ~home (fun settings ->
       match profile with
       | None -> { settings with rex_session = value }
@@ -240,8 +270,8 @@ let render ?profile settings =
   in
   let rex_session =
     match rex_session_for settings profile, profile with
-    | Some session, Some profile -> Printf.sprintf "%s (profile %s)" session profile
-    | Some session, None -> session
+    | Some session, Some profile -> Printf.sprintf "%s, profile %s" (describe_rex_session session) profile
+    | Some session, None -> describe_rex_session session
     | None, Some profile -> Printf.sprintf "(session labelled %s, profile %s)" profile profile
     | None, None -> "(monty-owned session)"
   in
@@ -258,5 +288,6 @@ let render ?profile settings =
       ^ Terminal.backend_to_string
           (Option.value ~default:Terminal.Rex settings.terminal);
       "rex-session   " ^ rex_session ]
-    @ List.map (fun (profile, session) -> "rex-session." ^ profile ^ " " ^ session) settings.rex_sessions)
+    @ List.map (fun (profile, session) -> "rex-session." ^ profile ^ " " ^ describe_rex_session session)
+        settings.rex_sessions)
   ^ "\n"
