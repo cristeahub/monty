@@ -10,7 +10,9 @@ let bin=
   let candidates=(if Array.length Sys.argv>1 && not(String.starts_with ~prefix:"-" Sys.argv.(1))then[Sys.argv.(1)]else[])@
     [Filename.dirname Sys.executable_name / "../bin/main.exe";"../bin/main.exe";Sys.executable_name]in
   List.find Sys.file_exists candidates |>Unix.realpath
+(* Tests may run inside a Monty worker session; its identity must not reach the fixtures. *)
 let env=Unix.environment() |>Array.to_list |>List.map(fun value->let at=String.index value '='in String.sub value 0 at,String.sub value(at+1)(String.length value-at-1))
+  |>List.filter(fun(key,_)->not(String.starts_with ~prefix:"MONTY_"key))
 let merge_env base overrides=overrides@List.filter(fun(key,_)->not(List.mem_assoc key overrides))base
 let mkdir=Monty.Shell.ensure_dir
 let read=Monty.Shell.read_file
@@ -22,9 +24,14 @@ let rec remove_tree path=match Unix.lstat path with
 let rec copy_tree source destination=match(Unix.lstat source).Unix.st_kind with
   | Unix.S_DIR->mkdir destination;Sys.readdir source |>Array.iter(fun name->copy_tree(source/name)(destination/name))
   | _->write destination(read source);Unix.chmod destination(Unix.stat source).Unix.st_perm
+(* A process the fixture started can finish writing just after the test returns, such
+   as Python filling its bytecode cache under the fixture HOME; removal retries briefly. *)
+let rec remove_settled ?(attempts=40) path=
+  try remove_tree path with Unix.Unix_error(Unix.ENOTEMPTY,_,_) when attempts>0->
+    Unix.sleepf 0.05;remove_settled ~attempts:(attempts-1) path
 let with_temp_dir ?(prefix="monty-ocaml-") run=
   let path=Filename.temp_file ~temp_dir:"/tmp" prefix ".tmp"in Unix.unlink path;Unix.mkdir path 0o700;
-  let path=Unix.realpath path in Fun.protect ~finally:(fun()->remove_tree path)(fun()->run path)
+  let path=Unix.realpath path in Fun.protect ~finally:(fun()->remove_settled path)(fun()->run path)
 let pause seconds=Lwt_main.run(Lwt_unix.sleep seconds)
 let until ?(seconds=12.) ~predicate fn=
   let deadline=Unix.gettimeofday()+.seconds in

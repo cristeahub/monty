@@ -240,8 +240,13 @@ let terminal_profiles_suite home=
   let environment=merge_env service.env["MONTY_CODEX_COMMAND",codex]in
   let work_env=merge_env environment["CODEX_HOME",work;"MANTLE_CONTEXT","work";"_MANTLE_SELECTED_HOME",work;"_MANTLE_PREV_STATE","export";"_MANTLE_PREV_HOME",personal]in
   let launch ?(env=environment) args=cli ~cwd:repo ~env ~timeout:25.(args@["--home";home])in
-  let attached result account=
-    ok result;let recorded=json_file(terminal_log home)in let args=xs"args"recorded |>List.map str in
+  (* The native program records its launch from the service PTY after monty terminal
+     returns, so each launch waits for its own record rather than reading the last one. *)
+  let attached launch_terminal account=
+    (try Unix.unlink(terminal_log home)with Unix.Unix_error(Unix.ENOENT,_,_)->());
+    ok(launch_terminal());
+    let recorded=until_json((<>)`Null)(fun()->try json_file(terminal_log home)with _->`Null)in
+    let args=xs"args"recorded |>List.map str in
     equal(s"account"recorded)account;
     check(List.filteri(fun index _->index<2)args=["resume";"--remote"]&&String.starts_with ~prefix:"unix://"(nth args 2)&&not(List.mem(nth args 2)(List.map(fun(_,socket)->"unix://"^socket)sockets)))"terminal attached shared socket";
     check(Sys.file_exists(account/"skills/monty/SKILL.md"))"account skill missing";List.hd(List.rev args)in
@@ -252,22 +257,22 @@ let terminal_profiles_suite home=
   let terminal=["terminal";"--codex-command";codex]in
   Fun.protect ~finally:(fun()->Service.close service;List.iter Native.close servers)(fun()->
     ok(cli ~env:environment["settings";"set";"harness";"codex";"--home";home]);
-    let personal_id=attached(launch[])personal and work_id=attached(launch ~env:work_env[])work in
-    equal personal_id work_id;ignore(attached(launch ~env:work_env["continue";work_id])work);ignore(attached(launch["continue";personal_id])personal);
+    let personal_id=attached(fun()->launch[])personal and work_id=attached(fun()->launch ~env:work_env[])work in
+    equal personal_id work_id;ignore(attached(fun()->launch ~env:work_env["continue";work_id])work);ignore(attached(fun()->launch["continue";personal_id])personal);
     equal(List.map(fun server->Hashtbl.length server.Native.threads)servers)[1;1];
     let shell_home=home/"shell"in mkdir shell_home;Unix.symlink personal(shell_home/".codex");
-    ignore(attached(launch ~env:(merge_env(remove_env environment"CODEX_HOME")["HOME",shell_home])[])personal);
+    ignore(attached(fun()->launch ~env:(merge_env(remove_env environment"CODEX_HOME")["HOME",shell_home])[])personal);
     let alias=home/"work-alias"in Unix.symlink work alias;
-    ignore(attached(launch ~env:(merge_env work_env["CODEX_HOME",alias])terminal)work);
+    ignore(attached(fun()->launch ~env:(merge_env work_env["CODEX_HOME",alias])terminal)work);
     rejected(terminal@["--profile";"default"])work_env"terminal account scope does not match";
     rejected[](merge_env work_env["MONTY_API_PROFILE","default"])"terminal account scope does not match";
     rejected(terminal@["--profile";"missing"])work_env"terminal account scope does not match";
-    ignore(attached(launch ~env:(merge_env work_env["MONTY_API_PROFILE","default"])(terminal@["--profile";"company"]))work);
+    ignore(attached(fun()->launch ~env:(merge_env work_env["MONTY_API_PROFILE","default"])(terminal@["--profile";"company"]))work);
     let unknown=home/"unknown"in mkdir unknown;rejected[](merge_env work_env["CODEX_HOME",unknown])"no service profile matches";
     check(not(Sys.file_exists(home/".monty/tasks.local.json")))"account switching created task";
     Service.stop service;profiles:= !profiles@[put"id"(string"company-alias")(nth !profiles 1)];save_config();Service.start service;
     rejected[]work_env"multiple service profiles match";
-    ignore(attached(launch ~env:(merge_env work_env["MONTY_API_PROFILE","company"])terminal)work);
+    ignore(attached(fun()->launch ~env:(merge_env work_env["MONTY_API_PROFILE","company"])terminal)work);
     print_endline"terminal account scope, Mantle switching, home aliases and explicit profile selection passed")
 
 let warm_archive_suite home=
